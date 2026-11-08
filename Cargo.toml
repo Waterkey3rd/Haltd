@@ -11,6 +11,8 @@ members = [
     "crates/tsdb",
     "crates/sampler",
     "crates/rtt",
+    "bins/jlinkd",
+    "bins/jlbench",
 ]
 
 [workspace.package]

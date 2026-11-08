@@ -1,0 +1,19 @@
+[package]
+name = "jlbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+probe-api.workspace = true
+probe-jlink.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+symbols.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+probe-mock.workspace = true
