@@ -4,6 +4,7 @@ members = [
     "crates/probe-api",
     "crates/probe-jlink",
     "crates/probe-mock",
+    "crates/symbols",
 ]
 
 [workspace.package]
@@ -16,6 +17,7 @@ license = "MIT OR Apache-2.0"
 probe-api = { path = "crates/probe-api" }
 probe-jlink = { path = "crates/probe-jlink" }
 probe-mock = { path = "crates/probe-mock" }
+symbols = { path = "crates/symbols" }
 
 anyhow = "1"
 bincode = "1.3"
