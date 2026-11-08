@@ -5,6 +5,7 @@ members = [
     "crates/probe-jlink",
     "crates/probe-mock",
     "crates/symbols",
+    "crates/visualizer",
 ]
 
 [workspace.package]
@@ -18,6 +19,7 @@ probe-api = { path = "crates/probe-api" }
 probe-jlink = { path = "crates/probe-jlink" }
 probe-mock = { path = "crates/probe-mock" }
 symbols = { path = "crates/symbols" }
+visualizer = { path = "crates/visualizer" }
 
 anyhow = "1"
 bincode = "1.3"
