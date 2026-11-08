@@ -1,0 +1,312 @@
+{
+  "name": "jlinkd",
+  "displayName": "jlinkd",
+  "description": "STM32 debugging through a long-running J-Link backend",
+  "version": "0.3.3",
+  "publisher": "jlinkd",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onDebugResolve:jlinkd"
+  ],
+  "contributes": {
+    "breakpoints": [
+      {
+        "language": "c"
+      },
+      {
+        "language": "cpp"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "jlinkd",
+        "label": "J-Link (jlinkd)",
+        "languages": [
+          "c",
+          "cpp"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "device",
+              "elf"
+            ],
+            "properties": {
+              "device": {
+                "type": "string",
+                "description": "J-Link device name, such as STM32H723VG."
+              },
+              "interface": {
+                "type": "string",
+                "enum": [
+                  "SWD",
+                  "JTAG"
+                ],
+                "default": "SWD"
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "default": 4000,
+                "description": "Interface clock in kHz, or \"auto\"."
+              },
+              "elf": {
+                "type": "string",
+                "default": "${workspaceFolder}/build/firmware.elf"
+              },
+              "flash": {
+                "type": "string",
+                "enum": [
+                  "always",
+                  "changed",
+                  "never"
+                ],
+                "default": "changed"
+              },
+              "runToMain": {
+                "type": "boolean",
+                "default": false
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false
+              },
+              "project": {
+                "type": "string",
+                "default": "${workspaceFolder}/.jlinkd/project.yaml"
+              }
+            }
+          },
+          "attach": {
+            "required": [
+              "device",
+              "elf"
+            ],
+            "properties": {
+              "device": {
+                "type": "string"
+              },
+              "interface": {
+                "type": "string",
+                "enum": [
+                  "SWD",
+                  "JTAG"
+                ],
+                "default": "SWD"
+              },
+              "speed": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "default": 4000
+              },
+              "elf": {
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "jlinkd",
+            "request": "launch",
+            "name": "Debug (J-Link)",
+            "device": "STM32H723VG",
+            "interface": "SWD",
+            "speed": 4000,
+            "elf": "${workspaceFolder}/build/firmware.elf",
+            "flash": "changed"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "jlinkd.buildAndReload",
+        "title": "jlinkd: Build & Reload"
+      },
+      {
+        "command": "jlinkd.addToWatch",
+        "title": "Add to Live Watch",
+        "icon": "$(add)"
+      },
+      {
+        "command": "jlinkd.addToTimeline",
+        "title": "Add to Timeline (HSS)"
+      },
+      {
+        "command": "jlinkd.removeWatch",
+        "title": "Remove",
+        "icon": "$(close)"
+      },
+      {
+        "command": "jlinkd.setWatchRate",
+        "title": "Set Refresh Rate (0-5 Hz)",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "jlinkd.writeWatch",
+        "title": "Set Value",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jlinkd.openTimeline",
+        "title": "jlinkd: Open Timeline",
+        "icon": "$(graph-line)"
+      },
+      {
+        "command": "jlinkd.openTimelineInBrowser",
+        "title": "jlinkd: Open Timeline in Browser"
+      },
+      {
+        "command": "jlinkd.startRecording",
+        "title": "jlinkd: Start/Stop Recording"
+      },
+      {
+        "command": "jlinkd.showStats",
+        "title": "jlinkd: Show Statistics"
+      },
+      {
+        "command": "jlinkd.openRttTerminal",
+        "title": "jlinkd: Open RTT Terminal",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "jlinkd.openRttPanel",
+        "title": "jlinkd: Open RTT Signals"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "jlinkd.buildAndReload",
+        "key": "f6",
+        "when": "debugType == jlinkd"
+      }
+    ],
+    "configuration": {
+      "title": "jlinkd",
+      "properties": {
+        "jlinkd.path": {
+          "type": "string",
+          "default": "jlinkd",
+          "description": "Path of the jlinkd executable."
+        },
+        "jlinkd.replaceWatchView": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hide the built-in Watch view during jlinkd sessions, since Add to Watch goes to Live Watch instead."
+        }
+      }
+    },
+    "views": {
+      "debug": [
+        {
+          "id": "jlinkd.liveWatch",
+          "name": "Live Watch",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "jlinkd.addToTimeline",
+          "when": "inDebugMode && debugType == jlinkd",
+          "group": "debug@11"
+        }
+      ],
+      "debug/variables/context": [
+        {
+          "command": "jlinkd.addToTimeline",
+          "when": "debugType == jlinkd",
+          "group": "z_jlinkd@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "jlinkd.addToWatch",
+          "when": "view == jlinkd.liveWatch",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jlinkd.openTimeline",
+          "when": "view == jlinkd.liveWatch",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jlinkd.openRttTerminal",
+          "when": "view == jlinkd.liveWatch",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "jlinkd.setWatchRate",
+          "when": "view == jlinkd.liveWatch",
+          "group": "inline@0"
+        },
+        {
+          "command": "jlinkd.writeWatch",
+          "when": "view == jlinkd.liveWatch && viewItem == watchWritable",
+          "group": "inline@1"
+        },
+        {
+          "command": "jlinkd.removeWatch",
+          "when": "view == jlinkd.liveWatch && !listMultiSelection",
+          "group": "inline@2"
+        },
+        {
+          "command": "jlinkd.addToTimeline",
+          "when": "view == jlinkd.liveWatch",
+          "group": "1_jlinkd@1"
+        },
+        {
+          "command": "jlinkd.setWatchRate",
+          "when": "view == jlinkd.liveWatch",
+          "group": "1_jlinkd@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "jlinkd.removeWatch",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.setWatchRate",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.writeWatch",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --external:bufferutil --external:utf-8-validate --outfile=dist/extension.js --sourcemap",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.90.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0",
+    "@types/ws": "^8.5.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
