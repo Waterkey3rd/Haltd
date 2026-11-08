@@ -9,6 +9,7 @@ members = [
     "crates/visualizer",
     "crates/tsdb",
     "crates/sampler",
+    "crates/rtt",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ engine = { path = "crates/engine" }
 visualizer = { path = "crates/visualizer" }
 tsdb = { path = "crates/tsdb" }
 sampler = { path = "crates/sampler" }
+rtt = { path = "crates/rtt" }
 
 anyhow = "1"
 bincode = "1.3"
