@@ -1,0 +1,52 @@
+# STM32H72x/H73x debug configuration.
+# Register addresses and bit positions come from ST's stm32h723xx.h (RM0468).
+family: stm32h7
+
+memory:
+  - { name: ITCM,  start: 0x00000000, size: 0x00010000, kind: ram }
+  - { name: FLASH, start: 0x08000000, size: 0x00100000, kind: flash }
+  - { name: DTCM,  start: 0x20000000, size: 0x00020000, kind: ram }
+  - { name: RAM_D1, start: 0x24000000, size: 0x00050000, kind: ram }
+  - { name: RAM_D2, start: 0x30000000, size: 0x00008000, kind: ram }
+  - { name: RAM_D3, start: 0x38000000, size: 0x00004000, kind: ram }
+
+flashSectorSize: 0x20000
+
+# Applied once after connecting, each as a read-modify-write.
+postConnect:
+  # DBGMCU_CR: DBG_SLEEPD1 | DBG_STOPD1 | DBG_STANDBYD1 | DBG_STOPD3 |
+  #            DBG_STANDBYD3 | DBG_CKD1EN | DBG_CKD3EN
+  # Keeps the debug port alive while the core sleeps in WFI.
+  - { name: DBGMCU_CR, addr: 0x5C001004, set: 0x00600187 }
+
+# Peripherals that can be frozen while the core is halted (debug.freezeOnHalt).
+freeze:
+  wwdg1:  { addr: 0x5C001034, bit: 6 }
+  tim2:   { addr: 0x5C00103C, bit: 0 }
+  tim3:   { addr: 0x5C00103C, bit: 1 }
+  tim4:   { addr: 0x5C00103C, bit: 2 }
+  tim5:   { addr: 0x5C00103C, bit: 3 }
+  tim6:   { addr: 0x5C00103C, bit: 4 }
+  tim7:   { addr: 0x5C00103C, bit: 5 }
+  tim12:  { addr: 0x5C00103C, bit: 6 }
+  tim13:  { addr: 0x5C00103C, bit: 7 }
+  tim14:  { addr: 0x5C00103C, bit: 8 }
+  lptim1: { addr: 0x5C00103C, bit: 9 }
+  i2c1:   { addr: 0x5C00103C, bit: 21 }
+  i2c2:   { addr: 0x5C00103C, bit: 22 }
+  i2c3:   { addr: 0x5C00103C, bit: 23 }
+  i2c5:   { addr: 0x5C00103C, bit: 25 }
+  tim23:  { addr: 0x5C001044, bit: 24 }
+  tim24:  { addr: 0x5C001044, bit: 25 }
+  tim1:   { addr: 0x5C00104C, bit: 0 }
+  tim8:   { addr: 0x5C00104C, bit: 1 }
+  tim15:  { addr: 0x5C00104C, bit: 16 }
+  tim16:  { addr: 0x5C00104C, bit: 17 }
+  tim17:  { addr: 0x5C00104C, bit: 18 }
+  i2c4:   { addr: 0x5C001054, bit: 7 }
+  lptim2: { addr: 0x5C001054, bit: 9 }
+  lptim3: { addr: 0x5C001054, bit: 10 }
+  lptim4: { addr: 0x5C001054, bit: 11 }
+  lptim5: { addr: 0x5C001054, bit: 12 }
+  rtc:    { addr: 0x5C001054, bit: 16 }
+  iwdg1:  { addr: 0x5C001054, bit: 18 }
