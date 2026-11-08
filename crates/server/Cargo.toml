@@ -1,0 +1,22 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine.workspace = true
+probe-api.workspace = true
+probe-jlink.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+symbols.workspace = true
+tracing.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+rust-embed.workspace = true
+sampler.workspace = true
+rtt.workspace = true
+tokio.workspace = true
+tsdb.workspace = true
