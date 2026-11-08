@@ -7,6 +7,8 @@ members = [
     "crates/symbols",
     "crates/engine",
     "crates/visualizer",
+    "crates/tsdb",
+    "crates/sampler",
 ]
 
 [workspace.package]
@@ -22,6 +24,8 @@ probe-mock = { path = "crates/probe-mock" }
 symbols = { path = "crates/symbols" }
 engine = { path = "crates/engine" }
 visualizer = { path = "crates/visualizer" }
+tsdb = { path = "crates/tsdb" }
+sampler = { path = "crates/sampler" }
 
 anyhow = "1"
 bincode = "1.3"
