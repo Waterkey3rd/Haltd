@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>jlinkd Timeline</title>
+  </head>
+  <body>
+    <header id="toolbar">
+      <form id="add">
+        <input id="expr" placeholder="Add expression, e.g. g_state.gain" autocomplete="off" spellcheck="false" />
+        <select id="mode" title="Sampling method">
+          <option value="auto">auto</option>
+          <option value="hss">hss</option>
+          <option value="poll">poll</option>
+        </select>
+        <input id="group" placeholder="group" autocomplete="off" spellcheck="false" />
+        <button type="submit">Add</button>
+      </form>
+      <span class="spacer"></span>
+      <label class="rate" title="Sampling rate for every signal. Off stops sampling: set up signals first, then pick a rate.">Sample
+        <select id="rate">
+          <option value="0">Off</option>
+          <option value="1000">1 kHz</option>
+          <option value="500">500 Hz</option>
+          <option value="200">200 Hz</option>
+          <option value="100">100 Hz</option>
+          <option value="50">50 Hz</option>
+          <option value="20">20 Hz</option>
+        </select>
+      </label>
+      <label class="rate" title="Time per division; the view shows ten divisions.">Time
+        <select id="division">
+          <option value="0.001">1 ms/div</option>
+          <option value="0.002">2 ms/div</option>
+          <option value="0.005">5 ms/div</option>
+          <option value="0.01">10 ms/div</option>
+          <option value="0.02">20 ms/div</option>
+          <option value="0.05">50 ms/div</option>
+          <option value="0.1">100 ms/div</option>
+          <option value="0.2">200 ms/div</option>
+          <option value="0.5" selected>500 ms/div</option>
+          <option value="1">1 s/div</option>
+          <option value="2">2 s/div</option>
+          <option value="5">5 s/div</option>
+          <option value="10">10 s/div</option>
+          <option value="30">30 s/div</option>
+        </select>
+      </label>
+      <button id="follow" aria-pressed="true">Following</button>
+      <button id="record">Record</button>
+      <button id="export">Export CSV</button>
+    </header>
+    <main>
+      <aside id="series"></aside>
+      <section id="plots"><p id="empty">Add an expression to start plotting.</p></section>
+    </main>
+    <footer id="status">
+      <span id="connection">Connecting…</span>
+      <span id="rates"></span>
+      <span id="measure">Click a plot to place cursor A, then B.</span>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

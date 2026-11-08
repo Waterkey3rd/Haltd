@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>jlinkd RTT</title>
+  </head>
+  <body class="rtt">
+    <header id="toolbar">
+      <label>Channel <select id="channel"></select></label>
+      <span class="spacer"></span>
+      <span id="state">Connecting…</span>
+    </header>
+    <main class="rtt-main">
+      <section id="terminal-pane">
+        <pre id="terminal"></pre>
+        <form id="send">
+          <input id="input" placeholder="Send to the target" autocomplete="off" spellcheck="false" />
+          <button type="submit">Send</button>
+        </form>
+      </section>
+      <section id="tables">
+        <h2>Channels</h2>
+        <table id="channels"></table>
+        <h2>Decoded signals</h2>
+        <table id="signals"></table>
+      </section>
+    </main>
+    <script type="module" src="/src/rtt.ts"></script>
+  </body>
+</html>
