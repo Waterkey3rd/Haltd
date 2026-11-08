@@ -1,0 +1,15 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+probe-api.workspace = true
+probe-jlink.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+symbols.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+visualizer.workspace = true

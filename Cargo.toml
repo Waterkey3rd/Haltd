@@ -5,6 +5,7 @@ members = [
     "crates/probe-jlink",
     "crates/probe-mock",
     "crates/symbols",
+    "crates/engine",
     "crates/visualizer",
 ]
 
@@ -19,6 +20,7 @@ probe-api = { path = "crates/probe-api" }
 probe-jlink = { path = "crates/probe-jlink" }
 probe-mock = { path = "crates/probe-mock" }
 symbols = { path = "crates/symbols" }
+engine = { path = "crates/engine" }
 visualizer = { path = "crates/visualizer" }
 
 anyhow = "1"
