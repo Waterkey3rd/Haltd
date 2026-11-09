@@ -9,9 +9,9 @@ use crate::{MemoryReader, Result, SymbolError};
 
 const R12: usize = 12;
 const SP: usize = 13;
+const MAX_FRAMES: usize = 64;
 const LR: usize = 14;
 const PC: usize = 15;
-const MAX_FRAMES: usize = 64;
 
 const EXC_RETURN_USES_PSP: u32 = 1 << 2;
 const EXC_RETURN_BASIC_FRAME: u32 = 1 << 4;
@@ -160,6 +160,16 @@ impl SymbolDb {
         start: &CoreRegisters,
         memory: &mut dyn MemoryReader,
     ) -> Result<Vec<StackFrame>> {
+        self.unwind_limited(start, memory, MAX_FRAMES)
+    }
+
+    /// Like [`Self::unwind`], stopping after `limit` frames.
+    pub fn unwind_limited(
+        &self,
+        start: &CoreRegisters,
+        memory: &mut dyn MemoryReader,
+        limit: usize,
+    ) -> Result<Vec<StackFrame>> {
         let mut registers: Registers = start.r.map(Some);
         let mut xpsr = start.xpsr;
         let mut context = UnwindContext::new();
@@ -168,7 +178,7 @@ impl SymbolDb {
         // A return address points after the call, possibly past the function.
         let mut pc_is_return_address = false;
 
-        while frames.len() < MAX_FRAMES {
+        while frames.len() < limit {
             let Some(pc) = registers[PC].map(|pc| pc & !1).filter(|pc| *pc != 0) else {
                 break;
             };

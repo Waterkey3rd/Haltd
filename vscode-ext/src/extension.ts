@@ -3,6 +3,13 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { BACKEND_PORT, DataClient, type WatchInfo } from "./dataClient";
+import {
+  describeCycles,
+  PeripheralsView,
+  showFault,
+  TasksView,
+  type PeripheralNode,
+} from "./debugViews";
 import { LiveWatch } from "./liveWatch";
 
 const DEBUG_TYPE = "jlinkd";
@@ -357,6 +364,10 @@ export function activate(context: vscode.ExtensionContext): void {
   rttButton.tooltip = "Open the RTT terminal";
   rttButton.command = "jlinkd.openRttTerminal";
   const tree = vscode.window.createTreeView("jlinkd.liveWatch", { treeDataProvider: liveWatch });
+  const peripherals = new PeripheralsView();
+  const tasks = new TasksView();
+  const cyclesItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 47);
+  cyclesItem.tooltip = "Cycles the core ran between the last two stops";
   let recording = false;
   let hidePending = false;
   const addFromDebugger = async (item?: VariableContext) => {
@@ -383,10 +394,17 @@ export function activate(context: vscode.ExtensionContext): void {
     timelineButton,
     rttButton,
     takeover,
+    cyclesItem,
+    vscode.window.registerTreeDataProvider("jlinkd.peripherals", peripherals),
+    vscode.window.registerTreeDataProvider("jlinkd.tasks", tasks),
     vscode.debug.onDidChangeActiveStackItem(() => {
       if (hidePending && vscode.debug.activeStackItem) {
         hidePending = false;
         hideBuiltInWatch();
+      }
+      if (vscode.debug.activeStackItem && vscode.debug.activeDebugSession?.type === DEBUG_TYPE) {
+        peripherals.refresh();
+        tasks.refresh();
       }
     }),
     vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider()),
@@ -410,6 +428,9 @@ export function activate(context: vscode.ExtensionContext): void {
         timelineButton.hide();
         rttButton.hide();
         takeover.dispose();
+        cyclesItem.hide();
+        peripherals.clear();
+        tasks.refresh();
         // A connection left open would keep the idle backend from exiting.
         client.stop();
       }
@@ -417,9 +438,26 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.debug.onDidReceiveDebugSessionCustomEvent((event) => {
       if (event.event === "jlinkd/bound" || event.event === "jlinkd/reloaded") {
         syncWatches();
+      } else if (event.event === "jlinkd/fault") {
+        void showFault(event.body, output);
+      } else if (event.event === "jlinkd/cycles") {
+        cyclesItem.text = describeCycles(event.body);
+        cyclesItem.show();
       }
     }),
     vscode.commands.registerCommand("jlinkd.buildAndReload", () => buildAndReload(status)),
+    vscode.commands.registerCommand("jlinkd.refreshPeripherals", () => peripherals.refresh()),
+    vscode.commands.registerCommand("jlinkd.refreshTasks", () => tasks.refresh()),
+    vscode.commands.registerCommand("jlinkd.readRegister", (node: PeripheralNode) => {
+      if (node.kind === "register") {
+        peripherals.readRegister(node).catch(report);
+      }
+    }),
+    vscode.commands.registerCommand("jlinkd.writePeripheral", (node: PeripheralNode) => {
+      if (node.kind !== "peripheral") {
+        peripherals.write(node).catch(report);
+      }
+    }),
     vscode.commands.registerCommand("jlinkd.addToWatch", async (item?: VariableContext) => {
       const expression = await chooseExpression(item);
       if (expression) {

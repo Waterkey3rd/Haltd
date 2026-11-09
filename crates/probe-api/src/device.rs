@@ -15,6 +15,14 @@ const DEMCR_VC_STATERR: u32 = 1 << 7;
 const DEMCR_VC_BUSERR: u32 = 1 << 8;
 const DEMCR_VC_INTERR: u32 = 1 << 9;
 const DEMCR_VC_HARDERR: u32 = 1 << 10;
+
+/// DEMCR vector-catch bits for each fault an editor can ask to stop on.
+pub const VC_HARDFAULT: u32 = DEMCR_VC_HARDERR | DEMCR_VC_INTERR;
+pub const VC_BUSFAULT: u32 = DEMCR_VC_BUSERR;
+pub const VC_MEMMANAGE: u32 = DEMCR_VC_MMERR;
+pub const VC_USAGEFAULT: u32 = DEMCR_VC_STATERR | DEMCR_VC_CHKERR | DEMCR_VC_NOCPERR;
+pub const VC_ALL_FAULTS: u32 = VC_HARDFAULT | VC_BUSFAULT | VC_MEMMANAGE | VC_USAGEFAULT;
+
 const DWT_CTRL: u32 = 0xE000_1000;
 const DWT_CTRL_CYCCNTENA: u32 = 1;
 
@@ -73,8 +81,8 @@ impl DeviceProfile {
 
 #[derive(Clone, Debug, Default)]
 pub struct PostConnectOptions {
-    /// Halt on entry to fault handlers (DEMCR vector catch).
-    pub vector_catch: bool,
+    /// `VC_*` bits: which fault handlers halt on entry. The others are cleared.
+    pub vector_catch: u32,
     /// Names from [`DeviceProfile::freeze`] to stop while the core is halted.
     pub freeze_on_halt: Vec<String>,
 }
@@ -93,16 +101,11 @@ pub fn apply_post_connect(
     options: &PostConnectOptions,
 ) -> Result<()> {
     enable_cycle_counter(probe)?;
-    if options.vector_catch {
-        let bits = DEMCR_VC_HARDERR
-            | DEMCR_VC_INTERR
-            | DEMCR_VC_BUSERR
-            | DEMCR_VC_STATERR
-            | DEMCR_VC_CHKERR
-            | DEMCR_VC_NOCPERR
-            | DEMCR_VC_MMERR;
-        probe.modify_u32(DEMCR, bits, 0)?;
-    }
+    probe.modify_u32(
+        DEMCR,
+        options.vector_catch,
+        VC_ALL_FAULTS & !options.vector_catch,
+    )?;
     for write in &profile.post_connect {
         probe.modify_u32(write.addr, write.set, 0)?;
     }

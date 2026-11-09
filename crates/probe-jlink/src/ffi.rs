@@ -5,7 +5,7 @@
 //!
 //! Sources for the signatures: the HSS functions and structure sizes were
 //! checked against the disassembly of libjlinkarm.so V9.80. The rest follow
-//! pylink. `JLINKARM_SetWP` has not been exercised on hardware yet.
+//! pylink.
 #![allow(non_snake_case)]
 
 use std::ffi::{c_char, c_int, c_void};
@@ -141,8 +141,6 @@ jlink_api! {
     JLINKARM_SetBPEx: fn(u32, u32) -> c_int;
     JLINKARM_ClrBPEx: fn(c_int) -> c_int;
     JLINKARM_GetNumBPUnits: fn(u32) -> c_int;
-    JLINKARM_SetWP: fn(u32, u32, u32, u32, u32, u32) -> c_int;
-    JLINKARM_ClrWP: fn(c_int) -> c_int;
     // Flash.
     JLINK_DownloadFile: fn(*const c_char, u32) -> c_int;
     JLINK_SetFlashProgProgressCallback: fn(Option<ProgressCb>);

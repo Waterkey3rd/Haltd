@@ -12,6 +12,18 @@ use probe_api::{
 
 use crate::ffi::{self, Api};
 
+const DWT_CTRL: u32 = 0xE000_1000;
+const DWT_CTRL_NUMCOMP_SHIFT: u32 = 28;
+const MAX_COMPARATORS: u32 = 16;
+const DWT_COMP0: u32 = 0xE000_1020;
+const DWT_STRIDE: u32 = 16;
+const DWT_MASK_OFFSET: u32 = 4;
+const DWT_FUNCTION_OFFSET: u32 = 8;
+const DWT_FUNCTION_MASK: u32 = 0xF;
+const DWT_FUNCTION_READ: u32 = 5;
+const DWT_FUNCTION_WRITE: u32 = 6;
+const DWT_FUNCTION_READ_WRITE: u32 = 7;
+
 const CPUID: u32 = 0xE000_ED00;
 
 /// Bit names of `JLINKARM_GetEmuCaps`.
@@ -456,33 +468,46 @@ impl Probe for JLink {
         Ok(())
     }
 
+    /// The comparators are programmed directly. Going through the library's
+    /// JLINKARM_SetWP makes it rewrite DEMCR on every start, which silently
+    /// turns off vector catch.
     fn set_wp(&mut self, w: &WatchpointSpec) -> Result<WpHandle> {
         self.ensure_connected()?;
-        const ACCESS_WRITE: u32 = 1;
-        const MASK_DIRECTION: u32 = 1;
-        const MASK_SIZE: u32 = 3 << 1;
-        let (access, mask) = match w.access {
-            WpAccess::Read => (0, MASK_SIZE),
-            WpAccess::Write => (ACCESS_WRITE, MASK_SIZE),
-            WpAccess::ReadWrite => (0, MASK_SIZE | MASK_DIRECTION),
+        let function = match w.access {
+            WpAccess::Read => DWT_FUNCTION_READ,
+            WpAccess::Write => DWT_FUNCTION_WRITE,
+            WpAccess::ReadWrite => DWT_FUNCTION_READ_WRITE,
         };
-        let handle = dll!(
-            self,
-            JLINKARM_SetWP(w.addr, w.addr_mask, 0, u32::MAX, access, mask)
-        );
-        if handle <= 0 {
-            return Err(call_error("JLINKARM_SetWP", handle));
+        let ignored_bits = w.addr_mask.count_ones();
+        let comparators = (self.read_u32(DWT_CTRL)? >> DWT_CTRL_NUMCOMP_SHIFT).min(MAX_COMPARATORS);
+        for index in 0..comparators {
+            let base = DWT_COMP0 + index * DWT_STRIDE;
+            if self.read_u32(base + DWT_FUNCTION_OFFSET)? & DWT_FUNCTION_MASK != 0 {
+                continue;
+            }
+            self.write_u32(base, w.addr & !w.addr_mask)?;
+            self.write_u32(base + DWT_MASK_OFFSET, ignored_bits)?;
+            // Implementations limit how many address bits can be ignored.
+            if self.read_u32(base + DWT_MASK_OFFSET)? != ignored_bits {
+                return Err(ProbeError::Other(format!(
+                    "this core cannot watch {} bytes at once",
+                    u64::from(w.addr_mask) + 1
+                )));
+            }
+            self.write_u32(base + DWT_FUNCTION_OFFSET, function)?;
+            return Ok(WpHandle(index + 1));
         }
-        Ok(WpHandle(handle as u32))
+        Err(ProbeError::Other(
+            "every DWT comparator is already in use".to_owned(),
+        ))
     }
 
     fn clear_wp(&mut self, h: WpHandle) -> Result<()> {
         self.ensure_connected()?;
-        let code = dll!(self, JLINKARM_ClrWP(h.0 as c_int));
-        if code != 0 {
-            return Err(call_error("JLINKARM_ClrWP", code));
-        }
-        Ok(())
+        let index =
+            h.0.checked_sub(1)
+                .ok_or_else(|| ProbeError::Other("invalid watchpoint handle".to_owned()))?;
+        self.write_u32(DWT_COMP0 + index * DWT_STRIDE + DWT_FUNCTION_OFFSET, 0)
     }
 
     fn download(

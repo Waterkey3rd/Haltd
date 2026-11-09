@@ -13,6 +13,8 @@ pub struct ProjectConfig {
     pub visualizers: Vec<String>,
     pub sampling: SamplingOptions,
     pub rtt: RttOptions,
+    /// CMSIS-SVD file for the peripheral view, relative to the workspace.
+    pub svd: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

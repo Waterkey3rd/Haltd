@@ -2,7 +2,7 @@
   "name": "jlinkd",
   "displayName": "jlinkd",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.3.3",
+  "version": "0.4.2",
   "publisher": "jlinkd",
   "license": "MIT",
   "engines": {
@@ -83,6 +83,10 @@
               "project": {
                 "type": "string",
                 "default": "${workspaceFolder}/.jlinkd/project.yaml"
+              },
+              "svd": {
+                "type": "string",
+                "description": "CMSIS-SVD file for the Peripherals view. Found in an installed Ozone when omitted."
               }
             }
           },
@@ -115,6 +119,10 @@
               },
               "project": {
                 "type": "string"
+              },
+              "svd": {
+                "type": "string",
+                "description": "CMSIS-SVD file for the Peripherals view. Found in an installed Ozone when omitted."
               }
             }
           }
@@ -187,6 +195,26 @@
       {
         "command": "jlinkd.openRttPanel",
         "title": "jlinkd: Open RTT Signals"
+      },
+      {
+        "command": "jlinkd.refreshPeripherals",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "jlinkd.readRegister",
+        "title": "Read Register Now",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "jlinkd.writePeripheral",
+        "title": "Set Value",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jlinkd.refreshTasks",
+        "title": "Refresh",
+        "icon": "$(refresh)"
       }
     ],
     "keybindings": [
@@ -217,6 +245,16 @@
           "id": "jlinkd.liveWatch",
           "name": "Live Watch",
           "visibility": "visible"
+        },
+        {
+          "id": "jlinkd.tasks",
+          "name": "FreeRTOS Tasks",
+          "when": "debugType == jlinkd"
+        },
+        {
+          "id": "jlinkd.peripherals",
+          "name": "Peripherals",
+          "when": "debugType == jlinkd"
         }
       ]
     },
@@ -250,6 +288,16 @@
           "command": "jlinkd.openRttTerminal",
           "when": "view == jlinkd.liveWatch",
           "group": "navigation@3"
+        },
+        {
+          "command": "jlinkd.refreshPeripherals",
+          "when": "view == jlinkd.peripherals",
+          "group": "navigation"
+        },
+        {
+          "command": "jlinkd.refreshTasks",
+          "when": "view == jlinkd.tasks",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -277,6 +325,16 @@
           "command": "jlinkd.setWatchRate",
           "when": "view == jlinkd.liveWatch",
           "group": "1_jlinkd@2"
+        },
+        {
+          "command": "jlinkd.readRegister",
+          "when": "view == jlinkd.peripherals && viewItem =~ /sideEffects/",
+          "group": "inline"
+        },
+        {
+          "command": "jlinkd.writePeripheral",
+          "when": "view == jlinkd.peripherals && viewItem =~ /writable/",
+          "group": "inline"
         }
       ],
       "commandPalette": [
@@ -290,6 +348,14 @@
         },
         {
           "command": "jlinkd.writeWatch",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.readRegister",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.writePeripheral",
           "when": "false"
         }
       ]

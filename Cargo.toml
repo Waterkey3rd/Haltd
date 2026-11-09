@@ -11,6 +11,7 @@ members = [
     "crates/tsdb",
     "crates/sampler",
     "crates/rtt",
+    "crates/svd",
     "bins/jlinkd",
     "bins/jlbench",
 ]
@@ -32,11 +33,14 @@ visualizer = { path = "crates/visualizer" }
 tsdb = { path = "crates/tsdb" }
 sampler = { path = "crates/sampler" }
 rtt = { path = "crates/rtt" }
+svd = { path = "crates/svd" }
 
 anyhow = "1"
+base64 = "0.22"
 bincode = "1.3"
 blake3 = { version = "1.8", features = ["mmap", "rayon"] }
 clap = { version = "4", features = ["derive", "env"] }
+roxmltree = "0.20"
 gimli = { version = "0.34", default-features = false, features = ["read", "std"] }
 libloading = "0.9"
 memmap2 = "0.9"

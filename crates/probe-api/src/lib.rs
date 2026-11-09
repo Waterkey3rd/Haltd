@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 pub use device::{
     apply_post_connect, enable_cycle_counter, DeviceProfile, MemoryRegion, PostConnectOptions,
-    RegisterBit, RegisterWrite,
+    RegisterBit, RegisterWrite, VC_ALL_FAULTS, VC_BUSFAULT, VC_HARDFAULT, VC_MEMMANAGE,
+    VC_USAGEFAULT,
 };
 pub use stats::{CallStats, Histogram, HistogramSummary};
 

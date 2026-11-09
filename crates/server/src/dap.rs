@@ -6,26 +6,39 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use engine::breakpoints::ResolvedBreakpoint;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use engine::breakpoints::{DataRequest, FunctionBreakpoint, LineBreakpoint, ResolvedBreakpoint};
+use engine::conditions::BreakpointOptions;
 use engine::project::ProjectConfig;
 use engine::session::{
-    DisplayFrame, LaunchOptions, RunState, Session, StopReason, VariableView, MAIN_THREAD,
+    CycleDelta, DisplayFrame, FaultReport, LaunchOptions, RunState, Session, StopReason,
+    VariableView, MAIN_THREAD,
 };
 use engine::step::StepKind;
-use probe_api::{ConnectCfg, Interface, Probe, Progress, DEFAULT_SPEED_KHZ};
+use probe_api::{ConnectCfg, Interface, Probe, Progress, WpAccess, DEFAULT_SPEED_KHZ};
 use probe_jlink::actor::Priority;
 use probe_jlink::{JLink, JLinkOptions};
 use sampler::codec::joined;
 use sampler::{Binding, Sampler, SamplingConfig};
 use serde_json::{json, Value};
-use symbols::Place;
+use symbols::{Place, Scalar, ScalarKind};
 use tsdb::EventKind;
 
 use crate::control::Control;
 use crate::protocol::write_message;
 
 type Handled = Result<Value, String>;
+
+/// Largest single memory request, to keep the event loop responsive.
+const MAX_MEMORY_REQUEST: usize = 1 << 20;
+const NOT_READ: &str = "<not read: reading changes it>";
+const WRITE_ONLY: &str = "<write-only>";
+const UNREADABLE: &str = "<unreadable>";
+const IMPRECISE_NOTE: &str = "The reported position is imprecise: the instruction that caused \
+                              the error may be a few instructions earlier.";
 
 fn fail(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -89,11 +102,22 @@ enum VarNode {
         thread: i64,
         frame: usize,
     },
+    Fpu {
+        thread: i64,
+        frame: usize,
+    },
     Globals,
     Children {
         place: Place,
         synthetic: Arc<Vec<u8>>,
         expr: Option<String>,
+    },
+    Peripherals,
+    Peripheral(String),
+    PeripheralRegister {
+        peripheral: String,
+        register: String,
+        value: u32,
     },
 }
 
@@ -121,6 +145,10 @@ pub struct Dap {
     shown_running: bool,
     /// The client has ended debugging, by terminate or disconnect.
     finished: bool,
+    /// The fault of the current stop, as sent to the client.
+    fault: Option<Value>,
+    fault_thread: Option<i64>,
+    last_tasks: Vec<Value>,
 }
 
 /// What the sampler needs to know about a connected target.
@@ -175,14 +203,14 @@ pub(crate) fn binding_of(session: &Session) -> Binding {
     }
 }
 
-fn stop_body(reason: &StopReason, thread: i64) -> Value {
-    let (name, breakpoints, description) = match reason {
-        StopReason::Breakpoint(ids) => ("breakpoint", ids.clone(), None),
-        StopReason::Step => ("step", Vec::new(), None),
-        StopReason::Pause | StopReason::External => ("pause", Vec::new(), None),
-        StopReason::Entry => ("entry", Vec::new(), None),
-        StopReason::Data => ("data breakpoint", Vec::new(), None),
-        StopReason::Fault => ("exception", Vec::new(), Some("Fault vector catch")),
+fn stop_body(reason: &StopReason, thread: i64, fault: Option<&Value>) -> Value {
+    let (name, breakpoints) = match reason {
+        StopReason::Breakpoint(ids) => ("breakpoint", ids.clone()),
+        StopReason::Step | StopReason::StillRunning => ("step", Vec::new()),
+        StopReason::Pause | StopReason::External => ("pause", Vec::new()),
+        StopReason::Entry => ("entry", Vec::new()),
+        StopReason::Data(ids) => ("data breakpoint", ids.clone()),
+        StopReason::Fault => ("exception", Vec::new()),
     };
     let mut body = json!({
         "reason": name,
@@ -192,11 +220,164 @@ fn stop_body(reason: &StopReason, thread: i64) -> Value {
     if !breakpoints.is_empty() {
         body["hitBreakpointIds"] = json!(breakpoints);
     }
-    if let Some(text) = description {
-        body["description"] = json!(text);
-        body["text"] = json!(text);
+    if let Some(fault) = fault {
+        body["description"] = fault["summary"].clone();
+        body["text"] = fault["name"].clone();
     }
     body
+}
+
+fn hex(value: u32) -> String {
+    format!("{value:#010x}")
+}
+
+fn fault_json(report: &FaultReport) -> Value {
+    let registers = &report.registers;
+    let causes: Vec<Value> = report
+        .causes
+        .iter()
+        .map(|cause| json!({"register": cause.register, "name": cause.name, "meaning": cause.meaning}))
+        .collect();
+    let mut out = json!({
+        "exception": report.exception,
+        "name": report.exception_name,
+        "summary": report.summary,
+        "causes": causes,
+        "imprecise": report.imprecise,
+        "cfsr": hex(registers.cfsr),
+        "hfsr": hex(registers.hfsr),
+        "mmfar": hex(registers.mmfar),
+        "bfar": hex(registers.bfar),
+        "afsr": hex(registers.afsr),
+        "thread": report.thread,
+    });
+    if report.imprecise {
+        out["note"] = json!(IMPRECISE_NOTE);
+    }
+    if let Some((register, value)) = report.address {
+        out["address"] = json!({"register": register, "value": hex(value)});
+    }
+    if let Some(pc) = report.pc {
+        out["pc"] = json!(hex(pc));
+    }
+    if let Some(function) = &report.function {
+        out["function"] = json!(function);
+    }
+    if let Some(location) = &report.location {
+        out["file"] = json!(location.file);
+        out["line"] = json!(location.line);
+    }
+    out
+}
+
+fn cycles_json(delta: &CycleDelta) -> Value {
+    json!({
+        "cycles": delta.cycles,
+        "coreHz": delta.core_hz,
+        "microseconds": delta.microseconds,
+        "wrapped": delta.wrapped,
+    })
+}
+
+fn breakpoint_options(item: &Value) -> BreakpointOptions {
+    let text = |key: &str| item[key].as_str().map(str::to_owned);
+    BreakpointOptions {
+        condition: text("condition"),
+        hit_condition: text("hitCondition"),
+        log_message: text("logMessage"),
+    }
+}
+
+/// Encodes what a data breakpoint watches as `address:size:expression`.
+fn data_id(address: u32, size: u32, expression: Option<&str>) -> String {
+    format!("{address:#x}:{size}:{}", expression.unwrap_or(""))
+}
+
+fn parse_data_id(id: &str) -> Option<(u32, u32, Option<String>)> {
+    let mut parts = id.splitn(3, ':');
+    let address = u32::from_str_radix(parts.next()?.strip_prefix("0x")?, 16).ok()?;
+    let size = parts.next()?.parse().ok()?;
+    let expression = parts.next().filter(|e| !e.is_empty()).map(str::to_owned);
+    Some((address, size, expression))
+}
+
+fn parse_access(text: Option<&str>) -> WpAccess {
+    match text {
+        Some("read") => WpAccess::Read,
+        Some("readWrite") => WpAccess::ReadWrite,
+        _ => WpAccess::Write,
+    }
+}
+
+fn parse_address(reference: &str, offset: i64) -> Result<u32, String> {
+    let base = match reference.strip_prefix("0x") {
+        Some(digits) => u32::from_str_radix(digits, 16),
+        None => reference.parse(),
+    }
+    .map_err(|_| format!("invalid memory reference {reference:?}"))?;
+    u32::try_from(i64::from(base) + offset)
+        .map_err(|_| "the address is outside the address space".to_owned())
+}
+
+fn parse_word(text: &str) -> Result<u32, String> {
+    let scalar = Scalar {
+        kind: ScalarKind::Unsigned,
+        size: 4,
+        bits: None,
+    };
+    scalar.encode(text).map(|value| value as u32)
+}
+
+fn register_text(value: u32, bits: u32) -> String {
+    format!("{value:#0width$x}", width = (bits as usize / 4) + 2)
+}
+
+/// A register's value, unless reading it would be harmful. `force` is the
+/// user asking for this one register anyway.
+fn read_svd_register(
+    session: &Session,
+    register: &svd::Register,
+    force: bool,
+) -> (Option<u32>, String) {
+    if register.access == svd::Access::WriteOnly {
+        return (None, WRITE_ONLY.to_owned());
+    }
+    if register.read_has_side_effects && !force {
+        return (None, NOT_READ.to_owned());
+    }
+    match session.read_peripheral_register(register) {
+        Ok(value) => (Some(value), register_text(value, register.bits)),
+        Err(_) => (None, UNREADABLE.to_owned()),
+    }
+}
+
+fn field_value_text(field: &svd::Field, register: u32) -> String {
+    let value = field.extract(register);
+    match field.value_name(value) {
+        Some(name) => format!("{value} ({name})"),
+        None => format!("{value}"),
+    }
+}
+
+fn field_bits(field: &svd::Field) -> String {
+    if field.width == 1 {
+        format!("[{}]", field.lsb)
+    } else {
+        format!("[{}:{}]", field.lsb + field.width - 1, field.lsb)
+    }
+}
+
+/// A value for a field: a number, or one of the field's declared names.
+fn field_value(field: &svd::Field, text: &str) -> Result<u32, String> {
+    let named = field
+        .values
+        .iter()
+        .find(|(_, name)| name.eq_ignore_ascii_case(text.trim()))
+        .map(|(value, _)| *value as u32);
+    match named {
+        Some(value) => Ok(value),
+        None => parse_word(text),
+    }
 }
 
 fn describe_breakpoint(breakpoint: &ResolvedBreakpoint) -> Value {
@@ -240,12 +421,15 @@ fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
     let elf = arguments["elf"]
         .as_str()
         .ok_or("the launch configuration needs \"elf\"")?;
-    let project = match arguments["project"].as_str() {
+    let mut project = match arguments["project"].as_str() {
         Some(path) if std::path::Path::new(path).exists() => {
             ProjectConfig::load(std::path::Path::new(path))?
         }
         _ => ProjectConfig::default(),
     };
+    if let Some(svd) = arguments["svd"].as_str() {
+        project.svd = Some(svd.to_owned());
+    }
     Ok(LaunchOptions {
         connect: ConnectCfg {
             device: arguments["device"]
@@ -266,6 +450,7 @@ fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
 }
 
 fn variable_json(view: VariableView, reference: i64, expression: Option<String>) -> Value {
+    let place = view.place;
     let mut out = json!({
         "name": view.name,
         "value": view.value,
@@ -274,6 +459,9 @@ fn variable_json(view: VariableView, reference: i64, expression: Option<String>)
     });
     if let Some(expression) = expression {
         out["evaluateName"] = json!(expression);
+    }
+    if let Some(place) = place.filter(Session::place_in_memory) {
+        out["memoryReference"] = json!(hex(place.addr));
     }
     out
 }
@@ -311,6 +499,9 @@ impl Dap {
             sampler,
             shown_running: false,
             finished: false,
+            fault: None,
+            fault_thread: None,
+            last_tasks: Vec::new(),
         };
         if let Some(session) = &mut dap.session {
             session.set_cancel_token(dap.cancel.clone());
@@ -327,6 +518,56 @@ impl Dap {
     fn forget_handles(&mut self) {
         self.frames.clear();
         self.variables.clear();
+        self.fault = None;
+        self.fault_thread = None;
+    }
+
+    /// Show what breakpoints have logged.
+    fn flush_output(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        for line in session.take_output() {
+            self.client.console(&line);
+        }
+    }
+
+    /// Work out the reason for a fault and tell the client.
+    fn capture_fault(&mut self, thread: i64) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        match session.fault_report() {
+            Ok(report) => {
+                let fault = fault_json(&report);
+                let place = match &report.location {
+                    Some(location) => format!(" ({}:{})", location.file, location.line),
+                    None => String::new(),
+                };
+                self.client
+                    .console(&format!("Fault: {}{place}", report.summary));
+                if report.imprecise {
+                    self.client.console(IMPRECISE_NOTE);
+                }
+                self.client.event("jlinkd/fault", fault.clone());
+                self.fault = Some(fault);
+                self.fault_thread = Some(thread);
+            }
+            Err(error) => self
+                .client
+                .console(&format!("cannot analyse the fault: {error}")),
+        }
+    }
+
+    fn report_cycles(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        match session.note_cycles() {
+            Ok(Some(delta)) => self.client.event("jlinkd/cycles", cycles_json(&delta)),
+            Ok(None) => {}
+            Err(error) => tracing::debug!("cannot read the cycle counter: {error}"),
+        }
     }
 
     fn add_var(&mut self, node: VarNode) -> i64 {
@@ -350,7 +591,11 @@ impl Dap {
 
     fn note_halted(&mut self, reason: &StopReason) {
         if matches!(reason, StopReason::Fault) {
-            self.sampler.note_event(EventKind::Fault, json!({}));
+            let detail = self
+                .fault
+                .as_ref()
+                .map_or_else(|| json!({}), |fault| json!({"summary": fault["summary"]}));
+            self.sampler.note_event(EventKind::Fault, detail);
         }
         if std::mem::take(&mut self.shown_running) {
             self.sampler
@@ -367,10 +612,16 @@ impl Dap {
 
     fn report_stop(&mut self, reason: &StopReason) {
         self.forget_handles();
+        self.flush_output();
+        let thread = self.current_thread();
+        if matches!(reason, StopReason::Fault) {
+            self.capture_fault(thread);
+        }
         self.note_halted(reason);
         self.sampler.note_stopped();
-        let thread = self.current_thread();
-        self.client.event("stopped", stop_body(reason, thread));
+        self.report_cycles();
+        self.client
+            .event("stopped", stop_body(reason, thread, self.fault.as_ref()));
     }
 
     /// Check for a stop while the target runs.
@@ -380,7 +631,7 @@ impl Dap {
         };
         match session.poll() {
             Ok(Some(reason)) => self.report_stop(&reason),
-            Ok(None) => {}
+            Ok(None) => self.flush_output(),
             Err(error) => {
                 tracing::warn!("polling the target failed: {error}");
                 self.client.console(&format!("probe error: {error}"));
@@ -388,6 +639,17 @@ impl Dap {
                     session.mark_halted();
                 }
             }
+        }
+    }
+
+    /// How long the event loop may wait before polling the target again.
+    pub fn poll_wait(&self, idle: Duration) -> Duration {
+        let busy =
+            self.is_running() && self.session.as_ref().is_some_and(Session::is_auto_resuming);
+        if busy {
+            Duration::ZERO
+        } else {
+            idle
         }
     }
 
@@ -413,7 +675,19 @@ impl Dap {
             }
             "setBreakpoints" => self.set_breakpoints(arguments),
             "setFunctionBreakpoints" => self.set_function_breakpoints(arguments),
-            "setExceptionBreakpoints" => Ok(json!({})),
+            "setExceptionBreakpoints" => self.set_exception_breakpoints(arguments),
+            "dataBreakpointInfo" => self.data_breakpoint_info(arguments),
+            "setDataBreakpoints" => self.set_data_breakpoints(arguments),
+            "exceptionInfo" => self.exception_info(),
+            "readMemory" => self.read_memory(arguments),
+            "writeMemory" => self.write_memory(arguments),
+            "setVariable" => self.set_variable(arguments),
+            "jlinkd/faultInfo" => self.fault_info(),
+            "jlinkd/rtosTasks" => self.rtos_tasks(),
+            "jlinkd/cycleCounter" => self.cycle_counter(),
+            "jlinkd/peripherals" => self.peripheral_list(),
+            "jlinkd/peripheralRead" => self.peripheral_read(arguments),
+            "jlinkd/peripheralWrite" => self.peripheral_write(arguments),
             "threads" => self.threads(),
             "stackTrace" => self.stack_trace(arguments),
             "scopes" => self.scopes(arguments),
@@ -452,6 +726,20 @@ impl Dap {
             "supportsEvaluateForHovers": true,
             "supportsRestartRequest": true,
             "supportsTerminateRequest": true,
+            "supportsConditionalBreakpoints": true,
+            "supportsHitConditionalBreakpoints": true,
+            "supportsLogPoints": true,
+            "supportsDataBreakpoints": true,
+            "supportsReadMemoryRequest": true,
+            "supportsWriteMemoryRequest": true,
+            "supportsSetVariable": true,
+            "supportsExceptionInfoRequest": true,
+            "exceptionBreakpointFilters": [
+                {"filter": "hardfault", "label": "HardFault", "default": true},
+                {"filter": "busfault", "label": "BusFault", "default": true},
+                {"filter": "memmanage", "label": "MemManage", "default": true},
+                {"filter": "usagefault", "label": "UsageFault", "default": true},
+            ],
         }))
     }
 
@@ -559,13 +847,17 @@ impl Dap {
         let path = arguments["source"]["path"]
             .as_str()
             .ok_or("setBreakpoints needs a source path")?;
-        let lines: Vec<u32> = arguments["breakpoints"]
+        let lines: Vec<LineBreakpoint> = arguments["breakpoints"]
             .as_array()
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|item| item["line"].as_u64())
-                    .map(|line| line as u32)
+                    .filter_map(|item| {
+                        Some(LineBreakpoint {
+                            line: item["line"].as_u64()? as u32,
+                            options: breakpoint_options(item),
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -578,22 +870,412 @@ impl Dap {
     }
 
     fn set_function_breakpoints(&mut self, arguments: &Value) -> Handled {
-        let names: Vec<String> = arguments["breakpoints"]
+        let functions: Vec<FunctionBreakpoint> = arguments["breakpoints"]
             .as_array()
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|item| item["name"].as_str())
-                    .map(str::to_owned)
+                    .filter_map(|item| {
+                        Some(FunctionBreakpoint {
+                            name: item["name"].as_str()?.to_owned(),
+                            options: breakpoint_options(item),
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default();
         let resolved = self
             .session()?
-            .set_function_breakpoints(&names)
+            .set_function_breakpoints(&functions)
             .map_err(fail)?;
         let items: Vec<Value> = resolved.iter().map(describe_breakpoint).collect();
         Ok(json!({"breakpoints": items}))
+    }
+
+    fn set_exception_breakpoints(&mut self, arguments: &Value) -> Handled {
+        let filters: Vec<String> = arguments["filters"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.session()?
+            .set_exception_filters(&filters)
+            .map_err(fail)?;
+        Ok(json!({}))
+    }
+
+    /// The object behind an entry of the Variables view.
+    fn place_of(
+        &mut self,
+        reference: i64,
+        name: &str,
+    ) -> Result<(Option<Place>, Option<String>), String> {
+        let index = usize::try_from(reference - 1).map_err(|_| "unknown variable reference")?;
+        let node = self
+            .variables
+            .get(index)
+            .ok_or("unknown variable reference")?;
+        match *node {
+            VarNode::Locals { thread, frame } => {
+                let place = self
+                    .session()?
+                    .local_place(thread, frame, name)
+                    .map_err(fail)?;
+                // A local has no name that means anything after a reload.
+                Ok((place, None))
+            }
+            VarNode::Globals => {
+                let session = self.session()?;
+                let place = session
+                    .globals()
+                    .into_iter()
+                    .find(|(global, _)| global == name)
+                    .map(|(_, place)| place);
+                Ok((place, Some(name.to_owned())))
+            }
+            VarNode::Children {
+                place,
+                ref synthetic,
+                ref expr,
+            } => {
+                let (synthetic, expr) = (synthetic.clone(), expr.clone());
+                let views = self
+                    .session()?
+                    .expand(place, synthetic.as_ref().clone())
+                    .map_err(fail)?;
+                let child = views.into_iter().find(|view| view.name == name);
+                Ok((
+                    child.and_then(|view| view.place),
+                    child_expression(expr.as_deref(), name),
+                ))
+            }
+            _ => Ok((None, None)),
+        }
+    }
+
+    fn data_breakpoint_info(&mut self, arguments: &Value) -> Handled {
+        let name = arguments["name"]
+            .as_str()
+            .ok_or("dataBreakpointInfo needs a name")?;
+        let reference = arguments["variablesReference"].as_i64().unwrap_or(0);
+        let (place, expression) = if reference > 0 {
+            self.place_of(reference, name)?
+        } else {
+            let frame = self.frame_of(arguments["frameId"].as_i64());
+            let view = self.session()?.evaluate(name, frame).map_err(fail)?;
+            (view.place, Some(name.to_owned()))
+        };
+        let refuse = |why: &str| Ok(json!({"dataId": null, "description": why}));
+        let Some(place) = place.filter(Session::place_in_memory) else {
+            return refuse("this value is not in memory");
+        };
+        if place.bits.is_some() {
+            return refuse("a bit-field cannot be watched by itself");
+        }
+        let size = self.session()?.place_size(&place).map_err(fail)?;
+        if !size.is_power_of_two() || !place.addr.is_multiple_of(size) {
+            return refuse("the hardware can only watch a power-of-two size aligned to itself");
+        }
+        Ok(json!({
+            "dataId": data_id(place.addr, size, expression.as_deref()),
+            "description": format!("{name} ({size} bytes at {})", hex(place.addr)),
+            "accessTypes": ["read", "write", "readWrite"],
+            "canPersist": false,
+        }))
+    }
+
+    fn set_data_breakpoints(&mut self, arguments: &Value) -> Handled {
+        let mut requests = Vec::new();
+        for item in arguments["breakpoints"].as_array().into_iter().flatten() {
+            let id = item["dataId"]
+                .as_str()
+                .ok_or("a data breakpoint needs a dataId")?;
+            let (addr, size, expression) =
+                parse_data_id(id).ok_or_else(|| format!("invalid dataId {id:?}"))?;
+            requests.push(DataRequest {
+                addr,
+                size,
+                access: parse_access(item["accessType"].as_str()),
+                expression,
+                options: breakpoint_options(item),
+            });
+        }
+        let resolved = self
+            .session()?
+            .set_data_breakpoints(&requests)
+            .map_err(fail)?;
+        let items: Vec<Value> = resolved.iter().map(describe_breakpoint).collect();
+        Ok(json!({"breakpoints": items}))
+    }
+
+    fn exception_info(&mut self) -> Handled {
+        let fault = self.fault.as_ref().ok_or("no fault at this stop")?;
+        let mut message = fault["summary"].as_str().unwrap_or("").to_owned();
+        if let Some(note) = fault["note"].as_str() {
+            message.push('\n');
+            message.push_str(note);
+        }
+        Ok(json!({
+            "exceptionId": fault["name"],
+            "description": message,
+            "breakMode": "always",
+            "details": {
+                "message": fault["summary"],
+                "typeName": fault["name"],
+                "evaluateName": fault["function"],
+            },
+        }))
+    }
+
+    fn fault_info(&mut self) -> Handled {
+        if self.fault.is_none() && !self.is_running() {
+            let report = self.session()?.fault_report().map_err(fail)?;
+            return Ok(fault_json(&report));
+        }
+        self.fault
+            .clone()
+            .ok_or_else(|| "the target is running".to_owned())
+    }
+
+    fn cycle_counter(&mut self) -> Handled {
+        Ok(self
+            .session()?
+            .last_cycles()
+            .map_or(Value::Null, |delta| cycles_json(&delta)))
+    }
+
+    fn rtos_tasks(&mut self) -> Handled {
+        if self.is_running() {
+            return Ok(json!({"tasks": self.last_tasks, "stale": true}));
+        }
+        let Some(tasks) = self.session()?.tasks().map_err(fail)? else {
+            return Ok(json!({"tasks": []}));
+        };
+        self.last_tasks = tasks
+            .iter()
+            .map(|task| {
+                json!({
+                    "id": task.tcb,
+                    "name": task.name,
+                    "state": task.state.name(),
+                    "priority": task.priority,
+                    "basePriority": task.base_priority,
+                    "stackBase": hex(task.stack_base),
+                    "topOfStack": hex(task.top_of_stack),
+                    "stackFreeBytes": task.stack_free_bytes,
+                })
+            })
+            .collect();
+        Ok(json!({"tasks": self.last_tasks}))
+    }
+
+    fn read_memory(&mut self, arguments: &Value) -> Handled {
+        let reference = arguments["memoryReference"]
+            .as_str()
+            .ok_or("readMemory needs a memoryReference")?;
+        let address = parse_address(reference, arguments["offset"].as_i64().unwrap_or(0))?;
+        let count = arguments["count"].as_u64().unwrap_or(0) as usize;
+        if count > MAX_MEMORY_REQUEST {
+            return Err(format!("reading {count} bytes at once is not supported"));
+        }
+        let bytes = self.session()?.read_memory(address, count).map_err(fail)?;
+        let mut body = json!({"address": hex(address)});
+        if count > bytes.len() {
+            body["unreadableBytes"] = json!(count - bytes.len());
+        }
+        if !bytes.is_empty() {
+            body["data"] = json!(BASE64.encode(&bytes));
+        }
+        Ok(body)
+    }
+
+    fn write_memory(&mut self, arguments: &Value) -> Handled {
+        let reference = arguments["memoryReference"]
+            .as_str()
+            .ok_or("writeMemory needs a memoryReference")?;
+        let address = parse_address(reference, arguments["offset"].as_i64().unwrap_or(0))?;
+        let data = BASE64
+            .decode(arguments["data"].as_str().unwrap_or(""))
+            .map_err(|_| "the data is not valid base64".to_owned())?;
+        let length = data.len();
+        self.session()?.write_memory(address, data).map_err(fail)?;
+        self.client
+            .event("invalidated", json!({"areas": ["variables"]}));
+        Ok(json!({"bytesWritten": length}))
+    }
+
+    fn set_variable(&mut self, arguments: &Value) -> Handled {
+        let reference = arguments["variablesReference"].as_i64().unwrap_or(0);
+        let name = arguments["name"]
+            .as_str()
+            .ok_or("setVariable needs a name")?;
+        let value = arguments["value"]
+            .as_str()
+            .ok_or("setVariable needs a value")?;
+        let index = usize::try_from(reference - 1).map_err(|_| "unknown variable reference")?;
+        let node = self
+            .variables
+            .get(index)
+            .ok_or("unknown variable reference")?;
+        match *node {
+            VarNode::Registers { thread, frame } | VarNode::Fpu { thread, frame } => {
+                let written = self
+                    .session()?
+                    .write_register(thread, frame, name, value)
+                    .map_err(fail)?;
+                Ok(json!({"value": hex(written)}))
+            }
+            VarNode::Peripheral(ref peripheral) => {
+                let peripheral = peripheral.clone();
+                self.write_peripheral(&peripheral, name, None, value)
+            }
+            VarNode::PeripheralRegister {
+                ref peripheral,
+                ref register,
+                ..
+            } => {
+                let (peripheral, register) = (peripheral.clone(), register.clone());
+                self.write_peripheral(&peripheral, &register, Some(name), value)
+            }
+            _ => {
+                let (place, _) = self.place_of(reference, name)?;
+                let place = place.ok_or("this value cannot be changed")?;
+                let session = self.session()?;
+                session.write_place(place, value).map_err(fail)?;
+                let view = session.view_global(name.to_owned(), place);
+                Ok(json!({"value": view.value}))
+            }
+        }
+    }
+
+    fn device(&mut self) -> Result<Arc<svd::Device>, String> {
+        self.session()?
+            .peripherals()
+            .map_err(fail)?
+            .ok_or_else(|| "no SVD file: set \"svd\" in launch.json".to_owned())
+    }
+
+    fn write_peripheral(
+        &mut self,
+        peripheral: &str,
+        register: &str,
+        field: Option<&str>,
+        text: &str,
+    ) -> Handled {
+        let device = self.device()?;
+        let target = device
+            .peripheral(peripheral)
+            .and_then(|found| found.register(register))
+            .ok_or_else(|| format!("no register {peripheral}.{register}"))?;
+        if !target.access.can_write() {
+            return Err(format!("{register} is read-only"));
+        }
+        let session = self.session()?;
+        let Some(field_name) = field else {
+            let value = parse_word(text)?;
+            session
+                .write_peripheral_register(target, value)
+                .map_err(fail)?;
+            return Ok(json!({"value": register_text(value, target.bits)}));
+        };
+        let found = target
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == field_name)
+            .ok_or_else(|| format!("no field {field_name}"))?;
+        if !found.access.can_write() {
+            return Err(format!("{field_name} is read-only"));
+        }
+        // A write-only register reads as nothing useful, so start from zero.
+        let current = if target.access == svd::Access::WriteOnly {
+            0
+        } else {
+            session.read_peripheral_register(target).map_err(fail)?
+        };
+        let updated = found
+            .insert(current, field_value(found, text)?)
+            .ok_or_else(|| format!("{text} does not fit in {} bits", found.width))?;
+        session
+            .write_peripheral_register(target, updated)
+            .map_err(fail)?;
+        Ok(json!({"value": field_value_text(found, updated)}))
+    }
+
+    fn peripheral_list(&mut self) -> Handled {
+        let Some(device) = self.session()?.peripherals().map_err(fail)? else {
+            return Ok(json!({"peripherals": []}));
+        };
+        let items: Vec<Value> = device
+            .peripherals
+            .iter()
+            .map(|peripheral| {
+                json!({
+                    "name": peripheral.name,
+                    "description": peripheral.description,
+                    "base": hex(peripheral.base),
+                })
+            })
+            .collect();
+        Ok(json!({"device": device.name, "peripherals": items}))
+    }
+
+    /// Current values of a peripheral's registers. `force` names one register
+    /// to read even though reading it has side effects.
+    fn peripheral_read(&mut self, arguments: &Value) -> Handled {
+        let name = arguments["peripheral"]
+            .as_str()
+            .ok_or("peripheralRead needs a peripheral")?;
+        let force = arguments["force"].as_str();
+        let device = self.device()?;
+        let peripheral = device
+            .peripheral(name)
+            .ok_or_else(|| format!("no peripheral {name}"))?;
+        let session = self.session()?;
+        let registers: Vec<Value> = peripheral
+            .registers
+            .iter()
+            .map(|register| {
+                let forced = force == Some(register.name.as_str());
+                let (value, text) = read_svd_register(session, register, forced);
+                let fields: Vec<Value> = register
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        json!({
+                            "name": field.name,
+                            "description": field.description,
+                            "bits": field_bits(field),
+                            "value": value.map(|value| field_value_text(field, value)),
+                            "writable": field.access.can_write() && register.access.can_write(),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "name": register.name,
+                    "description": register.description,
+                    "address": hex(register.address),
+                    "value": text,
+                    "known": value.is_some(),
+                    "sideEffects": register.read_has_side_effects,
+                    "writable": register.access.can_write(),
+                    "fields": fields,
+                })
+            })
+            .collect();
+        Ok(json!({"registers": registers}))
+    }
+
+    fn peripheral_write(&mut self, arguments: &Value) -> Handled {
+        let peripheral = arguments["peripheral"]
+            .as_str()
+            .ok_or("needs a peripheral")?;
+        let register = arguments["register"].as_str().ok_or("needs a register")?;
+        let value = arguments["value"].as_str().ok_or("needs a value")?;
+        self.write_peripheral(peripheral, register, arguments["field"].as_str(), value)
     }
 
     fn threads(&mut self) -> Handled {
@@ -659,12 +1341,27 @@ impl Dap {
             Some(levels) => levels as usize,
         };
         let total = frames.len();
+        // At a fault, the editor should open on the code that faulted rather
+        // than the handler. It skips frames whose source is deemphasized.
+        let handler_frames = match self.fault_thread {
+            Some(faulted) if faulted == thread => frames
+                .iter()
+                .position(|frame| frame.is_exception)
+                .unwrap_or(0),
+            _ => 0,
+        };
         let items: Vec<Value> = frames
             .iter()
             .enumerate()
             .skip(start)
             .take(levels)
-            .map(|(index, frame)| self.frame_json(thread, index, frame))
+            .map(|(index, frame)| {
+                let mut item = self.frame_json(thread, index, frame);
+                if index < handler_frames && item["source"].is_object() {
+                    item["source"]["presentationHint"] = json!("deemphasize");
+                }
+                item
+            })
             .collect();
         Ok(json!({"stackFrames": items, "totalFrames": total}))
     }
@@ -681,11 +1378,17 @@ impl Dap {
         let locals = self.add_var(VarNode::Locals { thread, frame });
         let registers = self.add_var(VarNode::Registers { thread, frame });
         let globals = self.add_var(VarNode::Globals);
-        Ok(json!({"scopes": [
-            {"name": "Locals", "presentationHint": "locals", "variablesReference": locals, "expensive": false},
-            {"name": "Registers", "presentationHint": "registers", "variablesReference": registers, "expensive": false},
-            {"name": "Globals", "variablesReference": globals, "expensive": true},
-        ]}))
+        let mut scopes = vec![
+            json!({"name": "Locals", "presentationHint": "locals", "variablesReference": locals, "expensive": false}),
+            json!({"name": "Registers", "presentationHint": "registers", "variablesReference": registers, "expensive": false}),
+            json!({"name": "Globals", "variablesReference": globals, "expensive": true}),
+        ];
+        // A bad SVD file is reported when the user opens the view, not here.
+        if !matches!(self.session()?.peripherals(), Ok(None)) {
+            let peripherals = self.add_var(VarNode::Peripherals);
+            scopes.push(json!({"name": "Peripherals", "variablesReference": peripherals, "expensive": true}));
+        }
+        Ok(json!({"scopes": scopes}))
     }
 
     fn child_reference(
@@ -739,12 +1442,125 @@ impl Dap {
                     .session()?
                     .registers_view(thread, frame)
                     .map_err(fail)?;
-                let items: Vec<Value> = registers
+                let mut items: Vec<Value> = registers
                     .into_iter()
                     .map(|(name, value)| {
                         json!({
                             "name": name,
-                            "value": format!("{value:#010x}"),
+                            "value": hex(value),
+                            "variablesReference": 0,
+                        })
+                    })
+                    .collect();
+                if self
+                    .session()?
+                    .fpu_view(thread, frame)
+                    .map_err(fail)?
+                    .is_some()
+                {
+                    let reference = self.add_var(VarNode::Fpu { thread, frame });
+                    items
+                        .push(json!({"name": "FPU", "value": "", "variablesReference": reference}));
+                }
+                Ok(json!({"variables": items}))
+            }
+            VarNode::Fpu { thread, frame } => {
+                let (singles, status) = self
+                    .session()?
+                    .fpu_view(thread, frame)
+                    .map_err(fail)?
+                    .ok_or("the FPU is not available in this frame")?;
+                let mut items =
+                    vec![json!({"name": "fpscr", "value": hex(status), "variablesReference": 0})];
+                items.extend(singles.iter().enumerate().map(|(index, bits)| {
+                    json!({
+                        "name": format!("s{index}"),
+                        "value": format!("{} ({})", f32::from_bits(*bits), hex(*bits)),
+                        "variablesReference": 0,
+                    })
+                }));
+                items.extend(
+                    singles
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .map(|(index, pair)| {
+                            let bits = (u64::from(pair[1]) << 32) | u64::from(pair[0]);
+                            json!({
+                                "name": format!("d{index}"),
+                                "value": format!("{} ({bits:#018x})", f64::from_bits(bits)),
+                                "variablesReference": 0,
+                            })
+                        }),
+                );
+                Ok(json!({"variables": items}))
+            }
+            VarNode::Peripherals => {
+                let device = self.device()?;
+                let items: Vec<Value> = device
+                    .peripherals
+                    .iter()
+                    .map(|peripheral| {
+                        let reference = self.add_var(VarNode::Peripheral(peripheral.name.clone()));
+                        json!({
+                            "name": peripheral.name,
+                            "value": hex(peripheral.base),
+                            "type": peripheral.description,
+                            "variablesReference": reference,
+                        })
+                    })
+                    .collect();
+                Ok(json!({"variables": items}))
+            }
+            VarNode::Peripheral(ref name) => {
+                let name = name.clone();
+                let device = self.device()?;
+                let peripheral = device
+                    .peripheral(&name)
+                    .ok_or_else(|| format!("no peripheral {name}"))?;
+                let mut items = Vec::with_capacity(peripheral.registers.len());
+                for register in &peripheral.registers {
+                    let (value, text) = read_svd_register(self.session()?, register, false);
+                    let reference = match value {
+                        Some(value) if !register.fields.is_empty() => {
+                            self.add_var(VarNode::PeripheralRegister {
+                                peripheral: name.clone(),
+                                register: register.name.clone(),
+                                value,
+                            })
+                        }
+                        _ => 0,
+                    };
+                    items.push(json!({
+                        "name": register.name,
+                        "value": text,
+                        "type": register.description,
+                        "memoryReference": hex(register.address),
+                        "variablesReference": reference,
+                    }));
+                }
+                Ok(json!({"variables": items}))
+            }
+            VarNode::PeripheralRegister {
+                ref peripheral,
+                ref register,
+                value,
+            } => {
+                let (peripheral, register) = (peripheral.clone(), register.clone());
+                let device = self.device()?;
+                let target = device
+                    .peripheral(&peripheral)
+                    .and_then(|found| found.register(&register))
+                    .ok_or_else(|| format!("no register {peripheral}.{register}"))?;
+                let items: Vec<Value> = target
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        json!({
+                            "name": field.name,
+                            "value": field_value_text(field, value),
+                            "type": format!("{} {}", field_bits(field), field.description),
                             "variablesReference": 0,
                         })
                     })
@@ -789,13 +1605,21 @@ impl Dap {
             }
             _ => Vec::new(),
         };
+        let memory_reference = view
+            .place
+            .filter(Session::place_in_memory)
+            .map(|p| hex(p.addr));
         let reference =
             self.child_reference(&view, &Arc::new(synthetic), Some(expression.to_owned()));
-        Ok(json!({
+        let mut body = json!({
             "result": view.value,
             "type": view.type_name,
             "variablesReference": reference,
-        }))
+        });
+        if let Some(memory) = memory_reference {
+            body["memoryReference"] = json!(memory);
+        }
+        Ok(body)
     }
 
     fn resume(&mut self) -> Handled {
@@ -810,6 +1634,17 @@ impl Dap {
         self.client.respond(request, Ok(json!({})));
         self.forget_handles();
         match self.session().and_then(|s| s.step(kind).map_err(fail)) {
+            Ok(StopReason::StillRunning) => {
+                self.client.console(
+                    "This step has not finished, so the target keeps running. \
+                     It stops when the step completes; Pause stops it now.",
+                );
+                self.note_running();
+                self.client.event(
+                    "continued",
+                    json!({"threadId": MAIN_THREAD, "allThreadsContinued": true}),
+                );
+            }
             Ok(reason) => self.report_stop(&reason),
             Err(error) => {
                 self.client.console(&format!("step failed: {error}"));

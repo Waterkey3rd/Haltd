@@ -148,7 +148,9 @@ fn resolve(
     let parsed = symbols::parse(expression).map_err(|e| e.to_string())?;
     match db.evaluate(&parsed, memory).map_err(|e| e.to_string())? {
         Evaluated::Place(place) => Ok(place),
-        Evaluated::Address { .. } => Err("the result of '&' has no storage to watch".to_owned()),
+        Evaluated::Address { .. } | Evaluated::Value(_) => {
+            Err("this expression has no storage to watch".to_owned())
+        }
     }
 }
 

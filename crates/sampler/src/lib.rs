@@ -14,9 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engine::session::HaltedMemory;
-use probe_api::{
-    AccessWidth, HssCaps, Probe, ProbeError, ProbeExt, ProbeInfo, HSS_FLAG_TIMESTAMP_US,
-};
+use probe_api::{AccessWidth, HssCaps, Probe, ProbeError, ProbeInfo, HSS_FLAG_TIMESTAMP_US};
 use probe_jlink::actor::{PeriodicId, Priority, ProbeHandle, QueueStats};
 use serde::Serialize;
 use serde_json::json;
@@ -814,31 +812,7 @@ impl Sampler {
         scalar: Scalar,
         text: &str,
     ) -> Result<(), String> {
-        let value = scalar.encode(text)?;
-        let size = scalar.size as usize;
-        bound
-            .binding
-            .handle
-            .call_blocking(Priority::P0, move |probe: &mut dyn Probe| {
-                let mut bytes = value.to_le_bytes();
-                if let Some(bits) = scalar.bits {
-                    // Keep the neighbouring bit-fields intact.
-                    let mut current = [0u8; 8];
-                    probe.read_mem(place.addr, &mut current[..size], AccessWidth::U8)?;
-                    let old = u64::from_le_bytes(current);
-                    let mask = (u64::MAX >> (64 - bits.bit_size)) << bits.bit_offset;
-                    bytes = ((old & !mask) | ((value << bits.bit_offset) & mask)).to_le_bytes();
-                }
-                match size {
-                    4 if place.addr.is_multiple_of(4) => probe.write_u32(
-                        place.addr,
-                        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                    ),
-                    _ => probe.write_mem(place.addr, &bytes[..size], AccessWidth::U8),
-                }
-            })
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        engine::session::write_scalar(&bound.binding.handle, place, scalar, text)
     }
 
     pub fn note_event(&self, kind: EventKind, detail: serde_json::Value) {

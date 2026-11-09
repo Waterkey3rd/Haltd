@@ -1,12 +1,13 @@
 //! Source-level stepping for optimized code (DESIGN §5.5.3).
 
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use probe_api::{BpHandle, BpKind};
 use symbols::{ScopeFrame, SourceLocation};
 
 use crate::project::FlashBreakpoints;
-use crate::session::{EngineError, Result, RunState, Session, StopReason};
+use crate::session::{EngineError, Result, RunState, Session, StopReason, Waited};
 
 /// Instructions single-stepped before trying temporary breakpoints.
 const SINGLE_STEPS_BEFORE_ESCAPE: u32 = 64;
@@ -17,6 +18,9 @@ const MAX_SINGLE_STEPS: u32 = 20_000;
 const SINGLE_STEPS_BEFORE_FLASH_ESCAPE: u32 = 2_048;
 
 const EXC_RETURN_MIN: u32 = 0xFFFF_FF00;
+/// How long a step may free-run before the event loop is released. A call may
+/// never return, and the editor must stay usable meanwhile.
+const DETACH_AFTER: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepKind {
@@ -26,12 +30,39 @@ pub enum StepKind {
 }
 
 #[derive(Clone, Debug)]
-struct FrameState {
+pub(crate) struct FrameState {
     pc: u32,
     cfa: u32,
     return_address: u32,
     /// Exception number, 0 in thread mode.
     exception: u32,
+}
+
+/// What is left to do once a detached run reaches its target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Completion {
+    /// The target is where the step should end.
+    Stop,
+    /// A call made from this line has returned; go on to the next line.
+    FinishLine(Option<SourceLocation>),
+}
+
+/// A step that outlasted [`DETACH_AFTER`]. Its temporary breakpoints stay
+/// placed while the target runs.
+pub(crate) struct DetachedRun {
+    addresses: Vec<u32>,
+    handles: Vec<BpHandle>,
+    exception: u32,
+    task: Option<u32>,
+    is_ours: Box<dyn Fn(&FrameState) -> bool + Send>,
+    completion: Completion,
+}
+
+/// What a stop means for a detached run.
+pub(crate) enum DetachedOutcome {
+    Stop(StopReason),
+    Resume,
+    FinishLine,
 }
 
 /// Why a run with temporary breakpoints ended.
@@ -78,7 +109,8 @@ impl Session {
         &mut self,
         addresses: &[u32],
         kind: BpKind,
-        is_ours: impl Fn(&FrameState) -> bool,
+        completion: Completion,
+        is_ours: impl Fn(&FrameState) -> bool + Send + 'static,
     ) -> Result<RunOutcome> {
         let task = self.current_task()?;
         let exception = self.frame_state()?.exception;
@@ -91,7 +123,18 @@ impl Session {
             // Interrupts must run while the target is free-running.
             self.set_mask_interrupts(false)?;
         }
-        let outcome = self.run_to_loop(addresses, exception, is_ours, task);
+        let outcome = self.run_to_loop(addresses, exception, &is_ours, task);
+        if matches!(outcome, Ok(RunOutcome::Stopped(StopReason::StillRunning))) {
+            self.detached = Some(DetachedRun {
+                addresses: addresses.to_vec(),
+                handles: placed,
+                exception,
+                task,
+                is_ours: Box::new(is_ours),
+                completion,
+            });
+            return outcome;
+        }
         for handle in placed {
             self.remove_temporary(handle)?;
         }
@@ -105,45 +148,134 @@ impl Session {
         &mut self,
         addresses: &[u32],
         exception: u32,
-        is_ours: impl Fn(&FrameState) -> bool,
+        is_ours: &impl Fn(&FrameState) -> bool,
         task: Option<u32>,
     ) -> Result<RunOutcome> {
+        let started = Instant::now();
         loop {
-            if !self.go_and_wait()? {
-                self.call(|probe| probe.halt())?;
-                self.consume_halt_reason(true)?;
-                return Ok(RunOutcome::Stopped(StopReason::Pause));
+            self.resume_raw()?;
+            match self.wait_halted(Some(DETACH_AFTER.saturating_sub(started.elapsed())))? {
+                Waited::Halted => {}
+                Waited::Cancelled => {
+                    self.call(|probe| probe.halt())?;
+                    self.consume_halt_reason(true)?;
+                    return Ok(RunOutcome::Stopped(StopReason::Pause));
+                }
+                Waited::TimedOut => return Ok(RunOutcome::Stopped(StopReason::StillRunning)),
             }
             let reason = self.consume_halt_reason(false)?;
             let state = self.frame_state()?;
-            if matches!(reason, StopReason::Fault | StopReason::Data) {
+            if matches!(reason, StopReason::Fault) {
                 return Ok(RunOutcome::Stopped(reason));
             }
-            if addresses.contains(&state.pc) {
+            if addresses.contains(&state.pc) && !matches!(reason, StopReason::Data(_)) {
                 self.memory.clear();
                 let same_context = state.exception == exception
                     && (task.is_none() || self.current_task()? == task);
                 if same_context && is_ours(&state) {
+                    self.stop_location = None;
                     return Ok(RunOutcome::Reached);
                 }
                 // A user breakpoint here still counts, even in another context.
-                if matches!(&reason, StopReason::Breakpoint(ids) if !ids.is_empty()) {
-                    return Ok(RunOutcome::Stopped(reason));
+                if !matches!(&reason, StopReason::Breakpoint(ids) if !ids.is_empty()) {
+                    self.stop_location = None;
+                    continue;
                 }
-                continue;
             }
-            return Ok(RunOutcome::Stopped(reason));
+            // A breakpoint whose condition is false does not end the step.
+            match self.filter_stop(reason)? {
+                Some(reason) => return Ok(RunOutcome::Stopped(reason)),
+                None => self.stop_location = None,
+            }
         }
     }
 
+    /// Remove the temporary breakpoints of a detached run. The core must be
+    /// halted.
+    pub(crate) fn drop_detached(&mut self) -> Result<()> {
+        if let Some(run) = self.detached.take() {
+            for handle in run.handles {
+                self.remove_temporary(handle)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Decide what a halt means while a detached run is under way.
+    pub(crate) fn resolve_detached(&mut self, reason: StopReason) -> Result<DetachedOutcome> {
+        let state = self.frame_state()?;
+        let Some((at_target, exception, task)) = self
+            .detached
+            .as_ref()
+            .map(|run| (run.addresses.contains(&state.pc), run.exception, run.task))
+        else {
+            return Ok(DetachedOutcome::Stop(reason));
+        };
+        if at_target && !matches!(reason, StopReason::Fault | StopReason::Data(_)) {
+            self.memory.clear();
+            let same_context =
+                state.exception == exception && (task.is_none() || self.current_task()? == task);
+            let reached = same_context
+                && self
+                    .detached
+                    .as_ref()
+                    .is_some_and(|run| (run.is_ours)(&state));
+            if reached {
+                let completion = self
+                    .detached
+                    .as_ref()
+                    .map_or(Completion::Stop, |run| run.completion.clone());
+                self.drop_detached()?;
+                self.stop_location = None;
+                return Ok(match completion {
+                    Completion::FinishLine(origin) if !self.at_new_line(state.pc, &origin)? => {
+                        DetachedOutcome::FinishLine
+                    }
+                    _ => DetachedOutcome::Stop(StopReason::Step),
+                });
+            }
+            if !matches!(&reason, StopReason::Breakpoint(ids) if !ids.is_empty()) {
+                self.stop_location = None;
+                return Ok(DetachedOutcome::Resume);
+            }
+        }
+        match self.filter_stop(reason)? {
+            Some(reason) => {
+                self.drop_detached()?;
+                Ok(DetachedOutcome::Stop(reason))
+            }
+            None => {
+                self.stop_location = None;
+                Ok(DetachedOutcome::Resume)
+            }
+        }
+    }
+
+    /// True if `pc` starts a statement on a line other than `origin`. A call
+    /// that ends its line returns straight to the start of the next one.
+    fn at_new_line(&self, pc: u32, origin: &Option<SourceLocation>) -> Result<bool> {
+        if !self.db.is_statement_start(pc)? {
+            return Ok(false);
+        }
+        let location = self.db.line_at(pc)?;
+        Ok(location.is_some() && location != *origin)
+    }
+
     /// Finish the call whose return address and caller CFA are known.
-    fn finish_call(&mut self, return_address: u32, caller_cfa: u32) -> Result<RunOutcome> {
+    fn finish_call(
+        &mut self,
+        return_address: u32,
+        caller_cfa: u32,
+        completion: Completion,
+    ) -> Result<RunOutcome> {
         if return_address >= EXC_RETURN_MIN {
             // Returning from a handler: there is no code address to stop at.
             return Ok(RunOutcome::Stopped(StopReason::Step));
         }
         let target = return_address & !1;
-        self.run_to(&[target], BpKind::Hw, move |state| state.cfa >= caller_cfa)
+        self.run_to(&[target], BpKind::Hw, completion, move |state| {
+            state.cfa >= caller_cfa
+        })
     }
 
     /// Statement addresses in a function chosen by `keep`, one per contiguous
@@ -220,6 +352,7 @@ impl Session {
             return Ok(StopReason::Step);
         }
         self.cancel.store(false, Ordering::SeqCst);
+        self.note_run_started();
         // Background reads would otherwise compete with each step for USB.
         let _background = self.handle.suspend_background();
         let mask = self.debug_config().mask_interrupts_on_step;
@@ -234,6 +367,9 @@ impl Session {
             self.set_mask_interrupts(false)?;
         }
         let reason = outcome?;
+        if reason == StopReason::StillRunning {
+            return Ok(reason);
+        }
         self.state = RunState::Halted;
         if reason != StopReason::Step {
             self.stop_location = None;
@@ -270,7 +406,9 @@ impl Session {
                 if !skip_step && steps >= SINGLE_STEPS_BEFORE_ESCAPE {
                     if let Some(kind) = self.escape_kind(targets.len(), steps) {
                         let floor = start.cfa;
-                        match self.run_to(&targets, kind, move |state| state.cfa >= floor)? {
+                        match self.run_to(&targets, kind, Completion::Stop, move |state| {
+                            state.cfa >= floor
+                        })? {
                             RunOutcome::Reached => skip_step = true,
                             RunOutcome::Stopped(reason) => return Ok(reason),
                         }
@@ -283,7 +421,11 @@ impl Session {
                 skip_step = false;
                 let state = self.frame_state()?;
                 if state.cfa < start.cfa {
-                    match self.finish_call(state.return_address, state.cfa.max(start.cfa))? {
+                    match self.finish_call(
+                        state.return_address,
+                        state.cfa.max(start.cfa),
+                        Completion::Stop,
+                    )? {
                         RunOutcome::Reached => {}
                         RunOutcome::Stopped(reason) => return Ok(reason),
                     }
@@ -296,7 +438,7 @@ impl Session {
             }
         }
 
-        match self.finish_call(start.return_address, start.cfa)? {
+        match self.finish_call(start.return_address, start.cfa, Completion::Stop)? {
             RunOutcome::Reached => Ok(StopReason::Step),
             RunOutcome::Stopped(reason) => Ok(reason),
         }
@@ -313,7 +455,7 @@ impl Session {
 
         let Some(function) = start_function else {
             // No line info here: behave like step out.
-            return match self.finish_call(origin.return_address, origin.cfa)? {
+            return match self.finish_call(origin.return_address, origin.cfa, Completion::Stop)? {
                 RunOutcome::Reached => Ok(StopReason::Step),
                 RunOutcome::Stopped(reason) => Ok(reason),
             };
@@ -347,7 +489,9 @@ impl Session {
                     })?;
                 if let Some(kind) = self.escape_kind(targets.len(), steps_here) {
                     let floor = origin.cfa;
-                    match self.run_to(&targets, kind, move |state| state.cfa >= floor)? {
+                    match self.run_to(&targets, kind, Completion::Stop, move |state| {
+                        state.cfa >= floor
+                    })? {
                         RunOutcome::Reached => skip_step = true,
                         RunOutcome::Stopped(reason) => return Ok(reason),
                     }
@@ -373,7 +517,11 @@ impl Session {
                 if into && has_lines {
                     return self.finish_step_into(&state);
                 }
-                match self.finish_call(state.return_address, state.cfa.max(origin.cfa))? {
+                match self.finish_call(
+                    state.return_address,
+                    state.cfa.max(origin.cfa),
+                    Completion::FinishLine(line.clone()),
+                )? {
                     RunOutcome::Reached => {}
                     RunOutcome::Stopped(reason) => return Ok(reason),
                 }
@@ -436,7 +584,7 @@ impl Session {
         if target == state.pc {
             return Ok(StopReason::Step);
         }
-        match self.run_to(&[target], BpKind::Hw, |_| true)? {
+        match self.run_to(&[target], BpKind::Hw, Completion::Stop, |_| true)? {
             RunOutcome::Reached => Ok(StopReason::Step),
             RunOutcome::Stopped(reason) => Ok(reason),
         }

@@ -1,114 +1,12 @@
 //! Turning target bytes into numbers, and expressions into sampleable leaves.
 
-use symbols::{BaseEncoding, BitField, MemoryReader, Place, SymbolDb, TypeKind};
+use symbols::{MemoryReader, Place, SymbolDb};
 use visualizer::Visualizers;
+
+pub use symbols::{Scalar, ScalarKind};
 
 const MAX_LEAVES: usize = 64;
 const MAX_DEPTH: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarKind {
-    Unsigned,
-    Signed,
-    Float,
-}
-
-/// How to decode one scalar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Scalar {
-    pub kind: ScalarKind,
-    pub size: u32,
-    pub bits: Option<BitField>,
-}
-
-fn little_endian(bytes: &[u8]) -> u64 {
-    bytes
-        .iter()
-        .take(8)
-        .rev()
-        .fold(0, |value, byte| (value << 8) | u64::from(*byte))
-}
-
-fn sign_extend(value: u64, bits: u32) -> i64 {
-    if bits == 0 || bits >= 64 {
-        return value as i64;
-    }
-    let shift = 64 - bits;
-    ((value << shift) as i64) >> shift
-}
-
-impl Scalar {
-    /// Decoding for `place`, or None if it is not a scalar.
-    pub fn of(db: &SymbolDb, place: &Place) -> Option<Self> {
-        let (_, info) = db.strip(place.ty).ok()?;
-        let kind = match &info.kind {
-            TypeKind::Base(BaseEncoding::Float) => ScalarKind::Float,
-            TypeKind::Base(BaseEncoding::Signed | BaseEncoding::SignedChar) => ScalarKind::Signed,
-            TypeKind::Base(_) | TypeKind::Pointer(_) => ScalarKind::Unsigned,
-            TypeKind::Enum { .. } => ScalarKind::Signed,
-            _ => return None,
-        };
-        let size = db.place_size(place).ok()? as u32;
-        (1..=8).contains(&size).then_some(Self {
-            kind,
-            size,
-            bits: place.bits,
-        })
-    }
-
-    pub fn decode(&self, bytes: &[u8]) -> f64 {
-        let raw = little_endian(&bytes[..self.size as usize]);
-        if let Some(bits) = self.bits {
-            let mut value = raw >> bits.bit_offset;
-            if bits.bit_size < 64 {
-                value &= (1u64 << bits.bit_size) - 1;
-            }
-            return match self.kind {
-                ScalarKind::Signed => sign_extend(value, bits.bit_size) as f64,
-                _ => value as f64,
-            };
-        }
-        match (self.kind, self.size) {
-            (ScalarKind::Float, 4) => f64::from(f32::from_bits(raw as u32)),
-            (ScalarKind::Float, 8) => f64::from_bits(raw),
-            (ScalarKind::Signed, size) => sign_extend(raw, size * 8) as f64,
-            _ => raw as f64,
-        }
-    }
-
-    /// Bytes to store for `text`, a number or `true`/`false`.
-    pub fn encode(&self, text: &str) -> Result<u64, String> {
-        let text = text.trim();
-        let bad = || format!("{text:?} is not a valid value");
-        if self.kind == ScalarKind::Float {
-            let value: f64 = text.parse().map_err(|_| bad())?;
-            return Ok(if self.size == 4 {
-                u64::from((value as f32).to_bits())
-            } else {
-                value.to_bits()
-            });
-        }
-        match text {
-            "true" => return Ok(1),
-            "false" => return Ok(0),
-            _ => {}
-        }
-        let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-            Some(hex) => i128::from_str_radix(hex, 16),
-            None => text.parse::<i128>(),
-        }
-        .map_err(|_| bad())?;
-        let width = self.bits.map_or(self.size * 8, |bits| bits.bit_size);
-        let (low, high) = match self.kind {
-            ScalarKind::Signed => (-(1i128 << (width - 1)), (1i128 << width) - 1),
-            _ => (0, (1i128 << width) - 1),
-        };
-        if parsed < low || parsed > high {
-            return Err(format!("{text} does not fit in {width} bits"));
-        }
-        Ok(parsed as u64 & (u64::MAX >> (64 - width)))
-    }
-}
 
 /// One numeric value reachable from an expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,8 +90,8 @@ pub fn resolve_leaves(
     let parsed = symbols::parse(expression).map_err(|e| e.to_string())?;
     let place = match db.evaluate(&parsed, memory).map_err(|e| e.to_string())? {
         symbols::Evaluated::Place(place) => place,
-        symbols::Evaluated::Address { .. } => {
-            return Err("the result of '&' has no storage to sample".to_owned())
+        symbols::Evaluated::Address { .. } | symbols::Evaluated::Value(_) => {
+            return Err("this expression has no storage to sample".to_owned())
         }
     };
     let mut leaves = Vec::new();
@@ -215,6 +113,7 @@ pub fn resolve_leaves(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use symbols::BitField;
 
     fn scalar(kind: ScalarKind, size: u32) -> Scalar {
         Scalar {

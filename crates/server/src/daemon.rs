@@ -207,7 +207,7 @@ fn run_controller(stream: TcpStream, shared: &Shared) -> io::Result<()> {
     });
 
     loop {
-        match receiver.recv_timeout(POLL_INTERVAL) {
+        match receiver.recv_timeout(dap.poll_wait(POLL_INTERVAL)) {
             Ok(Incoming::Dap(request)) => {
                 if request["command"] == json!("<closed>") {
                     dap.abandon();

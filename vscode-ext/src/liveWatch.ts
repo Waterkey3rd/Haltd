@@ -163,13 +163,23 @@ export class LiveWatch implements vscode.TreeDataProvider<WatchInfo> {
     await this.client.call("watch.write", { id: item.id, value });
   }
 
+  /** Stable across restarts, so open entries stay open, and unique: a base
+   *  class has the same expression as the object containing it, and VS Code
+   *  cannot handle two nodes with one id. */
+  private treeId(item: WatchInfo): string {
+    if (item.parent === null) {
+      return item.expr;
+    }
+    const parent = this.byId.get(item.parent);
+    return `${parent ? this.treeId(parent) : item.parent}/${item.name}`;
+  }
+
   getTreeItem(item: WatchInfo): vscode.TreeItem {
     const state = item.expandable
       ? vscode.TreeItemCollapsibleState.Collapsed
       : vscode.TreeItemCollapsibleState.None;
     const tree = new vscode.TreeItem(item.name, state);
-    // The expression is stable across restarts, so open entries stay open.
-    tree.id = item.expr;
+    tree.id = this.treeId(item);
     tree.description = item.error ?? `${item.value}   [${describeRate(item.rateHz)}]`;
     tree.tooltip = item.error ?? `${item.expr}\n${item.type}\n${item.value}\nrefresh: ${describeRate(item.rateHz)}`;
     tree.contextValue = item.writable ? "watchWritable" : "watch";

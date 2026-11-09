@@ -8,17 +8,23 @@ use std::time::{Duration, Instant};
 
 use probe_api::{
     apply_post_connect, AccessWidth, BpHandle, BpKind, ConnectCfg, DeviceProfile,
-    PostConnectOptions, Probe, ProbeError, ProbeExt, Reg, ResetKind, TargetInfo,
+    PostConnectOptions, Probe, ProbeError, ProbeExt, Reg, ResetKind, TargetInfo, VC_ALL_FAULTS,
+    VC_BUSFAULT, VC_HARDFAULT, VC_MEMMANAGE, VC_USAGEFAULT,
 };
 use probe_jlink::actor::{Priority, ProbeActor, ProbeHandle};
 use symbols::{
     CoreRegisters, FormatOptions, FrameKind, FrameRegisters, LoadOptions, LocalVar, Located,
-    MemoryReader, Place, SourceLocation, SymbolDb, SymbolError,
+    MemoryReader, Number, Place, Scalar, ScalarKind, SourceLocation, SymbolDb, SymbolError,
 };
 
-use crate::breakpoints::{BreakpointTable, Placement, ResolvedBreakpoint};
+use crate::breakpoints::{
+    BreakpointTable, DataRequest, FunctionBreakpoint, LineBreakpoint, Placement, ResolvedBreakpoint,
+};
+use crate::conditions::LogPart;
+use crate::fault::{self, FaultCause, FaultRegisters};
 use crate::project::{family_for_device, DebugConfig, ProjectConfig};
 use crate::rtos::freertos::{FreeRtos, Task, TaskState};
+use crate::step::{DetachedOutcome, DetachedRun, StepKind};
 use visualizer::{Visualized, Visualizers};
 
 const DHCSR: u32 = 0xE000_EDF0;
@@ -32,6 +38,22 @@ const DFSR_DWTTRAP: u32 = 1 << 2;
 const DFSR_VCATCH: u32 = 1 << 3;
 const DFSR_EXTERNAL: u32 = 1 << 4;
 const DFSR_ALL: u32 = 0x1F;
+const DEMCR: u32 = 0xE000_EDFC;
+const DWT_CTRL: u32 = 0xE000_1000;
+const DWT_CYCCNT: u32 = 0xE000_1004;
+const DWT_COMP0: u32 = 0xE000_1020;
+const DWT_FUNCTION0: u32 = 0xE000_1028;
+const DWT_COMPARATOR_STRIDE: u32 = 16;
+const DWT_FUNCTION_MATCHED: u32 = 1 << 24;
+const MVFR0: u32 = 0xE000_EF40;
+const IPSR_MASK: u32 = 0x1FF;
+const CPUID_PART_SHIFT: u32 = 4;
+const CPUID_PART_MASK: u32 = 0xFFF;
+/// Cortex-M4, M7 and M33, the cores that can have an FPU.
+const FPU_CAPABLE_PARTS: [u32; 3] = [0xC24, 0xC27, 0xD21];
+/// How long one poll keeps serving breakpoints that resume by themselves.
+const AUTO_RESUME_BURST: Duration = Duration::from_millis(15);
+const MEMORY_CHUNK: usize = 1024;
 const HALT_POLL: Duration = Duration::from_millis(5);
 /// Above the Cortex-M memory map's useful range; never read on the target.
 const SYNTHETIC_BASE: u32 = 0xFFF0_0000;
@@ -42,6 +64,9 @@ const SUMMARY_OPTIONS: FormatOptions = FormatOptions {
     max_elements: 8,
     max_depth: 2,
 };
+
+/// Deepest call stack shown.
+const MAX_DISPLAY_FRAMES: usize = 64;
 
 /// Bare-metal images have one thread with this id.
 pub const MAIN_THREAD: i64 = 1;
@@ -64,9 +89,21 @@ pub enum StopReason {
     Step,
     Pause,
     Entry,
-    Data,
+    /// The ids of the data breakpoints that may have matched.
+    Data(Vec<i64>),
     Fault,
     External,
+    /// A step is taking a long time. The target runs on and the event loop is
+    /// free; [`Session::poll`] reports the stop when the step finishes.
+    StillRunning,
+}
+
+/// How a wait for the core to halt ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Waited {
+    Halted,
+    Cancelled,
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,6 +253,125 @@ impl MemoryReader for HaltedMemory {
     }
 }
 
+/// Why the core entered a fault handler and where it was.
+#[derive(Clone, Debug)]
+pub struct FaultReport {
+    pub exception: u32,
+    pub exception_name: String,
+    pub summary: String,
+    pub registers: FaultRegisters,
+    pub causes: Vec<FaultCause>,
+    pub address: Option<(&'static str, u32)>,
+    pub imprecise: bool,
+    pub thread: i64,
+    /// Innermost frame of the interrupted code.
+    pub pc: Option<u32>,
+    pub function: Option<String>,
+    pub location: Option<SourceLocation>,
+}
+
+/// Cycles the core ran between the last two stops.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CycleDelta {
+    pub cycles: u32,
+    pub core_hz: Option<u32>,
+    pub microseconds: Option<f64>,
+    /// The 32-bit counter may have wrapped, so `cycles` is only a remainder.
+    pub wrapped: bool,
+}
+
+#[derive(Default)]
+struct CycleTracker {
+    at_last_stop: Option<u32>,
+    run_started: Option<Instant>,
+    delta: Option<CycleDelta>,
+}
+
+/// Bits for one exception filter of the editor.
+fn catch_bits(filter: &str) -> u32 {
+    match filter {
+        "hardfault" => VC_HARDFAULT,
+        "busfault" => VC_BUSFAULT,
+        "memmanage" => VC_MEMMANAGE,
+        "usagefault" => VC_USAGEFAULT,
+        _ => 0,
+    }
+}
+
+fn default_catch(options: &LaunchOptions) -> u32 {
+    if options.project.debug.vector_catch {
+        VC_ALL_FAULTS
+    } else {
+        0
+    }
+}
+
+/// Register from a name shown in the Registers scope.
+fn register_named(name: &str) -> Option<Reg> {
+    Some(match name {
+        "sp" => Reg::SP,
+        "lr" => Reg::LR,
+        "pc" => Reg::PC,
+        "xpsr" => Reg::Xpsr,
+        "msp" => Reg::Msp,
+        "psp" => Reg::Psp,
+        "primask" => Reg::Primask,
+        "basepri" => Reg::Basepri,
+        "faultmask" => Reg::Faultmask,
+        "control" => Reg::Control,
+        "fpscr" => Reg::Fpscr,
+        other => {
+            if let Some(number) = other.strip_prefix('r') {
+                Reg::R(number.parse().ok().filter(|n| *n < 13)?)
+            } else {
+                Reg::S(other.strip_prefix('s')?.parse().ok().filter(|n| *n < 32)?)
+            }
+        }
+    })
+}
+
+/// Write a scalar to the target, keeping neighbouring bit-fields intact.
+pub fn write_scalar(
+    handle: &ProbeHandle,
+    place: Place,
+    scalar: Scalar,
+    text: &str,
+) -> std::result::Result<(), String> {
+    let value = scalar.encode(text)?;
+    let size = scalar.size as usize;
+    handle
+        .call_blocking(Priority::P0, move |probe: &mut dyn Probe| {
+            let mut bytes = value.to_le_bytes();
+            if let Some(bits) = scalar.bits {
+                let mut current = [0u8; 8];
+                probe.read_mem(place.addr, &mut current[..size], AccessWidth::U8)?;
+                let old = u64::from_le_bytes(current);
+                let mask = (u64::MAX >> (64 - bits.bit_size)) << bits.bit_offset;
+                bytes = ((old & !mask) | ((value << bits.bit_offset) & mask)).to_le_bytes();
+            }
+            match size {
+                4 if place.addr.is_multiple_of(4) => probe.write_u32(
+                    place.addr,
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                ),
+                _ => probe.write_mem(place.addr, &bytes[..size], AccessWidth::U8),
+            }
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+fn access_width(bits: u32) -> AccessWidth {
+    match bits {
+        8 => AccessWidth::U8,
+        16 => AccessWidth::U16,
+        _ => AccessWidth::U32,
+    }
+}
+
+/// Variables by name, plus the bytes backing register-held ones.
+type NamedLocals = (Vec<(String, Place)>, Vec<u8>);
+
 /// A frame's variables, plus the bytes backing register-held ones.
 type FrameLocals = (Vec<(LocalVar, Option<Place>)>, Vec<u8>);
 
@@ -238,6 +394,18 @@ pub struct Session {
     stack: Option<UnwoundStack>,
     float_registers: Option<Option<[u32; 32]>>,
     visualizers: Option<Visualizers>,
+    /// DEMCR vector-catch bits in effect.
+    fault_catch: u32,
+    /// Log messages from breakpoints, waiting to be shown.
+    output: Vec<String>,
+    /// The next unwind only needs the innermost frame.
+    shallow_unwind: bool,
+    fpu: Option<bool>,
+    cycles: CycleTracker,
+    peripherals: Option<Arc<svd::Device>>,
+    auto_resuming: bool,
+    /// The step that outlasted its wait, if one is under way.
+    pub(crate) detached: Option<DetachedRun>,
 }
 
 fn load_symbols(path: &Path) -> Result<Arc<SymbolDb>> {
@@ -299,7 +467,16 @@ impl Session {
             stack: None,
             float_registers: None,
             visualizers: None,
+            fault_catch: 0,
+            output: Vec::new(),
+            shallow_unwind: false,
+            fpu: None,
+            cycles: CycleTracker::default(),
+            peripherals: None,
+            auto_resuming: false,
+            detached: None,
         };
+        session.fault_catch = default_catch(&session.options);
         session.visualizers = session.load_visualizers();
         session.configure_target()?;
         Ok(session)
@@ -317,6 +494,9 @@ impl Session {
         self.db = load_symbols(&options.elf)?;
         self.rtos = FreeRtos::detect(&self.db)?;
         self.options = options;
+        self.fault_catch = default_catch(&self.options);
+        self.cycles = CycleTracker::default();
+        self.peripherals = None;
         self.visualizers = self.load_visualizers();
         self.profile = select_profile(&self.options);
         self.state = if self.probe_is_halted()? {
@@ -382,8 +562,12 @@ impl Session {
             self.call(|probe| probe.halt())?;
             self.state = RunState::Halted;
         }
+        self.drop_detached()?;
         let handle = self.handle.clone();
         self.breakpoints.clear(&handle)?;
+        // With nobody attached, a catch would hang the target at the fault.
+        self.fault_catch = 0;
+        self.call(|probe| probe.modify_u32(DEMCR, 0, VC_ALL_FAULTS))?;
         self.invalidate();
         if !halt {
             self.call(|probe| probe.go())?;
@@ -407,7 +591,7 @@ impl Session {
     fn configure_target(&self) -> Result<()> {
         let debug = self.debug_config();
         let settings = PostConnectOptions {
-            vector_catch: debug.vector_catch,
+            vector_catch: self.fault_catch,
             freeze_on_halt: debug.freeze_on_halt.clone(),
         };
         let profile = self.profile.clone().unwrap_or_else(generic_profile);
@@ -461,9 +645,26 @@ impl Session {
         })
     }
 
+    pub fn has_fpu(&mut self) -> bool {
+        if let Some(known) = self.fpu {
+            return known;
+        }
+        let part = (self.target.cpuid >> CPUID_PART_SHIFT) & CPUID_PART_MASK;
+        let present = FPU_CAPABLE_PARTS.contains(&part)
+            && self
+                .call(|probe| probe.read_u32(MVFR0))
+                .is_ok_and(|features| features != 0);
+        self.fpu = Some(present);
+        present
+    }
+
     fn floats(&mut self) -> Option<[u32; 32]> {
         if let Some(known) = self.float_registers {
             return known;
+        }
+        if !self.has_fpu() {
+            self.float_registers = Some(None);
+            return None;
         }
         let read = self.call(|probe| {
             let ids: Vec<Reg> = (0..32).map(Reg::S).collect();
@@ -489,7 +690,7 @@ impl Session {
             return Ok(StopReason::Fault);
         }
         if dfsr & DFSR_DWTTRAP != 0 {
-            return Ok(StopReason::Data);
+            return Ok(StopReason::Data(self.matched_data_breakpoints()?));
         }
         if dfsr & DFSR_BKPT != 0 {
             let pc = self.registers()?.r[15] & !1;
@@ -510,20 +711,197 @@ impl Session {
         Ok(StopReason::Pause)
     }
 
-    /// Detect a stop while running. Call every 20 ms or so.
+    /// Which data breakpoints fired, from the comparators that matched.
+    /// Reading DWT_FUNCTION clears its MATCHED bit.
+    fn matched_data_breakpoints(&self) -> Result<Vec<i64>> {
+        let matched = self.call(|probe| {
+            let count = (probe.read_u32(DWT_CTRL)? >> 28).min(16);
+            let mut addresses = Vec::new();
+            for index in 0..count {
+                let stride = index * DWT_COMPARATOR_STRIDE;
+                if probe.read_u32(DWT_FUNCTION0 + stride)? & DWT_FUNCTION_MATCHED != 0 {
+                    addresses.push(probe.read_u32(DWT_COMP0 + stride)?);
+                }
+            }
+            Ok(addresses)
+        })?;
+        Ok(self.breakpoints.data_ids_for(&matched))
+    }
+
+    /// Log messages produced by breakpoints since the last call.
+    pub fn take_output(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output)
+    }
+
+    fn condition_holds(&mut self, id: i64, thread: i64) -> Result<bool> {
+        let Some(condition) = self
+            .breakpoints
+            .behavior(id)
+            .and_then(|behavior| behavior.condition.clone())
+        else {
+            return Ok(true);
+        };
+        let (locals, synthetic) = self.stop_locals_at(thread, 0)?;
+        let db = self.db.clone();
+        let mut memory = FrameMemory {
+            inner: &mut self.memory,
+            synthetic,
+        };
+        let value: Number = db.evaluate_number(&condition, &mut memory, &locals)?;
+        Ok(value.is_true())
+    }
+
+    fn render_log(&mut self, parts: &[LogPart], thread: i64) -> String {
+        let mut text = String::new();
+        for part in parts {
+            match part {
+                LogPart::Text(literal) => text.push_str(literal),
+                LogPart::Expression(expression) => {
+                    match self.evaluate(expression, Some((thread, 0))) {
+                        Ok(view) => text.push_str(&view.value),
+                        Err(error) => text.push_str(&format!("<{error}>")),
+                    }
+                }
+            }
+        }
+        text
+    }
+
+    /// Decide one breakpoint's hit. A condition that cannot be evaluated stops
+    /// the target, because silently carrying on would hide the mistake.
+    fn hit_wants_stop(&mut self, id: i64, thread: i64) -> Result<bool> {
+        match self.condition_holds(id, thread) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => {
+                self.output
+                    .push(format!("breakpoint condition failed: {error}"));
+                return Ok(true);
+            }
+        }
+        let hits = self.breakpoints.count_hit(id);
+        let Some(behavior) = self.breakpoints.behavior(id) else {
+            return Ok(true);
+        };
+        if behavior.hit.is_some_and(|hit| !hit.matches(hits)) {
+            return Ok(false);
+        }
+        let Some(parts) = behavior.log.clone() else {
+            return Ok(true);
+        };
+        let message = self.render_log(&parts, thread);
+        self.output.push(message);
+        Ok(false)
+    }
+
+    /// Apply breakpoint conditions to a stop. Returns None if the target
+    /// should simply continue, which the caller then does.
+    pub(crate) fn filter_stop(&mut self, reason: StopReason) -> Result<Option<StopReason>> {
+        let ids = match &reason {
+            StopReason::Breakpoint(ids) | StopReason::Data(ids) => ids.clone(),
+            _ => return Ok(Some(reason)),
+        };
+        let plain = ids.iter().all(|id| {
+            self.breakpoints
+                .behavior(*id)
+                .is_none_or(|behavior| behavior.is_plain())
+        });
+        if plain {
+            return Ok(Some(reason));
+        }
+        self.note_stop(&reason)?;
+        let thread = self.current_thread()?;
+        self.shallow_unwind = true;
+        let mut wanted = Vec::new();
+        let mut failure = None;
+        for id in ids {
+            match self.hit_wants_stop(id, thread) {
+                Ok(true) => wanted.push(id),
+                Ok(false) => {}
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        // A partial stack must not be mistaken for the real one.
+        self.shallow_unwind = false;
+        self.stack = None;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(match reason {
+            StopReason::Data(_) => StopReason::Data(wanted),
+            _ => StopReason::Breakpoint(wanted),
+        }))
+    }
+
+    /// Detect a stop while running. Call every 20 ms or so. Breakpoints that
+    /// resume by themselves are served here without waiting for the next poll.
+    /// True while breakpoints keep resuming, so the next poll should not wait.
+    pub fn is_auto_resuming(&self) -> bool {
+        self.auto_resuming
+    }
+
     pub fn poll(&mut self) -> Result<Option<StopReason>> {
         if self.state != RunState::Running {
             return Ok(None);
         }
-        let halted = self
-            .handle
-            .call_blocking(Priority::P1, |probe: &mut dyn Probe| probe.is_halted())??;
-        if !halted {
-            return Ok(None);
+        let started = Instant::now();
+        let mut resumed = false;
+        loop {
+            // A breakpoint that keeps resuming must not shut out editor requests.
+            if resumed && started.elapsed() >= AUTO_RESUME_BURST {
+                self.auto_resuming = true;
+                return Ok(None);
+            }
+            let halted = self
+                .handle
+                .call_blocking(Priority::P1, |probe: &mut dyn Probe| probe.is_halted())??;
+            if !halted {
+                if resumed {
+                    continue;
+                }
+                self.auto_resuming = false;
+                return Ok(None);
+            }
+            let reason = self.consume_halt_reason(false)?;
+            if self.detached.is_some() {
+                match self.resolve_detached(reason)? {
+                    DetachedOutcome::Stop(reason) => {
+                        self.auto_resuming = false;
+                        self.note_stop(&reason)?;
+                        return Ok(Some(reason));
+                    }
+                    DetachedOutcome::FinishLine => {
+                        self.auto_resuming = false;
+                        let reason = self.step(StepKind::Over)?;
+                        return Ok((reason != StopReason::StillRunning).then_some(reason));
+                    }
+                    DetachedOutcome::Resume => {
+                        self.begin_stop_tracking();
+                        self.resume_raw()?;
+                        resumed = true;
+                        continue;
+                    }
+                }
+            }
+            match self.filter_stop(reason)? {
+                Some(reason) => {
+                    self.auto_resuming = false;
+                    self.note_stop(&reason)?;
+                    return Ok(Some(reason));
+                }
+                None => {
+                    self.begin_stop_tracking();
+                    self.resume_raw()?;
+                    resumed = true;
+                }
+            }
         }
-        let reason = self.consume_halt_reason(false)?;
-        self.note_stop(&reason)?;
-        Ok(Some(reason))
     }
 
     /// Work out which inlined frames to present at a new stop. A stop at the
@@ -568,6 +946,7 @@ impl Session {
 
     pub fn pause(&mut self) -> Result<StopReason> {
         self.call(|probe| probe.halt())?;
+        self.drop_detached()?;
         let reason = self.consume_halt_reason(true)?;
         self.note_stop(&reason)?;
         Ok(reason)
@@ -576,6 +955,7 @@ impl Session {
     /// Start the target, stepping off any breakpoint at the current PC.
     pub fn resume(&mut self) -> Result<()> {
         self.begin_stop_tracking();
+        self.note_run_started();
         self.resume_raw()
     }
 
@@ -593,18 +973,18 @@ impl Session {
         Ok(())
     }
 
-    /// Wait until halted, returning false if cancelled first.
-    pub(crate) fn wait_halted(&mut self, timeout: Option<Duration>) -> Result<bool> {
+    /// Wait until the core halts, the wait is cancelled, or `timeout` passes.
+    pub(crate) fn wait_halted(&mut self, timeout: Option<Duration>) -> Result<Waited> {
         let started = Instant::now();
         loop {
             if self.probe_is_halted()? {
-                return Ok(true);
+                return Ok(Waited::Halted);
             }
             if self.cancel.swap(false, Ordering::SeqCst) {
-                return Ok(false);
+                return Ok(Waited::Cancelled);
             }
             if timeout.is_some_and(|limit| started.elapsed() > limit) {
-                return Ok(false);
+                return Ok(Waited::TimedOut);
             }
             std::thread::sleep(HALT_POLL);
         }
@@ -612,6 +992,11 @@ impl Session {
 
     /// Reset and leave the core halted at the reset vector.
     pub fn reset_halt(&mut self) -> Result<()> {
+        if self.detached.is_some() && self.state == RunState::Running {
+            self.call(|probe| probe.halt())?;
+            self.state = RunState::Halted;
+        }
+        self.drop_detached()?;
         self.begin_stop_tracking();
         self.call(|probe| probe.reset(ResetKind::Normal, true))?;
         self.configure_target()?;
@@ -620,6 +1005,8 @@ impl Session {
             let value = probe.read_u32(DFSR)?;
             probe.write_u32(DFSR, value & DFSR_ALL)
         })?;
+        self.breakpoints.reset_hits();
+        self.cycles = CycleTracker::default();
         self.invalidate();
         self.state = RunState::Halted;
         Ok(())
@@ -654,25 +1041,42 @@ impl Session {
             .ok_or_else(|| EngineError::Other("the image has no main function".to_owned()))?;
         let target = self.db.after_prologue(main.low, main.high)?;
         let handle = self.place_temporary(target, BpKind::Hw)?;
-        let outcome = self.go_and_wait();
+        let outcome = self.run_until_wanted_stop(target);
         self.remove_temporary(handle)?;
-        let reached = outcome?;
-        if !reached {
-            return Err(EngineError::Other("main was not reached".to_owned()));
-        }
-        let reason = self.consume_halt_reason(false)?;
-        let result = match reason {
-            StopReason::Fault | StopReason::Data => reason,
-            StopReason::Breakpoint(ids) if !ids.is_empty() => StopReason::Breakpoint(ids),
-            _ => StopReason::Entry,
-        };
+        let result = outcome?;
         self.note_stop(&result)?;
         Ok(result)
     }
 
+    /// Run to `target`, passing over breakpoints whose conditions say so.
+    fn run_until_wanted_stop(&mut self, target: u32) -> Result<StopReason> {
+        // A pause that has already been handled must not cancel this run.
+        self.cancel.store(false, Ordering::SeqCst);
+        loop {
+            if !self.go_and_wait()? {
+                self.call(|probe| probe.halt())?;
+                self.consume_halt_reason(true)?;
+                return Ok(StopReason::Pause);
+            }
+            let reason = self.consume_halt_reason(false)?;
+            let at_target = self.registers()?.r[15] & !1 == target;
+            return Ok(match self.filter_stop(reason)? {
+                Some(StopReason::Fault) => StopReason::Fault,
+                Some(StopReason::Data(ids)) => StopReason::Data(ids),
+                Some(StopReason::Breakpoint(ids)) if !ids.is_empty() => StopReason::Breakpoint(ids),
+                Some(_) => StopReason::Entry,
+                None if at_target => StopReason::Entry,
+                None => {
+                    self.begin_stop_tracking();
+                    continue;
+                }
+            });
+        }
+    }
+
     pub(crate) fn go_and_wait(&mut self) -> Result<bool> {
         self.resume_raw()?;
-        self.wait_halted(None)
+        Ok(self.wait_halted(None)? == Waited::Halted)
     }
 
     pub(crate) fn place_temporary(&self, address: u32, kind: BpKind) -> Result<BpHandle> {
@@ -700,7 +1104,7 @@ impl Session {
     pub fn set_source_breakpoints(
         &mut self,
         file: &str,
-        lines: &[u32],
+        lines: &[LineBreakpoint],
     ) -> Result<Vec<ResolvedBreakpoint>> {
         let file = file.to_owned();
         let lines = lines.to_vec();
@@ -716,14 +1120,254 @@ impl Session {
     /// Replace the function breakpoints.
     pub fn set_function_breakpoints(
         &mut self,
-        names: &[String],
+        functions: &[FunctionBreakpoint],
     ) -> Result<Vec<ResolvedBreakpoint>> {
-        let names = names.to_vec();
+        let functions = functions.to_vec();
         self.while_halted(move |session| {
             let db = session.db.clone();
             let handle = session.handle.clone();
-            Ok(session.breakpoints.set_functions(&db, &handle, &names)?)
+            Ok(session
+                .breakpoints
+                .set_functions(&db, &handle, &functions)?)
         })
+    }
+
+    /// Replace the data breakpoints.
+    pub fn set_data_breakpoints(
+        &mut self,
+        requests: &[DataRequest],
+    ) -> Result<Vec<ResolvedBreakpoint>> {
+        let requests = requests.to_vec();
+        self.while_halted(move |session| {
+            let handle = session.handle.clone();
+            Ok(session.breakpoints.set_data(&handle, &requests)?)
+        })
+    }
+
+    /// Choose which faults halt on entry. A project with `vectorCatch: false`
+    /// stays off whatever the editor sends.
+    pub fn set_exception_filters(&mut self, filters: &[String]) -> Result<()> {
+        let wanted = filters.iter().fold(0, |bits, name| bits | catch_bits(name));
+        self.fault_catch = if self.debug_config().vector_catch {
+            wanted
+        } else {
+            0
+        };
+        let bits = self.fault_catch;
+        self.call(move |probe| probe.modify_u32(DEMCR, bits, VC_ALL_FAULTS & !bits))
+    }
+
+    /// Explain the fault the core is in.
+    pub fn fault_report(&mut self) -> Result<FaultReport> {
+        let registers = self.call(|probe| FaultRegisters::read(probe))?;
+        let exception = self.registers()?.xpsr & IPSR_MASK;
+        let thread = self.current_thread()?;
+        let frames = self.stack_trace(thread).unwrap_or_default();
+        // The frame below the exception boundary is the code that faulted. If
+        // stacking failed there is no boundary, and the top frame is all we have.
+        let boundary = frames.iter().position(|frame| frame.is_exception);
+        let site = boundary
+            .and_then(|index| frames.get(index + 1))
+            .or(frames.first());
+        // A bad branch faults at an address with no code, so the source line
+        // is the nearest caller that has one.
+        let source = boundary
+            .and_then(|index| frames[index + 1..].iter().find(|f| f.location.is_some()))
+            .or(site);
+        Ok(FaultReport {
+            exception,
+            exception_name: fault::exception_name(exception),
+            summary: fault::summarize(exception, &registers),
+            causes: fault::decode_causes(&registers),
+            address: fault::fault_address(&registers),
+            imprecise: fault::is_imprecise(&registers),
+            registers,
+            thread,
+            pc: site.map(|frame| frame.pc),
+            function: source.map(|frame| frame.name.clone()),
+            location: source.and_then(|frame| frame.location.clone()),
+        })
+    }
+
+    pub(crate) fn note_run_started(&mut self) {
+        self.cycles.run_started = Some(Instant::now());
+    }
+
+    /// `SystemCoreClock` as the firmware last set it.
+    fn core_clock(&mut self) -> Option<u32> {
+        let (address, _) = self.db.elf_symbol("SystemCoreClock")?;
+        let mut bytes = [0u8; 4];
+        self.memory.read(address, &mut bytes).ok()?;
+        Some(u32::from_le_bytes(bytes)).filter(|hz| *hz != 0)
+    }
+
+    /// Update the cycle count at a stop reported to the user.
+    pub fn note_cycles(&mut self) -> Result<Option<CycleDelta>> {
+        let now = self.call(|probe| probe.read_u32(DWT_CYCCNT))?;
+        let previous = self.cycles.at_last_stop.replace(now);
+        let ran_for = self.cycles.run_started.take().map(|start| start.elapsed());
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+        let cycles = now.wrapping_sub(previous);
+        let core_hz = self.core_clock();
+        let wrapped = match (core_hz, ran_for) {
+            (Some(hz), Some(duration)) => {
+                duration.as_secs_f64() * f64::from(hz) >= f64::from(u32::MAX)
+            }
+            _ => false,
+        };
+        let delta = CycleDelta {
+            cycles,
+            core_hz,
+            microseconds: core_hz.map(|hz| f64::from(cycles) * 1e6 / f64::from(hz)),
+            wrapped,
+        };
+        self.cycles.delta = Some(delta);
+        Ok(Some(delta))
+    }
+
+    pub fn last_cycles(&self) -> Option<CycleDelta> {
+        self.cycles.delta
+    }
+
+    /// Read as much of a range as the target allows, from its start.
+    pub fn read_memory(&mut self, address: u32, count: usize) -> Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(count);
+        let mut chunk = MEMORY_CHUNK;
+        while bytes.len() < count {
+            let length = chunk.min(count - bytes.len());
+            let at = address.wrapping_add(bytes.len() as u32);
+            let read = self.call(move |probe| {
+                let mut part = vec![0u8; length];
+                probe.read_mem(at, &mut part, AccessWidth::Auto)?;
+                Ok(part)
+            });
+            match read {
+                Ok(part) => bytes.extend_from_slice(&part),
+                // Close in on where the readable part ends.
+                Err(_) if chunk > 1 => chunk /= 4,
+                Err(EngineError::Probe(ProbeError::Memory { .. })) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// Change target memory. Flash goes through Build & Reload instead.
+    pub fn write_memory(&mut self, address: u32, data: Vec<u8>) -> Result<()> {
+        let end = u64::from(address) + data.len() as u64;
+        let in_flash = self.profile.as_ref().is_some_and(|profile| {
+            profile.memory.iter().any(|region| {
+                region.kind == "flash"
+                    && u64::from(address) < u64::from(region.start) + u64::from(region.size)
+                    && end > u64::from(region.start)
+            })
+        });
+        if in_flash {
+            return Err(EngineError::Other(
+                "flash cannot be changed from the memory view".to_owned(),
+            ));
+        }
+        self.call(move |probe| probe.write_mem(address, &data, AccessWidth::Auto))?;
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Set a variable from text.
+    pub fn write_place(&mut self, place: Place, text: &str) -> Result<()> {
+        if place.addr >= SYNTHETIC_BASE {
+            return Err(EngineError::Other(
+                "this value is held in a register and cannot be changed here".to_owned(),
+            ));
+        }
+        let scalar = Scalar::of(&self.db, &place)
+            .ok_or_else(|| EngineError::Other("only numeric values can be set".to_owned()))?;
+        write_scalar(&self.handle, place, scalar, text).map_err(EngineError::Other)?;
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Set a register of the innermost frame.
+    pub fn write_register(
+        &mut self,
+        thread: i64,
+        frame: usize,
+        name: &str,
+        text: &str,
+    ) -> Result<u32> {
+        let register = register_named(name)
+            .ok_or_else(|| EngineError::Other(format!("{name} cannot be set")))?;
+        if !self.is_live_frame(thread, frame)? {
+            return Err(EngineError::Other(
+                "only the running frame's registers can be set".to_owned(),
+            ));
+        }
+        let scalar = Scalar {
+            kind: ScalarKind::Unsigned,
+            size: 4,
+            bits: None,
+        };
+        let value = scalar.encode(text).map_err(EngineError::Other)? as u32;
+        self.call(move |probe| probe.write_reg(register, value))?;
+        self.invalidate();
+        Ok(value)
+    }
+
+    fn is_live_frame(&mut self, thread: i64, frame: usize) -> Result<bool> {
+        let real = self
+            .ensure_stack(thread)?
+            .display
+            .get(frame)
+            .map(|display| display.real);
+        Ok(real == Some(0) && self.is_current_thread(thread)?)
+    }
+
+    /// The SVD description, read on first use. None if the device has none.
+    pub fn peripherals(&mut self) -> Result<Option<Arc<svd::Device>>> {
+        if self.peripherals.is_none() {
+            let configured =
+                self.options
+                    .project
+                    .svd
+                    .as_ref()
+                    .map(|file| match &self.options.workspace {
+                        Some(workspace) => workspace.join(file),
+                        None => PathBuf::from(file),
+                    });
+            let Some(path) =
+                configured.or_else(|| svd::find_for_device(&self.options.connect.device))
+            else {
+                return Ok(None);
+            };
+            let device = svd::load(&path).map_err(EngineError::Other)?;
+            self.peripherals = Some(Arc::new(device));
+        }
+        Ok(self.peripherals.clone())
+    }
+
+    pub fn read_peripheral_register(&self, register: &svd::Register) -> Result<u32> {
+        let (address, bits) = (register.address, register.bits);
+        self.call(move |probe| {
+            let mut bytes = [0u8; 4];
+            let size = (bits / 8).clamp(1, 4) as usize;
+            probe.read_mem(address, &mut bytes[..size], access_width(bits))?;
+            Ok(u32::from_le_bytes(bytes))
+        })
+    }
+
+    pub fn write_peripheral_register(
+        &mut self,
+        register: &svd::Register,
+        value: u32,
+    ) -> Result<()> {
+        let (address, bits) = (register.address, register.bits);
+        self.call(move |probe| {
+            let size = (bits / 8).clamp(1, 4) as usize;
+            probe.write_mem(address, &value.to_le_bytes()[..size], access_width(bits))
+        })?;
+        self.invalidate();
+        Ok(())
     }
 
     pub fn breakpoint_placements(&self) -> Vec<Placement> {
@@ -743,6 +1387,7 @@ impl Session {
             self.call(|probe| probe.halt())?;
             self.state = RunState::Halted;
         }
+        self.drop_detached()?;
         // Removed first so stale BKPTs do not disturb the sector comparison.
         let handle = self.handle.clone();
         self.breakpoints.unplace_all(&handle)?;
@@ -760,7 +1405,18 @@ impl Session {
         self.rtos = FreeRtos::detect(&self.db)?;
         self.reset_halt()?;
         let db = self.db.clone();
-        Ok(self.breakpoints.rebind(&db, &handle)?)
+        let mut resolved = self.breakpoints.rebind(&db, &handle)?;
+        let mut memory = HaltedMemory::new(handle.clone());
+        resolved.extend(self.breakpoints.rebind_data(&handle, |expression| {
+            let parsed = symbols::parse(expression).ok()?;
+            match db.evaluate(&parsed, &mut memory).ok()? {
+                symbols::Evaluated::Place(place) if place.bits.is_none() => {
+                    Some((place.addr, db.place_size(&place).ok()? as u32))
+                }
+                _ => None,
+            }
+        })?);
+        Ok(resolved)
     }
 
     // ---- Threads and frames ----
@@ -773,7 +1429,9 @@ impl Session {
     }
 
     fn start_registers(&mut self, thread: i64) -> Result<CoreRegisters> {
-        if thread != MAIN_THREAD {
+        // Walking the kernel's task lists takes tens of milliseconds, which
+        // the thread that is running on the core never needs.
+        if thread != MAIN_THREAD && !self.is_current_thread(thread)? {
             if let Some(rtos) = &self.rtos {
                 let list = rtos.tasks(&mut self.memory)?.tasks;
                 if let Some(task) = list
@@ -804,7 +1462,12 @@ impl Session {
     fn ensure_stack(&mut self, thread: i64) -> Result<&UnwoundStack> {
         if self.stack.as_ref().is_none_or(|s| s.thread != thread) {
             let start = self.start_registers(thread)?;
-            let frames = self.db.unwind(&start, &mut self.memory)?;
+            let limit = if self.shallow_unwind {
+                1
+            } else {
+                MAX_DISPLAY_FRAMES
+            };
+            let frames = self.db.unwind_limited(&start, &mut self.memory, limit)?;
             let current = self.is_current_thread(thread)?;
             let hidden = if current { self.hidden_inline } else { 0 };
             let override_location = self.stop_location.clone().filter(|_| current);
@@ -1034,6 +1697,8 @@ impl Session {
             .collect())
     }
 
+    /// Registers as a frame sees them. Registers the unwinder cannot recover
+    /// are left out; special registers only exist for the running frame.
     pub fn registers_view(&mut self, thread: i64, index: usize) -> Result<Vec<(String, u32)>> {
         let stack = self.ensure_stack(thread)?;
         let Some(display) = stack.display.get(index) else {
@@ -1044,11 +1709,79 @@ impl Session {
             "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
             "lr", "pc",
         ];
-        Ok(NAMES
+        let mut view: Vec<(String, u32)> = NAMES
             .iter()
             .zip(registers)
             .filter_map(|(name, value)| value.map(|value| ((*name).to_owned(), value)))
-            .collect())
+            .collect();
+        if self.is_live_frame(thread, index)? {
+            const SPECIAL: [(&str, Reg); 7] = [
+                ("xpsr", Reg::Xpsr),
+                ("msp", Reg::Msp),
+                ("psp", Reg::Psp),
+                ("primask", Reg::Primask),
+                ("basepri", Reg::Basepri),
+                ("faultmask", Reg::Faultmask),
+                ("control", Reg::Control),
+            ];
+            let values = self.call(|probe| {
+                let ids = SPECIAL.map(|(_, register)| register);
+                let mut values = [0u32; SPECIAL.len()];
+                probe.read_regs(&ids, &mut values)?;
+                Ok(values)
+            })?;
+            view.extend(
+                SPECIAL
+                    .iter()
+                    .zip(values)
+                    .map(|((name, _), value)| ((*name).to_owned(), value)),
+            );
+        }
+        Ok(view)
+    }
+
+    /// FPU state of the running frame: S0-S31 and FPSCR.
+    pub fn fpu_view(&mut self, thread: i64, index: usize) -> Result<Option<([u32; 32], u32)>> {
+        if !self.is_live_frame(thread, index)? {
+            return Ok(None);
+        }
+        let Some(singles) = self.floats() else {
+            return Ok(None);
+        };
+        let status = self.call(|probe| {
+            let mut value = [0u32; 1];
+            probe.read_regs(&[Reg::Fpscr], &mut value)?;
+            Ok(value[0])
+        })?;
+        Ok(Some((singles, status)))
+    }
+
+    /// Variables of a frame as places, to find one by name.
+    pub fn local_place(&mut self, thread: i64, index: usize, name: &str) -> Result<Option<Place>> {
+        let (locals, _) = self.stop_locals_at(thread, index)?;
+        Ok(locals
+            .into_iter()
+            .find(|(local, _)| local == name)
+            .map(|(_, place)| place))
+    }
+
+    fn stop_locals_at(&mut self, thread: i64, index: usize) -> Result<NamedLocals> {
+        let (locals, synthetic) = self.frame_locals(thread, index)?;
+        Ok((
+            locals
+                .into_iter()
+                .filter_map(|(var, place)| place.map(|place| (var.name, place)))
+                .collect(),
+            synthetic,
+        ))
+    }
+
+    pub fn place_in_memory(place: &Place) -> bool {
+        place.addr < SYNTHETIC_BASE
+    }
+
+    pub fn place_size(&self, place: &Place) -> Result<u32> {
+        Ok(self.db.place_size(place)? as u32)
     }
 
     pub fn globals(&mut self) -> Vec<(String, Place)> {
@@ -1098,6 +1831,13 @@ impl Session {
         };
         Ok(match evaluated {
             symbols::Evaluated::Place(place) => self.view(expression.to_owned(), place, synthetic),
+            symbols::Evaluated::Value(number) => VariableView {
+                name: expression.to_owned(),
+                type_name: String::new(),
+                value: number.to_string(),
+                place: None,
+                expandable: false,
+            },
             symbols::Evaluated::Address { value, target } => VariableView {
                 name: expression.to_owned(),
                 type_name: format!("{}*", db.type_name(target)),

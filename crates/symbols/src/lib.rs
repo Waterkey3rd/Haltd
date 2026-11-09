@@ -11,15 +11,17 @@ mod format;
 mod index;
 mod lines;
 mod loc;
+mod scalar;
 mod scope;
 mod types;
 mod unwind;
 
 pub use db::{Function, LoadOptions, LoadStats, SymbolDb, Variable};
-pub use expr::{parse, Evaluated, Expr, Place};
+pub use expr::{parse, BinaryOp, CastType, Evaluated, Expr, Place, UnaryOp};
 pub use format::{FormatOptions, ReadResult};
 pub use lines::{ResolvedLine, SourceLocation};
 pub use loc::{FrameRegisters, Located};
+pub use scalar::{Number, Scalar, ScalarKind};
 pub use scope::{LocalVar, ScopeFrame};
 pub use types::{BaseEncoding, BitField, Member, Type, TypeKind, TypeRef};
 pub use unwind::{exception_frame_size, CoreRegisters, FrameKind, StackFrame};

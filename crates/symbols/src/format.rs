@@ -60,6 +60,11 @@ impl SymbolDb {
                 type_name: format!("{}*", self.type_name(target)),
                 value: format!("{value:#010x}"),
             }),
+            Evaluated::Value(number) => Ok(ReadResult {
+                addr: None,
+                type_name: String::new(),
+                value: number.to_string(),
+            }),
             Evaluated::Place(place) => {
                 let value = self.render_place(&place, memory, options)?;
                 Ok(ReadResult {

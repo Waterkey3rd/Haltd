@@ -9,6 +9,7 @@ probe-api.workspace = true
 probe-jlink.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+svd.workspace = true
 symbols.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

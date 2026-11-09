@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 engine.workspace = true
+svd.workspace = true
 probe-api.workspace = true
 probe-jlink.workspace = true
 serde.workspace = true
