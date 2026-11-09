@@ -139,6 +139,9 @@ pub struct Dap {
     variables: Vec<VarNode>,
     after_configuration: AfterConfiguration,
     last_threads: Vec<Value>,
+    /// Lower-cased compiler path to the editor's spelling of it.
+    #[cfg(windows)]
+    editor_paths: std::collections::HashMap<String, String>,
     run_to_main_on_reload: bool,
     sampler: Arc<Sampler>,
     /// Whether the Timeline currently shows the target as running.
@@ -380,21 +383,6 @@ fn field_value(field: &svd::Field, text: &str) -> Result<u32, String> {
     }
 }
 
-fn describe_breakpoint(breakpoint: &ResolvedBreakpoint) -> Value {
-    let mut out = json!({
-        "id": breakpoint.id,
-        "verified": breakpoint.verified,
-        "line": breakpoint.line,
-    });
-    if let Some(file) = &breakpoint.file {
-        out["source"] = json!({"path": file});
-    }
-    if let Some(message) = &breakpoint.message {
-        out["message"] = json!(message);
-    }
-    out
-}
-
 fn parse_interface(arguments: &Value) -> Result<Interface, String> {
     match arguments["interface"].as_str().unwrap_or("SWD") {
         text if text.eq_ignore_ascii_case("swd") => Ok(Interface::Swd),
@@ -414,6 +402,24 @@ fn parse_speed(arguments: &Value) -> Result<u32, String> {
         Value::String(text) if text == "auto" => Ok(DEFAULT_SPEED_KHZ),
         Value::String(text) => text.parse().map_err(|_| format!("invalid speed {text:?}")),
         other => Err(format!("invalid speed {other}")),
+    }
+}
+
+/// An empty value counts as not configured, as `${env:X}` can expand to one.
+fn parse_serial(arguments: &Value) -> Result<Option<u32>, String> {
+    match &arguments["serial"] {
+        Value::Null => Ok(None),
+        Value::String(text) if text.is_empty() => Ok(None),
+        Value::String(text) => text
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("invalid serial {text:?}")),
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("invalid serial {number}")),
+        other => Err(format!("invalid serial {other}")),
     }
 }
 
@@ -438,6 +444,14 @@ fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
                 .to_owned(),
             interface: parse_interface(arguments)?,
             speed_khz: parse_speed(arguments)?,
+        },
+        probe: JLinkOptions {
+            dll: arguments["dll"]
+                .as_str()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+            serial: parse_serial(arguments)?,
+            log_file: None,
         },
         elf: PathBuf::from(elf),
         project,
@@ -495,6 +509,8 @@ impl Dap {
             variables: Vec::new(),
             after_configuration: AfterConfiguration::Observe,
             last_threads: Vec::new(),
+            #[cfg(windows)]
+            editor_paths: std::collections::HashMap::new(),
             run_to_main_on_reload: false,
             sampler,
             shown_running: false,
@@ -751,7 +767,7 @@ impl Dap {
         if let Some(old) = self.session.take() {
             old.shutdown().map_err(fail)?;
         }
-        let probe = JLink::open(&JLinkOptions::default()).map_err(fail)?;
+        let probe = JLink::open(&options.probe).map_err(fail)?;
         let mut session = Session::start(Box::new(probe), options).map_err(fail)?;
         session.set_cancel_token(self.cancel.clone());
         self.session = Some(session);
@@ -863,9 +879,17 @@ impl Dap {
             .unwrap_or_default();
         let resolved = self
             .session()?
-            .set_source_breakpoints(path, &lines)
+            .set_source_breakpoints(&symbols::paths::key(path), &lines)
             .map_err(fail)?;
-        let items: Vec<Value> = resolved.iter().map(describe_breakpoint).collect();
+        #[cfg(windows)]
+        for file in resolved.iter().filter_map(|item| item.file.as_ref()) {
+            self.editor_paths
+                .insert(symbols::paths::key(file).into_owned(), path.to_owned());
+        }
+        let items: Vec<Value> = resolved
+            .iter()
+            .map(|item| self.describe_breakpoint(item))
+            .collect();
         Ok(json!({"breakpoints": items}))
     }
 
@@ -888,7 +912,10 @@ impl Dap {
             .session()?
             .set_function_breakpoints(&functions)
             .map_err(fail)?;
-        let items: Vec<Value> = resolved.iter().map(describe_breakpoint).collect();
+        let items: Vec<Value> = resolved
+            .iter()
+            .map(|item| self.describe_breakpoint(item))
+            .collect();
         Ok(json!({"breakpoints": items}))
     }
 
@@ -1008,7 +1035,10 @@ impl Dap {
             .session()?
             .set_data_breakpoints(&requests)
             .map_err(fail)?;
-        let items: Vec<Value> = resolved.iter().map(describe_breakpoint).collect();
+        let items: Vec<Value> = resolved
+            .iter()
+            .map(|item| self.describe_breakpoint(item))
+            .collect();
         Ok(json!({"breakpoints": items}))
     }
 
@@ -1304,6 +1334,35 @@ impl Dap {
         Ok(json!({"threads": threads}))
     }
 
+    /// `file` as the editor itself spelled it, so it opens the tab it already
+    /// has rather than a second one for the same file.
+    #[cfg(windows)]
+    fn editor_path(&self, file: &str) -> String {
+        self.editor_paths
+            .get(symbols::paths::key(file).as_ref())
+            .map_or_else(|| file.to_owned(), Clone::clone)
+    }
+
+    #[cfg(not(windows))]
+    fn editor_path(&self, file: &str) -> String {
+        file.to_owned()
+    }
+
+    fn describe_breakpoint(&self, breakpoint: &ResolvedBreakpoint) -> Value {
+        let mut out = json!({
+            "id": breakpoint.id,
+            "verified": breakpoint.verified,
+            "line": breakpoint.line,
+        });
+        if let Some(file) = &breakpoint.file {
+            out["source"] = json!({"path": self.editor_path(file)});
+        }
+        if let Some(message) = &breakpoint.message {
+            out["message"] = json!(message);
+        }
+        out
+    }
+
     fn frame_json(&mut self, thread: i64, index: usize, frame: &DisplayFrame) -> Value {
         self.frames.push((thread, index));
         let mut out = json!({
@@ -1316,7 +1375,7 @@ impl Dap {
         if let Some(location) = &frame.location {
             out["source"] = json!({
                 "name": base_name(&location.file),
-                "path": location.file,
+                "path": self.editor_path(&location.file),
             });
         }
         if frame.is_exception {
@@ -1685,7 +1744,7 @@ impl Dap {
         for breakpoint in &resolved {
             self.client.event(
                 "breakpoint",
-                json!({"reason": "changed", "breakpoint": describe_breakpoint(breakpoint)}),
+                json!({"reason": "changed", "breakpoint": self.describe_breakpoint(breakpoint)}),
             );
         }
         self.client.event("jlinkd/reloaded", json!({}));

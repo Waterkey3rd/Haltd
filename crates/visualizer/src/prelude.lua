@@ -52,18 +52,22 @@ local function summarize(values)
   return "[" .. table.concat(parts, ", ") .. "]"
 end
 
-function __jlinkd_apply(type_name, handle)
+-- `resolving` means an expression is being turned into an address rather than a
+-- value being shown, so a rule should offer a child even if it holds nothing now.
+function __jlinkd_apply(type_name, handle, resolving)
   local value = wrap(handle)
   for _, rule in ipairs(rules) do
     local captures = { string.match(type_name, rule.match) }
     if captures[1] ~= nil then
       local children, summary
       if rule.children then
-        local ok, result = pcall(rule.children, value, captures)
+        local ok, result = pcall(rule.children, value, captures, resolving)
         if not ok then return nil end
         children = result
       end
-      if rule.summary then
+      if resolving then
+        summary = nil
+      elseif rule.summary then
         local ok, result = pcall(rule.summary, value, captures)
         if not ok then return nil end
         summary = result

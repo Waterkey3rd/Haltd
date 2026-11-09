@@ -57,10 +57,19 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 rust-embed = { version = "8", features = ["debug-embed"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+windows-sys = "0.61"
 
 [profile.release]
 debug = 1
 lto = "thin"
+
+# What gets handed to other people: slower to build, smallest and fastest result.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = true
 
 # The symbol index is CPU-bound, and an unoptimized build makes tests against
 # real ELFs unusably slow.

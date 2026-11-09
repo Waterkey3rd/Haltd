@@ -28,20 +28,24 @@ const BUILT_IN_ADD_TO_WATCH = ["debug.addToWatchExpressions", "editor.debug.acti
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}/timeline`;
 const RTT_URL = `http://127.0.0.1:${BACKEND_PORT}/rtt`;
 
-/** VS Code started from a desktop launcher often lacks ~/.cargo/bin on PATH. */
-function adapterPath(): string {
+/** The configured path, then the copy packaged with the extension, then
+ *  ~/.cargo/bin, which VS Code started from a desktop launcher often lacks on PATH. */
+function adapterPath(extensionPath: string): string {
   const configured = vscode.workspace.getConfiguration("jlinkd").get<string>("path", "jlinkd");
   if (configured !== "jlinkd") {
     return configured;
   }
-  const installed = path.join(os.homedir(), ".cargo", "bin", "jlinkd");
-  return fs.existsSync(installed) ? installed : configured;
+  const executable = process.platform === "win32" ? "jlinkd.exe" : "jlinkd";
+  const candidates = [path.join(extensionPath, "bin", executable), path.join(os.homedir(), ".cargo", "bin", executable)];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? configured;
 }
 
 /** `jlinkd dap` starts the background process itself when needed. */
 class AdapterFactory implements vscode.DebugAdapterDescriptorFactory {
+  constructor(private readonly extensionPath: string) {}
+
   createDebugAdapterDescriptor(): vscode.DebugAdapterDescriptor {
-    return new vscode.DebugAdapterExecutable(adapterPath(), ["dap"]);
+    return new vscode.DebugAdapterExecutable(adapterPath(this.extensionPath), ["dap"]);
   }
 }
 
@@ -249,9 +253,23 @@ function hideBuiltInWatch(): void {
   }
 }
 
+function themeKindName(kind: vscode.ColorThemeKind): string {
+  switch (kind) {
+    case vscode.ColorThemeKind.Light:
+      return "light";
+    case vscode.ColorThemeKind.HighContrast:
+      return "hc-dark";
+    case vscode.ColorThemeKind.HighContrastLight:
+      return "hc-light";
+    default:
+      return "dark";
+  }
+}
+
 /** A page served by the backend, shown inside the editor. */
 class BackendPanel {
   private panel: vscode.WebviewPanel | undefined;
+  private themeSub: vscode.Disposable | undefined;
 
   constructor(
     private readonly title: string,
@@ -265,6 +283,9 @@ class BackendPanel {
     }
     const external = await vscode.env.asExternalUri(vscode.Uri.parse(this.url));
     const origin = `${external.scheme}://${external.authority}`;
+    const initialKind = themeKindName(vscode.window.activeColorTheme.kind);
+    const baseHref = external.toString(true);
+    const iframeSrc = `${baseHref}${baseHref.includes("?") ? "&" : "?"}theme=${initialKind}`;
     this.panel = vscode.window.createWebviewPanel(`jlinkd.${this.title}`, this.title, vscode.ViewColumn.Beside, {
       enableScripts: true,
       retainContextWhenHidden: true,
@@ -272,12 +293,89 @@ class BackendPanel {
     this.panel.webview.html = `<!doctype html>
 <html>
   <head>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline';" />
-    <style>html, body, iframe { width: 100%; height: 100%; margin: 0; padding: 0; border: 0; overflow: hidden; }</style>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+    <style>html, body, iframe { width: 100%; height: 100%; margin: 0; padding: 0; border: 0; overflow: hidden; background: var(--vscode-editor-background); }</style>
   </head>
-  <body><iframe src="${external.toString(true)}"></iframe></body>
+  <body>
+    <iframe id="frame" src="${iframeSrc}"></iframe>
+    <script>
+      (() => {
+        const frame = document.getElementById("frame");
+        const VARS = [
+          "--vscode-editor-background",
+          "--vscode-editor-foreground",
+          "--vscode-sideBar-background",
+          "--vscode-sideBar-foreground",
+          "--vscode-sideBarSectionHeader-background",
+          "--vscode-panel-border",
+          "--vscode-widget-border",
+          "--vscode-input-background",
+          "--vscode-input-foreground",
+          "--vscode-input-border",
+          "--vscode-button-background",
+          "--vscode-button-foreground",
+          "--vscode-button-hoverBackground",
+          "--vscode-focusBorder",
+          "--vscode-descriptionForeground",
+          "--vscode-errorForeground",
+          "--vscode-editorWarning-foreground",
+          "--vscode-list-hoverBackground",
+          "--vscode-badge-background",
+          "--vscode-badge-foreground",
+          "--vscode-font-family",
+          "--vscode-editor-font-family"
+        ];
+        function detectKind(overrideKind) {
+          if (overrideKind) return overrideKind;
+          const cl = document.body.classList;
+          if (cl.contains("vscode-high-contrast-light")) return "hc-light";
+          if (cl.contains("vscode-high-contrast")) return "hc-dark";
+          if (cl.contains("vscode-light")) return "light";
+          return "dark";
+        }
+        function sendTheme(overrideKind) {
+          if (!frame || !frame.contentWindow) return;
+          const style = getComputedStyle(document.documentElement);
+          const vars = {};
+          for (const name of VARS) {
+            const val = style.getPropertyValue(name).trim();
+            if (val) vars[name] = val;
+          }
+          frame.contentWindow.postMessage({
+            type: "jlinkd:vscode-theme",
+            kind: detectKind(overrideKind),
+            themeName: document.body.dataset.vscodeThemeName || "",
+            vars
+          }, "*");
+        }
+        frame.addEventListener("load", () => sendTheme());
+        window.addEventListener("message", (event) => {
+          if (!event.data || typeof event.data !== "object") return;
+          if (event.data.type === "jlinkd:request-theme") {
+            sendTheme();
+          } else if (event.data.type === "jlinkd:host-theme") {
+            sendTheme(event.data.kind);
+          }
+        });
+        const observer = new MutationObserver(() => sendTheme());
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
+        observer.observe(document.body, {
+          attributes: true,
+          attributeFilter: ["class", "data-vscode-theme-kind", "data-vscode-theme-name"]
+        });
+      })();
+    </script>
+  </body>
 </html>`;
+    this.themeSub = vscode.window.onDidChangeActiveColorTheme((theme) => {
+      void this.panel?.webview.postMessage({
+        type: "jlinkd:host-theme",
+        kind: themeKindName(theme.kind),
+      });
+    });
     this.panel.onDidDispose(() => {
+      this.themeSub?.dispose();
+      this.themeSub = undefined;
       this.panel = undefined;
     });
   }
@@ -410,7 +508,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider()),
     output,
     tree.onDidCollapseElement((event) => liveWatch.collapse(event.element).catch(report)),
-    vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new AdapterFactory()),
+    vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new AdapterFactory(context.extensionPath)),
     vscode.debug.onDidStartDebugSession((session) => {
       if (session.type === DEBUG_TYPE) {
         status.connected(session);

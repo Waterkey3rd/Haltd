@@ -4,7 +4,6 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpStream};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,11 +16,7 @@ fn connect(port: u16) -> io::Result<TcpStream> {
 }
 
 fn log_file() -> Option<File> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    let directory = base.join("jlinkd");
+    let directory = symbols::paths::cache_root()?;
     fs::create_dir_all(&directory).ok()?;
     File::options()
         .create(true)
@@ -36,13 +31,36 @@ fn start_daemon(port: u16) -> io::Result<()> {
         Some(file) => (Stdio::from(file.try_clone()?), Stdio::from(file)),
         None => (Stdio::null(), Stdio::null()),
     };
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(["--log", "info", "serve", "--dap-port", &port.to_string()])
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .map(|_| ())
+        .stderr(stderr);
+    spawn_detached(&mut command)
+}
+
+#[cfg(not(windows))]
+fn spawn_detached(command: &mut Command) -> io::Result<()> {
+    command.spawn().map(|_| ())
+}
+
+/// No console window, and outliving the editor that started us. Leaving the
+/// editor's job object is refused when the job forbids it, so that is optional.
+#[cfg(windows)]
+fn spawn_detached(command: &mut Command) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+    let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    command.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB);
+    if command.spawn().is_ok() {
+        return Ok(());
+    }
+    command.creation_flags(flags).spawn().map(|_| ())
 }
 
 fn connect_or_start(port: u16) -> io::Result<TcpStream> {

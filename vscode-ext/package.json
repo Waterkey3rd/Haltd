@@ -87,6 +87,17 @@
               "svd": {
                 "type": "string",
                 "description": "CMSIS-SVD file for the Peripherals view. Found in an installed Ozone when omitted."
+              },
+              "dll": {
+                "type": "string",
+                "description": "Path of the J-Link library. The installed J-Link software is used when omitted."
+              },
+              "serial": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "Serial number of the J-Link to use when several are attached."
               }
             }
           },
@@ -123,6 +134,17 @@
               "svd": {
                 "type": "string",
                 "description": "CMSIS-SVD file for the Peripherals view. Found in an installed Ozone when omitted."
+              },
+              "dll": {
+                "type": "string",
+                "description": "Path of the J-Link library. The installed J-Link software is used when omitted."
+              },
+              "serial": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "Serial number of the J-Link to use when several are attached."
               }
             }
           }

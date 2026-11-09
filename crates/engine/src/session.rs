@@ -12,6 +12,7 @@ use probe_api::{
     VC_BUSFAULT, VC_HARDFAULT, VC_MEMMANAGE, VC_USAGEFAULT,
 };
 use probe_jlink::actor::{Priority, ProbeActor, ProbeHandle};
+use probe_jlink::JLinkOptions;
 use symbols::{
     CoreRegisters, FormatOptions, FrameKind, FrameRegisters, LoadOptions, LocalVar, Located,
     MemoryReader, Number, Place, Scalar, ScalarKind, SourceLocation, SymbolDb, SymbolError,
@@ -115,6 +116,8 @@ pub enum RunState {
 #[derive(Clone, Debug)]
 pub struct LaunchOptions {
     pub connect: ConnectCfg,
+    /// Which J-Link library and probe to open; empty means the defaults.
+    pub probe: JLinkOptions,
     pub elf: PathBuf,
     pub project: ProjectConfig,
     /// Base for relative paths in the project file.
@@ -487,6 +490,8 @@ impl Session {
         self.options.connect.device == options.connect.device
             && self.options.connect.speed_khz == options.connect.speed_khz
             && self.options.connect.interface == options.connect.interface
+            && self.options.probe.dll == options.probe.dll
+            && self.options.probe.serial == options.probe.serial
     }
 
     /// Adopt new launch settings on a kept-alive connection.

@@ -10,6 +10,8 @@ use gimli::{AttributeValue, Dwarf, UnitHeader};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::paths;
+
 pub(crate) type R = gimli::EndianSlice<'static, gimli::LittleEndian>;
 
 /// Parent index meaning "no enclosing named scope".
@@ -375,20 +377,23 @@ fn unit_files(dwarf: &Dwarf<R>, unit: &gimli::Unit<R>) -> gimli::Result<Vec<Stri
 pub(crate) fn join_path(comp_dir: Option<&str>, directory: Option<&str>, name: &str) -> String {
     let mut full = String::new();
     for part in [comp_dir, directory, Some(name)].into_iter().flatten() {
-        if part.starts_with('/') {
+        let part = paths::normalize(part);
+        if paths::is_absolute(&part) {
             full.clear();
         } else if !full.is_empty() && !full.ends_with('/') {
             full.push('/');
         }
-        full.push_str(part);
+        full.push_str(&part);
     }
-    let absolute = full.starts_with('/');
+    let absolute = paths::is_absolute(&full);
     let mut parts: Vec<&str> = Vec::new();
     for component in full.split('/') {
         match component {
             "" | "." => {}
             ".." => {
-                if parts.last().is_some_and(|p| *p != "..") {
+                if parts.last().is_some_and(|p| paths::is_drive(p)) {
+                    // Already at the root of the drive.
+                } else if parts.last().is_some_and(|p| *p != "..") {
                     parts.pop();
                 } else if !absolute {
                     parts.push("..");
@@ -398,7 +403,7 @@ pub(crate) fn join_path(comp_dir: Option<&str>, directory: Option<&str>, name: &
         }
     }
     let joined = parts.join("/");
-    if absolute {
+    if full.starts_with('/') {
         format!("/{joined}")
     } else {
         joined

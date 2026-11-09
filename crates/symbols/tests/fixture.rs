@@ -229,7 +229,7 @@ fn indexes_types_and_source_files() {
 
     let files = db.source_files("tests/fixtures/basic.cpp");
     assert_eq!(files.len(), 1, "{files:?}");
-    assert!(files[0].starts_with('/'), "{files:?}");
+    assert!(std::path::Path::new(&files[0]).is_absolute(), "{files:?}");
     // A partial path component must not match.
     assert!(db.source_files("ixtures/basic.cpp").is_empty());
 }

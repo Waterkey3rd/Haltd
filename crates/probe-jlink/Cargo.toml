@@ -10,5 +10,8 @@ libloading.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Registry"] }
+
 [dev-dependencies]
 probe-mock.workspace = true

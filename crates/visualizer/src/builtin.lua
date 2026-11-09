@@ -120,9 +120,9 @@ visualizer {
   children = function(v) return v:field("_M_elems"):elements() end,
 }
 
-local function optional_value(v)
+local function optional_value(v, resolving)
   local payload = v:field("_M_payload")
-  if payload:field("_M_engaged"):num() == 0 then
+  if not resolving and payload:field("_M_engaged"):num() == 0 then
     return nil
   end
   return payload:field("_M_payload"):field("_M_value")
@@ -134,8 +134,8 @@ visualizer {
     local value = optional_value(v)
     return value and value:str() or "nullopt"
   end,
-  children = function(v)
-    local value = optional_value(v)
+  children = function(v, _, resolving)
+    local value = optional_value(v, resolving)
     return value and { { name = "value", value = value } } or {}
   end,
 }

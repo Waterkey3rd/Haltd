@@ -1,7 +1,13 @@
 /target
+/.cache
 *.jlrec
 jlbench-report.*
 webui/node_modules
 webui/dist
+vscode-ext/node_modules
+vscode-ext/dist
+vscode-ext/bin
+/release
+*.vsix
 /tests
 /.github

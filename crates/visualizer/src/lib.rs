@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use mlua::{Function, Lua, Table, Value};
-use symbols::{FormatOptions, MemoryReader, Place, SymbolDb, TypeKind};
+use symbols::{FormatOptions, MemoryReader, Place, SymbolDb, TypeKind, VirtualMembers};
 
 const PRELUDE: &str = include_str!("prelude.lua");
 const BUILTIN: &str = include_str!("builtin.lua");
@@ -25,6 +25,24 @@ pub struct Visualized {
 
 pub struct Visualizers {
     lua: Lua,
+}
+
+/// Lets an expression name what the rules show, so that a member seen in Live
+/// Watch can be watched or plotted by itself.
+impl VirtualMembers for Visualizers {
+    fn member(
+        &self,
+        db: &SymbolDb,
+        place: Place,
+        name: &str,
+        memory: &mut dyn MemoryReader,
+    ) -> Option<Place> {
+        self.run(db, memory, place, true)?
+            .children?
+            .into_iter()
+            .find(|(child, _)| child == name)
+            .map(|(_, child)| child)
+    }
 }
 
 struct Context<'a> {
@@ -122,12 +140,22 @@ impl Visualizers {
         memory: &mut dyn MemoryReader,
         place: Place,
     ) -> Option<Visualized> {
+        self.run(db, memory, place, false)
+    }
+
+    fn run(
+        &self,
+        db: &SymbolDb,
+        memory: &mut dyn MemoryReader,
+        place: Place,
+        resolving: bool,
+    ) -> Option<Visualized> {
         let (resolved, info) = db.strip(place.ty).ok()?;
         if !matches!(info.kind, TypeKind::Struct { .. }) || place.bits.is_some() {
             return None;
         }
         let type_name = db.qualified_type_name(resolved).ok()??;
-        match self.call(db, memory, place, &type_name) {
+        match self.call(db, memory, place, &type_name, resolving) {
             Ok(result) => result,
             Err(error) => {
                 tracing::debug!("visualizer for {type_name} failed: {error}");
@@ -142,6 +170,7 @@ impl Visualizers {
         memory: &mut dyn MemoryReader,
         place: Place,
         type_name: &str,
+        resolving: bool,
     ) -> mlua::Result<Option<Visualized>> {
         let context = RefCell::new(Context {
             db,
@@ -235,7 +264,7 @@ impl Visualizers {
 
             let apply: Function = lua.globals().get("__jlinkd_apply")?;
             let (summary, children): (Option<String>, Option<Table>) = match apply
-                .call::<mlua::MultiValue>((type_name, 0usize))?
+                .call::<mlua::MultiValue>((type_name, 0usize, resolving))?
                 .into_vec()
                 .as_slice()
             {

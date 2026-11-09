@@ -142,6 +142,46 @@ fn optional_distinguishes_empty() {
 }
 
 #[test]
+fn expressions_reach_what_rules_show() {
+    let mut s = setup();
+    let base = |s: &Setup, name: &str| s.db.globals(name)[0].addr;
+    let mut address = |text: &str| {
+        let expr = symbols::parse(text).unwrap();
+        match s.db.evaluate_virtual(&expr, &mut s.memory, Some(&s.rules)) {
+            Ok(symbols::Evaluated::Place(place)) => Ok(place.addr),
+            Ok(other) => panic!("{text}: {other:?}"),
+            Err(error) => Err(error.to_string()),
+        }
+    };
+    let results = [
+        address("g_array[1]"),
+        address("g_some.value"),
+        // Still resolves when empty: the storage is there, and a watch added
+        // now must keep working once a value arrives.
+        address("g_none.value"),
+        address("g_vector[2]"),
+        address("g_quat.w"),
+    ];
+    let missing = address("g_some.nothing").unwrap_err();
+    let (array, some, none, vector, quat) = (
+        base(&s, "g_array"),
+        base(&s, "g_some"),
+        base(&s, "g_none"),
+        base(&s, "g_vector"),
+        base(&s, "g_quat"),
+    );
+    assert_eq!(
+        results.map(Result::unwrap),
+        [array + 2, some, none, vector + 8, quat + 12]
+    );
+    assert!(missing.contains("no member"), "{missing}");
+
+    // Without rules, the same names stay errors.
+    let expr = symbols::parse("g_some.value").unwrap();
+    assert!(s.db.evaluate(&expr, &mut s.memory).is_err());
+}
+
+#[test]
 fn variant_shows_the_active_alternative() {
     let mut s = setup();
     assert_eq!(s.summary("g_variant"), "index 1: 1.25");

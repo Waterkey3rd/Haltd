@@ -1,5 +1,8 @@
 import "./style.css";
 import { Client } from "./client";
+import { ThemeManager } from "./theme";
+
+new ThemeManager();
 
 const REFRESH_MS = 500;
 const MAX_TERMINAL_CHARS = 200_000;

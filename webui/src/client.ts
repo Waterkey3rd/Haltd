@@ -14,6 +14,7 @@ export interface SeriesInfo {
 export interface TimelineEvent {
   t: number;
   kind: number;
+  detail?: unknown;
 }
 
 export interface QueryResult {
@@ -97,7 +98,18 @@ export class Client {
     if (kind === KIND_RTT) {
       this.onRtt(view.getUint8(4), new Uint8Array(buffer, 9, view.getUint32(5, true)));
     } else if (kind === KIND_EVENT) {
-      this.onEvent({ t: Number(view.getBigInt64(4, true)), kind: view.getUint16(12, true) });
+      let detail: unknown = undefined;
+      if (buffer.byteLength >= 16) {
+        const len = view.getUint16(14, true);
+        if (len > 0 && buffer.byteLength >= 16 + len) {
+          try {
+            detail = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 16, len)));
+          } catch {
+            // Ignore malformed event detail JSON
+          }
+        }
+      }
+      this.onEvent({ t: Number(view.getBigInt64(4, true)), kind: view.getUint16(12, true), detail });
     } else if (kind === KIND_QUERY) {
       const id = view.getUint32(4, true);
       const request = this.pending.get(id);

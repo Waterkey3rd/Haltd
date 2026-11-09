@@ -1,65 +1,296 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>jlinkd Timeline</title>
   </head>
-  <body>
+  <body class="timeline-body">
     <header id="toolbar">
-      <form id="add">
-        <input id="expr" placeholder="Add expression, e.g. g_state.gain" autocomplete="off" spellcheck="false" />
-        <select id="mode" title="Sampling method">
+      <!-- Signal Add Form -->
+      <form id="add" class="toolbar-group add-form" title="Add C/C++ expression or RTT signal to Timeline">
+        <div class="input-with-icon">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="currentColor" d="M2 3.5a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11a.5.5 0 0 1-.5-.5zm0 4a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zm0 4a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5zm9.5-1a.5.5 0 0 1 .5.5v1.5H13.5a.5.5 0 0 1 0 1H12v1.5a.5.5 0 0 1-1 0V12H9.5a.5.5 0 0 1 0-1H11V9.5a.5.5 0 0 1 .5-.5z"/>
+          </svg>
+          <input
+            id="expr"
+            list="expr-suggestions"
+            placeholder="Expression, e.g. g_state.gain ( / )"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <datalist id="expr-suggestions"></datalist>
+        </div>
+        <select id="mode" title="Sampling method: Auto (prefer HSS), HSS (high-speed), Poll, or RTT">
           <option value="auto">auto</option>
           <option value="hss">hss</option>
           <option value="poll">poll</option>
+          <option value="rtt">rtt</option>
         </select>
-        <input id="group" placeholder="group" autocomplete="off" spellcheck="false" />
-        <button type="submit">Add</button>
+        <input
+          id="group"
+          list="group-suggestions"
+          placeholder="group"
+          title="Subplot group name (leave empty for default)"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <datalist id="group-suggestions"></datalist>
+        <button type="submit" class="btn-primary" title="Add signal to Timeline (Enter)">
+          <span>+ Add</span>
+        </button>
       </form>
+
+      <div class="toolbar-divider"></div>
+
+      <!-- Sampling & Timebase Controls -->
+      <div class="toolbar-group">
+        <label class="rate control-pill" title="Sampling rate for all signals. Off stops sampling so you can configure signals first.">
+          <span class="control-label">Sample</span>
+          <select id="rate">
+            <option value="0">Off</option>
+            <option value="1000">1 kHz</option>
+            <option value="500">500 Hz</option>
+            <option value="200">200 Hz</option>
+            <option value="100">100 Hz</option>
+            <option value="50">50 Hz</option>
+            <option value="20">20 Hz</option>
+          </select>
+        </label>
+
+        <div class="timebase-Cluster">
+          <button type="button" id="zoom-in" class="icon-btn" title="Zoom in time division (-)">−</button>
+          <label class="rate control-pill" title="Time per division; the viewport spans 10 divisions.">
+            <span class="control-label">Time</span>
+            <select id="division">
+              <option value="0.001">1 ms/div</option>
+              <option value="0.002">2 ms/div</option>
+              <option value="0.005">5 ms/div</option>
+              <option value="0.01">10 ms/div</option>
+              <option value="0.02">20 ms/div</option>
+              <option value="0.05">50 ms/div</option>
+              <option value="0.1">100 ms/div</option>
+              <option value="0.2">200 ms/div</option>
+              <option value="0.5" selected>500 ms/div</option>
+              <option value="1">1 s/div</option>
+              <option value="2">2 s/div</option>
+              <option value="5">5 s/div</option>
+              <option value="10">10 s/div</option>
+              <option value="30">30 s/div</option>
+            </select>
+          </label>
+          <button type="button" id="zoom-out" class="icon-btn" title="Zoom out time division (+)">+</button>
+          <span id="span-label" class="span-badge" title="Total visible time window (10 divisions)">5.0 s</span>
+        </div>
+      </div>
+
       <span class="spacer"></span>
-      <label class="rate" title="Sampling rate for every signal. Off stops sampling: set up signals first, then pick a rate.">Sample
-        <select id="rate">
-          <option value="0">Off</option>
-          <option value="1000">1 kHz</option>
-          <option value="500">500 Hz</option>
-          <option value="200">200 Hz</option>
-          <option value="100">100 Hz</option>
-          <option value="50">50 Hz</option>
-          <option value="20">20 Hz</option>
-        </select>
-      </label>
-      <label class="rate" title="Time per division; the view shows ten divisions.">Time
-        <select id="division">
-          <option value="0.001">1 ms/div</option>
-          <option value="0.002">2 ms/div</option>
-          <option value="0.005">5 ms/div</option>
-          <option value="0.01">10 ms/div</option>
-          <option value="0.02">20 ms/div</option>
-          <option value="0.05">50 ms/div</option>
-          <option value="0.1">100 ms/div</option>
-          <option value="0.2">200 ms/div</option>
-          <option value="0.5" selected>500 ms/div</option>
-          <option value="1">1 s/div</option>
-          <option value="2">2 s/div</option>
-          <option value="5">5 s/div</option>
-          <option value="10">10 s/div</option>
-          <option value="30">30 s/div</option>
-        </select>
-      </label>
-      <button id="follow" aria-pressed="true">Following</button>
-      <button id="record">Record</button>
-      <button id="export">Export CSV</button>
+
+      <!-- Navigation & Transport -->
+      <div class="toolbar-group">
+        <div class="btn-cluster" role="group" aria-label="Timeline navigation">
+          <button type="button" id="pan-left" class="icon-btn" title="Pan backward in time (←)">◀</button>
+          <button type="button" id="follow" aria-pressed="true" title="Toggle live following (Space)">Following</button>
+          <button type="button" id="pan-right" class="icon-btn" title="Pan forward in time (→)">▶</button>
+        </div>
+
+        <div class="btn-cluster" role="group" aria-label="Target MCU control">
+          <button type="button" id="target-halt" class="icon-btn" title="Halt target CPU">⏸</button>
+          <button type="button" id="target-go" class="icon-btn" title="Resume target CPU">▶</button>
+          <button type="button" id="target-reset" class="icon-btn" title="Reset target MCU">↺</button>
+        </div>
+      </div>
+
+      <div class="toolbar-divider"></div>
+
+      <!-- Display Mode, Recording, Export & Theme -->
+      <div class="toolbar-group">
+        <button type="button" id="layout-mode" aria-pressed="false" title="Toggle between grouped overlay plots and separate stacked lanes per signal">
+          Grouped
+        </button>
+        <button type="button" id="toggle-band" aria-pressed="true" title="Toggle min/max envelope shading band">
+          Min/Max
+        </button>
+        <button type="button" id="record" title="Start/stop raw binary recording (.jlrec)">Record</button>
+        <button type="button" id="export" title="Export visible time window to CSV">Export CSV</button>
+        <button type="button" id="snapshot" title="Save PNG snapshot of current plots and measurements">PNG</button>
+
+        <label class="control-pill theme-pill" title="Color theme (Auto follows VS Code theme automatically)">
+          <select id="theme-select" aria-label="Theme">
+            <option value="auto">Theme: Auto (VS)</option>
+            <option value="dark">Theme: Dark</option>
+            <option value="light">Theme: Light</option>
+            <option value="hc-dark">Theme: HC Dark</option>
+            <option value="hc-light">Theme: HC Light</option>
+          </select>
+        </label>
+        <button type="button" id="help-btn" class="icon-btn" title="Keyboard shortcuts & interaction guide (?)">?</button>
+      </div>
     </header>
-    <main>
-      <aside id="series"></aside>
-      <section id="plots"><p id="empty">Add an expression to start plotting.</p></section>
+
+    <!-- Overview Scrubber & Event Bar -->
+    <div id="overview-bar" title="Timeline overview: click or drag to scrub through history">
+      <button type="button" id="toggle-sidebar" class="icon-btn sidebar-toggle-btn" title="Toggle signals sidebar (B)">
+        ☰ Signals
+      </button>
+      <div class="overview-track">
+        <canvas id="overview-canvas"></canvas>
+      </div>
+      <span id="overview-range" class="overview-meta">0.00 s — 0.00 s</span>
+    </div>
+
+    <main id="workspace">
+      <!-- Left Sidebar: Signals + RTT Quick Add + Cursor Measurements -->
+      <aside id="sidebar">
+        <div class="sidebar-section signals-section">
+          <div class="sidebar-header">
+            <div class="sidebar-title-row">
+              <span class="section-title">SIGNALS</span>
+              <span id="series-count" class="badge">0</span>
+              <span class="spacer"></span>
+              <button type="button" id="btn-show-all" class="mini-btn" title="Show all signals">All</button>
+              <button type="button" id="btn-hide-all" class="mini-btn" title="Hide all signals">None</button>
+              <button type="button" id="btn-clear-all" class="mini-btn danger-hover" title="Remove all signals">Clear</button>
+            </div>
+            <div class="sidebar-filter-row">
+              <input
+                id="series-filter"
+                type="search"
+                placeholder="Filter signals or groups…"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+          </div>
+
+          <!-- Preserved #series container for signal rows -->
+          <div id="series" role="list"></div>
+
+          <!-- Optional RTT Decoded Signals Quick-Add Drawer -->
+          <div id="rtt-drawer" hidden>
+            <div class="sidebar-subheader">
+              <span>RTT DECODED SIGNALS</span>
+              <span id="rtt-signal-count" class="badge">0</span>
+            </div>
+            <div id="rtt-signal-list"></div>
+          </div>
+        </div>
+
+        <!-- Dual-Cursor Inspector Panel -->
+        <div id="cursor-panel" class="sidebar-section cursor-section">
+          <div class="sidebar-subheader">
+            <span>CURSORS &amp; DELTA</span>
+            <span class="spacer"></span>
+            <button type="button" id="cursor-zoom" class="mini-btn" title="Zoom time window to [A, B]" hidden>Zoom A..B</button>
+            <button type="button" id="cursor-clear" class="mini-btn" title="Clear cursors (Esc)" hidden>Clear</button>
+          </div>
+          <div id="cursor-summary" class="cursor-summary">
+            <div class="cursor-chip cursor-a">
+              <span class="chip-label">A</span>
+              <span id="cursor-a-val" class="chip-val">—</span>
+            </div>
+            <div class="cursor-chip cursor-b">
+              <span class="chip-label">B</span>
+              <span id="cursor-b-val" class="chip-val">—</span>
+            </div>
+            <div class="cursor-chip cursor-dt">
+              <span class="chip-label">Δt</span>
+              <span id="cursor-dt-val" class="chip-val">—</span>
+            </div>
+            <div class="cursor-chip cursor-freq">
+              <span class="chip-label">1/Δt</span>
+              <span id="cursor-freq-val" class="chip-val">—</span>
+            </div>
+          </div>
+          <div id="cursor-table-wrap">
+            <table id="cursor-table">
+              <thead>
+                <tr>
+                  <th>Signal</th>
+                  <th>A</th>
+                  <th>B</th>
+                  <th>ΔV</th>
+                  <th>dV/dt</th>
+                </tr>
+              </thead>
+              <tbody id="cursor-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Drag Splitter -->
+      <div id="sidebar-resizer" title="Drag to resize sidebar"></div>
+
+      <!-- Plots Container -->
+      <section id="plots">
+        <div id="empty">
+          <div class="empty-card">
+            <div class="empty-icon">📈</div>
+            <h3>No Signals Plotted Yet</h3>
+            <p>Add a global/static C/C++ expression above (e.g. <code>uwTick</code>, <code>g_state.gain</code>) or right-click a variable in VS Code and choose <strong>Add to Timeline</strong>.</p>
+            <div class="empty-shortcuts">
+              <span><kbd>Wheel</kbd> Zoom Time</span>
+              <span><kbd>Shift+Wheel</kbd> Zoom Y</span>
+              <span><kbd>Drag</kbd> Pan</span>
+              <span><kbd>Ctrl+Drag</kbd> Box Zoom</span>
+              <span><kbd>Click</kbd> Cursors A/B</span>
+              <span><kbd>Space</kbd> Follow/Pause</span>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
+
+    <!-- Event Log Popover -->
+    <div id="events-popover" class="popover" hidden>
+      <div class="popover-header">
+        <span>Target Events History</span>
+        <button type="button" id="events-close" class="mini-btn">×</button>
+      </div>
+      <div id="events-list" class="popover-body"></div>
+    </div>
+
+    <!-- Keyboard Shortcuts & Interaction Help Modal -->
+    <div id="help-modal" class="modal-backdrop" hidden>
+      <div class="modal-card" role="dialog" aria-labelledby="help-title">
+        <div class="modal-header">
+          <h3 id="help-title">Timeline Controls &amp; Shortcuts</h3>
+          <button type="button" id="help-close" class="mini-btn">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="help-grid">
+            <div><kbd>Wheel</kbd></div><div>Zoom time division centered at cursor</div>
+            <div><kbd>Shift + Wheel</kbd></div><div>Zoom Y-axis of hovered subplot</div>
+            <div><kbd>Left Drag</kbd></div><div>Pan along time axis (pauses live follow)</div>
+            <div><kbd>Shift + Drag</kbd></div><div>Pan Y-axis of hovered subplot</div>
+            <div><kbd>Ctrl + Drag</kbd></div><div>Box-select time region to zoom in</div>
+            <div><kbd>Click</kbd></div><div>Place Cursor A, then Cursor B (or drag A/B line)</div>
+            <div><kbd>Double-Click</kbd></div><div>Reset subplot Y-axis to Auto-scale</div>
+            <div><kbd>Space</kbd></div><div>Toggle Live Following / Paused</div>
+            <div><kbd>←</kbd> / <kbd>→</kbd></div><div>Step time window backward / forward</div>
+            <div><kbd>-</kbd> / <kbd>+</kbd></div><div>Zoom time division in / out</div>
+            <div><kbd>A</kbd> / <kbd>B</kbd></div><div>Set Cursor A / B at current hover position</div>
+            <div><kbd>Esc</kbd></div><div>Clear cursors A &amp; B</div>
+            <div><kbd>/</kbd></div><div>Focus expression input box</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer Status Bar -->
     <footer id="status">
-      <span id="connection">Connecting…</span>
-      <span id="rates"></span>
-      <span id="measure">Click a plot to place cursor A, then B.</span>
+      <span id="connection" class="status-item"><span class="status-dot"></span>Connecting…</span>
+      <span id="rates" class="status-item"></span>
+      <span id="hover-readout" class="status-item mono"></span>
+      <span id="measure" class="status-item">Click a plot to place cursor A, then B.</span>
+      <span class="spacer"></span>
+      <button type="button" id="events-btn" class="mini-btn status-events-btn" title="View target events (Halts, Resets, Reloads, Faults)">
+        Events: 0
+      </button>
     </footer>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

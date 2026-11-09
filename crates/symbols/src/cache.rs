@@ -10,13 +10,8 @@ const MAGIC: &[u8; 8] = b"JLKDIDX\0";
 const FORMAT_VERSION: u32 = 1;
 const HEADER_LEN: usize = MAGIC.len() + 4;
 
-/// `$XDG_CACHE_HOME/jlinkd/index`, falling back to `~/.cache/jlinkd/index`.
 pub(crate) fn default_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    Some(base.join("jlinkd").join("index"))
+    Some(crate::paths::cache_root()?.join("index"))
 }
 
 pub(crate) fn file_for(dir: &Path, hash: &str) -> PathBuf {
@@ -101,6 +96,26 @@ mod tests {
         let bytes = fs::read(&path).unwrap();
         fs::write(&path, &bytes[..HEADER_LEN + 3]).unwrap();
         assert!(load(&path).is_none());
+    }
+
+    /// Windows refuses to replace a file another process holds open.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_target_fails_cleanly_and_keeps_the_old_index() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let path = file_for(&scratch("locked"), "h");
+        store(&path, &sample()).unwrap();
+        let lock = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(store(&path, &sample()).is_err());
+        drop(lock);
+        assert!(load(&path).is_some());
+        let leftovers = fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[test]

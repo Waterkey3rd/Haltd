@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use engine::session::HaltedMemory;
 use probe_jlink::actor::Priority;
 use serde::Serialize;
-use symbols::{Evaluated, FormatOptions, MemoryReader, Place, SymbolDb};
+use symbols::{Evaluated, FormatOptions, MemoryReader, Place};
 use tokio::sync::broadcast;
 
 use crate::codec::{joined, Scalar};
@@ -141,12 +141,21 @@ fn is_expandable(bound: &Bound, place: Place, memory: &mut dyn MemoryReader) -> 
 }
 
 fn resolve(
-    db: &SymbolDb,
+    bound: &Bound,
     expression: &str,
     memory: &mut dyn MemoryReader,
 ) -> Result<Place, String> {
     let parsed = symbols::parse(expression).map_err(|e| e.to_string())?;
-    match db.evaluate(&parsed, memory).map_err(|e| e.to_string())? {
+    let rules = bound.rules.lock().expect("rules lock");
+    let virtuals = rules
+        .as_ref()
+        .map(|rules| rules as &dyn symbols::VirtualMembers);
+    match bound
+        .binding
+        .db
+        .evaluate_virtual(&parsed, memory, virtuals)
+        .map_err(|e| e.to_string())?
+    {
         Evaluated::Place(place) => Ok(place),
         Evaluated::Address { .. } | Evaluated::Value(_) => {
             Err("this expression has no storage to watch".to_owned())
@@ -193,12 +202,11 @@ impl Watches {
     pub(crate) fn rebind(&self, sampler: &Sampler) {
         let Some(bound) = sampler.bound() else { return };
         let mut memory = HaltedMemory::with_priority(bound.binding.handle.clone(), Priority::P3);
-        let db = bound.binding.db.clone();
         let mut table = self.table.lock().expect("watch lock");
         table.entries.retain(|_, watch| watch.parent.is_none());
         for watch in table.entries.values_mut() {
             watch.expanded = false;
-            match resolve(&db, &watch.expr, &mut memory) {
+            match resolve(&bound, &watch.expr, &mut memory) {
                 Ok(place) => self.fill(watch, &bound, place, &mut memory),
                 Err(error) => {
                     watch.place = None;
@@ -323,7 +331,7 @@ impl Sampler {
         if let Some(bound) = &bound {
             let mut memory =
                 HaltedMemory::with_priority(bound.binding.handle.clone(), Priority::P3);
-            match resolve(&bound.binding.db, expression, &mut memory) {
+            match resolve(bound, expression, &mut memory) {
                 Ok(place) => self.watches.fill(&mut watch, bound, place, &mut memory),
                 Err(error) => watch.error = Some(error),
             }
