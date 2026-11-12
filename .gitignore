@@ -5,3 +5,5 @@ webui/node_modules
 webui/dist
 /tests
 /.github
+/release
+vscode-ext/bin/
