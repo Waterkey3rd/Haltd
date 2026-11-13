@@ -1,9 +1,10 @@
 # STM32F10x debug configuration (RM0008 §31.16.3, DBGMCU_CR at 0xE0042004).
+# Memory sizes are the largest in the family (XL density, STM32F103xG).
 family: stm32f1
 
 memory:
-  - { name: FLASH, start: 0x08000000, size: 0x00010000, kind: flash }
-  - { name: SRAM,  start: 0x20000000, size: 0x00005000, kind: ram }
+  - { name: FLASH, start: 0x08000000, size: 0x00100000, kind: flash }
+  - { name: SRAM,  start: 0x20000000, size: 0x00018000, kind: ram }
 
 flashSectorSize: 0x400
 

@@ -99,8 +99,12 @@ impl ProjectConfig {
 /// Built-in profile name for a J-Link device string.
 pub fn family_for_device(device: &str) -> Option<&'static str> {
     let device = device.to_ascii_uppercase();
-    if device.starts_with("STM32H7") {
+    if device.starts_with("STM32H74") || device.starts_with("STM32H75") {
+        Some("stm32h74")
+    } else if device.starts_with("STM32H7") {
         Some("stm32h7")
+    } else if device.starts_with("STM32G4") {
+        Some("stm32g4")
     } else if device.starts_with("STM32F1") {
         Some("stm32f1")
     } else {
@@ -134,6 +138,9 @@ mod tests {
     #[test]
     fn device_names_map_to_families() {
         assert_eq!(family_for_device("STM32H723VG"), Some("stm32h7"));
+        assert_eq!(family_for_device("STM32H743ZI"), Some("stm32h74"));
+        assert_eq!(family_for_device("STM32G474RE"), Some("stm32g4"));
+        assert_eq!(family_for_device("STM32G431CB"), Some("stm32g4"));
         assert_eq!(family_for_device("stm32f103c8"), Some("stm32f1"));
         assert_eq!(family_for_device("nRF52840"), None);
     }

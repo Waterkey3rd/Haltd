@@ -17,7 +17,7 @@ mod types;
 mod unwind;
 
 pub use db::{Function, LoadOptions, LoadStats, SymbolDb, Variable};
-pub use expr::{parse, BinaryOp, CastType, Evaluated, Expr, Place, UnaryOp};
+pub use expr::{parse, BinaryOp, CastType, Evaluated, Expr, Place, UnaryOp, VirtualMembers};
 pub use format::{FormatOptions, ReadResult};
 pub use lines::{ResolvedLine, SourceLocation};
 pub use loc::{FrameRegisters, Located};

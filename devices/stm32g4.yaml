@@ -1,0 +1,42 @@
+# STM32G4 debug configuration (RM0440).
+# Register addresses and bit positions come from ST's stm32g474xx.h and
+# stm32g431xx.h. Memory sizes are the largest in the family (STM32G474xE); a
+# smaller part simply has no symbols in the part it lacks.
+family: stm32g4
+
+memory:
+  - { name: CCM,   start: 0x10000000, size: 0x00008000, kind: ram }
+  - { name: FLASH, start: 0x08000000, size: 0x00080000, kind: flash }
+  # SRAM1, SRAM2 and the CCM alias are contiguous from here.
+  - { name: SRAM,  start: 0x20000000, size: 0x00020000, kind: ram }
+
+flashSectorSize: 0x800
+
+# DBG_SLEEP | DBG_STOP | DBG_STANDBY: keeps the debug port alive in WFI.
+postConnect:
+  - { name: DBGMCU_CR, addr: 0xE0042004, set: 0x00000007 }
+
+# Peripherals that can be frozen while the core is halted (debug.freezeOnHalt).
+# tim5, tim20, i2c4 and hrtim1 do not exist on every part.
+freeze:
+  tim2:   { addr: 0xE0042008, bit: 0 }
+  tim3:   { addr: 0xE0042008, bit: 1 }
+  tim4:   { addr: 0xE0042008, bit: 2 }
+  tim5:   { addr: 0xE0042008, bit: 3 }
+  tim6:   { addr: 0xE0042008, bit: 4 }
+  tim7:   { addr: 0xE0042008, bit: 5 }
+  rtc:    { addr: 0xE0042008, bit: 10 }
+  wwdg:   { addr: 0xE0042008, bit: 11 }
+  iwdg:   { addr: 0xE0042008, bit: 12 }
+  i2c1:   { addr: 0xE0042008, bit: 21 }
+  i2c2:   { addr: 0xE0042008, bit: 22 }
+  i2c3:   { addr: 0xE0042008, bit: 30 }
+  lptim1: { addr: 0xE0042008, bit: 31 }
+  i2c4:   { addr: 0xE004200C, bit: 1 }
+  tim1:   { addr: 0xE0042010, bit: 11 }
+  tim8:   { addr: 0xE0042010, bit: 13 }
+  tim15:  { addr: 0xE0042010, bit: 16 }
+  tim16:  { addr: 0xE0042010, bit: 17 }
+  tim17:  { addr: 0xE0042010, bit: 18 }
+  tim20:  { addr: 0xE0042010, bit: 20 }
+  hrtim1: { addr: 0xE0042010, bit: 26 }

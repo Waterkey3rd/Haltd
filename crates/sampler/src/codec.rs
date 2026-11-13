@@ -88,7 +88,11 @@ pub fn resolve_leaves(
     memory: &mut dyn MemoryReader,
 ) -> Result<Vec<Leaf>, String> {
     let parsed = symbols::parse(expression).map_err(|e| e.to_string())?;
-    let place = match db.evaluate(&parsed, memory).map_err(|e| e.to_string())? {
+    let virtuals = rules.map(|rules| rules as &dyn symbols::VirtualMembers);
+    let place = match db
+        .evaluate_virtual(&parsed, memory, virtuals)
+        .map_err(|e| e.to_string())?
+    {
         symbols::Evaluated::Place(place) => place,
         symbols::Evaluated::Address { .. } | symbols::Evaluated::Value(_) => {
             return Err("this expression has no storage to sample".to_owned())

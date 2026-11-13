@@ -99,3 +99,25 @@ fn rules_cover_the_firmware() {
         println!("{count:6} {}", name.chars().take(100).collect::<String>());
     }
 }
+
+/// Whether expressions resolve on a full image, run on demand with
+/// `JLINKD_TEST_ELF=fw.elf JLINKD_TEST_EXPR="a.b,c[1]"`. All-zero memory also
+/// means every `std::optional` on the way is empty.
+#[test]
+#[ignore = "needs JLINKD_TEST_ELF and JLINKD_TEST_EXPR"]
+fn expressions_resolve_on_an_image() {
+    let elf = std::env::var("JLINKD_TEST_ELF").expect("JLINKD_TEST_ELF");
+    let expressions = std::env::var("JLINKD_TEST_EXPR").expect("JLINKD_TEST_EXPR");
+    let db = SymbolDb::load(Path::new(&elf), &LoadOptions::default()).unwrap();
+    let rules = Visualizers::with_builtin().unwrap();
+    for text in expressions.split(',') {
+        let expr = symbols::parse(text).unwrap();
+        let result = db.evaluate_virtual(&expr, &mut ZeroMemory, Some(&rules));
+        match result {
+            Ok(symbols::Evaluated::Place(place)) => {
+                println!("{text}: {:#010x} {}", place.addr, db.type_name(place.ty));
+            }
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+}

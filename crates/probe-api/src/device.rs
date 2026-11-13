@@ -27,6 +27,8 @@ const DWT_CTRL: u32 = 0xE000_1000;
 const DWT_CTRL_CYCCNTENA: u32 = 1;
 
 const STM32H7_YAML: &str = include_str!("../../../devices/stm32h7.yaml");
+const STM32H74_YAML: &str = include_str!("../../../devices/stm32h74.yaml");
+const STM32G4_YAML: &str = include_str!("../../../devices/stm32g4.yaml");
 const STM32F1_YAML: &str = include_str!("../../../devices/stm32f1.yaml");
 
 #[derive(Clone, Debug, Deserialize)]
@@ -67,6 +69,8 @@ impl DeviceProfile {
     pub fn builtin(family: &str) -> Result<Self> {
         let yaml = match family {
             "stm32h7" => STM32H7_YAML,
+            "stm32h74" => STM32H74_YAML,
+            "stm32g4" => STM32G4_YAML,
             "stm32f1" => STM32F1_YAML,
             other => {
                 return Err(ProbeError::Other(format!(
@@ -133,6 +137,46 @@ mod tests {
         assert_eq!(p.freeze["iwdg1"].addr, 0x5C00_1054);
         assert_eq!(p.freeze["iwdg1"].bit, 18);
         assert_eq!(p.freeze["wwdg1"].bit, 6);
+    }
+
+    fn covers(profile: &DeviceProfile, kind: &str, address: u32) -> bool {
+        profile.memory.iter().any(|region| {
+            region.kind == kind
+                && address >= region.start
+                && u64::from(address) < u64::from(region.start) + u64::from(region.size)
+        })
+    }
+
+    #[test]
+    fn builtin_h74_profile_differs_from_h72() {
+        let p = DeviceProfile::builtin("stm32h74").unwrap();
+        // No DBG_STOPD3 or DBG_STANDBYD3 on these parts.
+        assert_eq!(p.post_connect[0].set, 0x0060_0007);
+        assert_eq!(p.freeze["iwdg1"].addr, 0x5C00_1054);
+        assert_eq!(p.freeze["hrtim"].bit, 29);
+        assert!(covers(&p, "ram", 0x2407_FFFF));
+        assert!(covers(&p, "ram", 0x3004_7FFF));
+        assert!(covers(&p, "flash", 0x081F_FFFF));
+    }
+
+    #[test]
+    fn builtin_g4_profile_parses() {
+        let p = DeviceProfile::builtin("stm32g4").unwrap();
+        assert_eq!(p.post_connect[0].addr, 0xE004_2004);
+        assert_eq!(p.freeze["iwdg"].addr, 0xE004_2008);
+        assert_eq!(p.freeze["iwdg"].bit, 12);
+        assert_eq!(p.freeze["tim1"].addr, 0xE004_2010);
+        assert_eq!(p.freeze["tim1"].bit, 11);
+        assert!(covers(&p, "ram", 0x1000_7FFF), "CCM");
+        assert!(covers(&p, "ram", 0x2001_FFFF));
+        assert!(covers(&p, "flash", 0x0807_FFFF));
+    }
+
+    #[test]
+    fn f1_profile_covers_the_largest_parts() {
+        let p = DeviceProfile::builtin("stm32f1").unwrap();
+        assert!(covers(&p, "ram", 0x2001_7FFF));
+        assert!(covers(&p, "flash", 0x080F_FFFF));
     }
 
     #[test]

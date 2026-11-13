@@ -417,6 +417,24 @@ fn parse_speed(arguments: &Value) -> Result<u32, String> {
     }
 }
 
+/// An empty value counts as not configured, as `${env:X}` can expand to one.
+fn parse_serial(arguments: &Value) -> Result<Option<u32>, String> {
+    match &arguments["serial"] {
+        Value::Null => Ok(None),
+        Value::String(text) if text.is_empty() => Ok(None),
+        Value::String(text) => text
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("invalid serial {text:?}")),
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("invalid serial {number}")),
+        other => Err(format!("invalid serial {other}")),
+    }
+}
+
 fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
     let elf = arguments["elf"]
         .as_str()
@@ -438,6 +456,14 @@ fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
                 .to_owned(),
             interface: parse_interface(arguments)?,
             speed_khz: parse_speed(arguments)?,
+        },
+        probe: JLinkOptions {
+            dll: arguments["dll"]
+                .as_str()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+            serial: parse_serial(arguments)?,
+            log_file: None,
         },
         elf: PathBuf::from(elf),
         project,
@@ -751,7 +777,7 @@ impl Dap {
         if let Some(old) = self.session.take() {
             old.shutdown().map_err(fail)?;
         }
-        let probe = JLink::open(&JLinkOptions::default()).map_err(fail)?;
+        let probe = JLink::open(&options.probe).map_err(fail)?;
         let mut session = Session::start(Box::new(probe), options).map_err(fail)?;
         session.set_cancel_token(self.cancel.clone());
         self.session = Some(session);

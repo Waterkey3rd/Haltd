@@ -406,6 +406,19 @@ impl Place {
     }
 }
 
+/// Names a value shows without having them as C++ members, such as the `value`
+/// of a `std::optional`. Consulted only after the real lookup fails.
+pub trait VirtualMembers {
+    /// `name` is a member name or an index written as `[3]`.
+    fn member(
+        &self,
+        db: &SymbolDb,
+        place: Place,
+        name: &str,
+        memory: &mut dyn MemoryReader,
+    ) -> Option<Place>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Evaluated {
     Place(Place),
@@ -452,37 +465,75 @@ impl SymbolDb {
         memory: &mut dyn MemoryReader,
         locals: &[(String, Place)],
     ) -> Result<Evaluated> {
+        self.eval(expr, memory, locals, None)
+    }
+
+    /// Like [`Self::evaluate`], also accepting names that `virtuals` provides.
+    pub fn evaluate_virtual(
+        &self,
+        expr: &Expr,
+        memory: &mut dyn MemoryReader,
+        virtuals: Option<&dyn VirtualMembers>,
+    ) -> Result<Evaluated> {
+        self.eval(expr, memory, &[], virtuals)
+    }
+
+    /// `real` unless it failed and `virtuals` knows `name`. The original error
+    /// is the one worth reporting when neither has it.
+    fn or_virtual(
+        &self,
+        real: Result<Place>,
+        place: Place,
+        name: &str,
+        memory: &mut dyn MemoryReader,
+        virtuals: Option<&dyn VirtualMembers>,
+    ) -> Result<Place> {
+        match (real, virtuals) {
+            (Err(error), Some(virtuals)) => virtuals.member(self, place, name, memory).ok_or(error),
+            (real, _) => real,
+        }
+    }
+
+    fn eval(
+        &self,
+        expr: &Expr,
+        memory: &mut dyn MemoryReader,
+        locals: &[(String, Place)],
+        virtuals: Option<&dyn VirtualMembers>,
+    ) -> Result<Evaluated> {
         match expr {
             Expr::Integer(value) => Ok(Evaluated::Value(Number::Int(*value))),
             Expr::Float(value) => Ok(Evaluated::Value(Number::Float(*value))),
             Expr::Unary(operator, inner) => {
-                let value = self.evaluate_number(inner, memory, locals)?;
+                let value = self.number_of(inner, memory, locals, virtuals)?;
                 apply_unary(*operator, value).map(Evaluated::Value)
             }
             Expr::Binary(operator, left, right) => {
-                let left = self.evaluate_number(left, memory, locals)?;
+                let left = self.number_of(left, memory, locals, virtuals)?;
                 // The right side may only be safe to read if the left allows it.
                 match (operator, left.is_true()) {
                     (BinaryOp::And, false) => return Ok(Evaluated::Value(Number::Int(0))),
                     (BinaryOp::Or, true) => return Ok(Evaluated::Value(Number::Int(1))),
                     _ => {}
                 }
-                let right = self.evaluate_number(right, memory, locals)?;
+                let right = self.number_of(right, memory, locals, virtuals)?;
                 apply_binary(*operator, left, right).map(Evaluated::Value)
             }
             Expr::Cast(cast, inner) => {
-                let value = self.evaluate_number(inner, memory, locals)?;
+                let value = self.number_of(inner, memory, locals, virtuals)?;
                 Ok(Evaluated::Value(apply_cast(*cast, value)))
             }
             Expr::IndexBy(base, index) => {
-                let Number::Int(index) = self.evaluate_number(index, memory, locals)? else {
+                let Number::Int(index) = self.number_of(index, memory, locals, virtuals)? else {
                     return Err(SymbolError::Type("an index must be an integer".to_owned()));
                 };
                 let index = i64::try_from(index)
                     .map_err(|_| SymbolError::Type("the index is out of range".to_owned()))?;
-                let place = self.evaluate_place(base, memory, locals)?;
+                let place = self.place_of(base, memory, locals, virtuals)?;
                 let place = self.through_references(place, memory)?;
-                self.index(place, index, memory).map(Evaluated::Place)
+                let real = self.index(place, index, memory);
+                self.or_virtual(real, place, &format!("[{index}]"), memory, virtuals)
+                    .map(Evaluated::Place)
             }
             Expr::Path(name) => {
                 if let Some((_, place)) = locals.iter().find(|(local, _)| local == name) {
@@ -495,21 +546,27 @@ impl SymbolDb {
                 Ok(Evaluated::Place(Place::new(variable.addr, ty)))
             }
             Expr::Member(base, field) => {
-                let place = self.evaluate_place(base, memory, locals)?;
+                let place = self.place_of(base, memory, locals, virtuals)?;
                 let place = self.through_references(place, memory)?;
-                self.member(place, field).map(Evaluated::Place)
+                let real = self.member(place, field);
+                self.or_virtual(real, place, field, memory, virtuals)
+                    .map(Evaluated::Place)
             }
             Expr::Arrow(base, field) => {
-                let place = self.evaluate_place(base, memory, locals)?;
+                let place = self.place_of(base, memory, locals, virtuals)?;
                 let pointee = self.dereference(place, memory)?;
-                self.member(pointee, field).map(Evaluated::Place)
+                let real = self.member(pointee, field);
+                self.or_virtual(real, pointee, field, memory, virtuals)
+                    .map(Evaluated::Place)
             }
             Expr::Index(base, index) => {
-                let place = self.evaluate_place(base, memory, locals)?;
+                let place = self.place_of(base, memory, locals, virtuals)?;
                 let place = self.through_references(place, memory)?;
-                self.index(place, *index, memory).map(Evaluated::Place)
+                let real = self.index(place, *index, memory);
+                self.or_virtual(real, place, &format!("[{index}]"), memory, virtuals)
+                    .map(Evaluated::Place)
             }
-            Expr::Deref(base) => match self.evaluate_with(base, memory, locals)? {
+            Expr::Deref(base) => match self.eval(base, memory, locals, virtuals)? {
                 Evaluated::Address { value, target } => {
                     Ok(Evaluated::Place(Place::new(value, target)))
                 }
@@ -519,7 +576,7 @@ impl SymbolDb {
                 )),
             },
             Expr::AddressOf(base) => {
-                let place = self.evaluate_place(base, memory, locals)?;
+                let place = self.place_of(base, memory, locals, virtuals)?;
                 if place.bits.is_some() {
                     return Err(SymbolError::Type(
                         "cannot take the address of a bit-field".to_owned(),
@@ -533,13 +590,14 @@ impl SymbolDb {
         }
     }
 
-    fn evaluate_place(
+    fn place_of(
         &self,
         expr: &Expr,
         memory: &mut dyn MemoryReader,
         locals: &[(String, Place)],
+        virtuals: Option<&dyn VirtualMembers>,
     ) -> Result<Place> {
-        match self.evaluate_with(expr, memory, locals)? {
+        match self.eval(expr, memory, locals, virtuals)? {
             Evaluated::Place(place) => Ok(place),
             Evaluated::Address { .. } => Err(SymbolError::Type(
                 "the result of '&' has no storage; dereference it first".to_owned(),
@@ -557,7 +615,17 @@ impl SymbolDb {
         memory: &mut dyn MemoryReader,
         locals: &[(String, Place)],
     ) -> Result<Number> {
-        match self.evaluate_with(expr, memory, locals)? {
+        self.number_of(expr, memory, locals, None)
+    }
+
+    fn number_of(
+        &self,
+        expr: &Expr,
+        memory: &mut dyn MemoryReader,
+        locals: &[(String, Place)],
+        virtuals: Option<&dyn VirtualMembers>,
+    ) -> Result<Number> {
+        match self.eval(expr, memory, locals, virtuals)? {
             Evaluated::Value(number) => Ok(number),
             Evaluated::Address { value, .. } => Ok(Number::Int(i128::from(value))),
             Evaluated::Place(place) => self.read_number(place, memory),
