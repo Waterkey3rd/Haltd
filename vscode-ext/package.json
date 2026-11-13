@@ -2,7 +2,7 @@
   "name": "jlinkd",
   "displayName": "jlinkd",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "publisher": "jlinkd",
   "license": "MIT",
   "engines": {

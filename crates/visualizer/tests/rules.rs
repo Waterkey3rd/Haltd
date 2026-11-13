@@ -182,6 +182,24 @@ fn expressions_reach_what_rules_show() {
 }
 
 #[test]
+fn tuple_elements_are_reached_by_index() {
+    let mut s = setup();
+    assert_eq!(s.child_names("g_tuple"), ["[0]", "[1]", "[2]"]);
+    let mut read = |text: &str| {
+        let expr = symbols::parse(text).unwrap();
+        match s.db.evaluate_virtual(&expr, &mut s.memory, Some(&s.rules)) {
+            Ok(symbols::Evaluated::Place(place)) => {
+                s.db.render_place(&place, &mut s.memory, &Default::default())
+                    .unwrap()
+            }
+            other => panic!("{text}: {other:?}"),
+        }
+    };
+    assert_eq!(read("g_tuple[0]"), "5");
+    assert_eq!(read("g_tuple[2]"), "2.5");
+}
+
+#[test]
 fn variant_shows_the_active_alternative() {
     let mut s = setup();
     assert_eq!(s.summary("g_variant"), "index 1: 1.25");

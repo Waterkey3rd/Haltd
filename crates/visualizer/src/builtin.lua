@@ -120,6 +120,13 @@ visualizer {
   children = function(v) return v:field("_M_elems"):elements() end,
 }
 
+-- The elements all sit in a member of the same name, one per base class, so
+-- they are shown by index.
+visualizer {
+  match = "^std::tuple<",
+  children = function(v) return v:tuple() end,
+}
+
 local function optional_value(v, resolving)
   local payload = v:field("_M_payload")
   if not resolving and payload:field("_M_engaged"):num() == 0 then

@@ -11,6 +11,7 @@ use symbols::{FormatOptions, MemoryReader, Place, SymbolDb, TypeKind, VirtualMem
 
 const PRELUDE: &str = include_str!("prelude.lua");
 const BUILTIN: &str = include_str!("builtin.lua");
+const MAX_TUPLE_ELEMENTS: usize = 64;
 const NESTED_RENDER: FormatOptions = FormatOptions {
     max_elements: 8,
     max_depth: 1,
@@ -80,6 +81,62 @@ impl Context<'_> {
             consumed: 0,
             bits: member.bits,
         }))
+    }
+
+    /// Base-class sub-objects of a struct, with their type names.
+    fn bases(&self, place: Place) -> Vec<(String, Place)> {
+        let Ok((_, info)) = self.db.strip(place.ty) else {
+            return Vec::new();
+        };
+        let TypeKind::Struct { members, .. } = &info.kind else {
+            return Vec::new();
+        };
+        members
+            .iter()
+            .filter(|member| member.is_base)
+            .filter_map(|member| {
+                let ty = member.ty?;
+                let base = Place::new(place.addr + member.offset as u32, ty);
+                Some((self.db.type_name(ty), base))
+            })
+            .collect()
+    }
+
+    /// Elements of a libstdc++ `std::tuple`, in index order. Each level of
+    /// `_Tuple_impl<I, ...>` holds element I in a `_Head_base` and the rest in
+    /// the next level; the elements share one member name, so they cannot be
+    /// told apart by name.
+    fn tuple_elements(&mut self, handle: usize) -> Vec<usize> {
+        let Some(mut level) = self.places.get(handle).copied() else {
+            return Vec::new();
+        };
+        let mut elements = Vec::new();
+        for _ in 0..MAX_TUPLE_ELEMENTS {
+            let bases = self.bases(level);
+            let find = |prefix: &str| {
+                bases
+                    .iter()
+                    .find(|(name, _)| name.starts_with(prefix))
+                    .map(|(_, place)| *place)
+            };
+            if let Some(head) = find("_Head_base<") {
+                let stored = match self.db.find_member(head.ty, "_M_head_impl") {
+                    Ok(Some((offset, member))) => member
+                        .ty
+                        .map(|ty| Place::new(head.addr + offset as u32, ty)),
+                    // An empty element is a base of its holder instead.
+                    _ => self.bases(head).first().map(|(_, place)| *place),
+                };
+                if let Some(place) = stored {
+                    elements.push(self.add(place));
+                }
+            }
+            match find("_Tuple_impl<") {
+                Some(next) => level = next,
+                None => break,
+            }
+        }
+        elements
     }
 
     /// Numeric value of a scalar: integer, enum, bool, float or pointer.
@@ -244,6 +301,11 @@ impl Visualizers {
                     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
                 })?,
             )?;
+            host.set(
+                "tuple",
+                scope.create_function(move |_, h: usize| Ok(c.borrow_mut().tuple_elements(h)))?,
+            )?;
+            let c = &context;
             host.set(
                 "elements",
                 scope.create_function(move |_, h: usize| {

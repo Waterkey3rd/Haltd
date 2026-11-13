@@ -28,6 +28,14 @@ function V:at(index) return wrap(__host.at(self.h, index)) end
 function V:pointee_size() return __host.pointee_size(self.h) end
 function V:cstring(length) return __host.cstring(self.h, length) end
 
+function V:tuple()
+  local out = {}
+  for _, handle in ipairs(__host.tuple(self.h)) do
+    out[#out + 1] = wrap(handle)
+  end
+  return out
+end
+
 function V:elements()
   local out = {}
   for _, handle in ipairs(__host.elements(self.h)) do

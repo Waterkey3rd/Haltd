@@ -5,6 +5,7 @@
 #include <ratio>
 #include <span>
 #include <string_view>
+#include <tuple>
 #include <variant>
 
 namespace units {
@@ -75,6 +76,8 @@ using Millimeter = units::unit_t<
 [[gnu::used]] Eigen::Quaternion<float, 0> g_quat = {{{}, {{{0.1f, 0.2f, 0.3f, 0.9f}}}}};
 [[gnu::used]] std::array<int16_t, 3> g_array = {7, 8, 9};
 [[gnu::used]] std::optional<float> g_some = 2.5f;
+struct Empty {};
+[[gnu::used]] std::tuple<int16_t, Empty, float> g_tuple = {5, Empty{}, 2.5f};
 [[gnu::used]] std::optional<float> g_none;
 [[gnu::used]] std::variant<int, float> g_variant = 1.25f;
 [[gnu::used]] int g_span_data[3] = {11, 22, 33};

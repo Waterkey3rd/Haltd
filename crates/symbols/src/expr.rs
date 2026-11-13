@@ -667,9 +667,17 @@ impl SymbolDb {
     }
 
     fn dereference(&self, place: Place, memory: &mut dyn MemoryReader) -> Result<Place> {
+        let original = place;
         let place = self.through_references(place, memory)?;
         let (_, info) = self.strip(place.ty)?;
         match &info.kind {
+            // Variable trees show what a reference refers to as its `*` child,
+            // so `*ref` names the referent when that is not itself a pointer.
+            TypeKind::Struct { .. } | TypeKind::Base(_) | TypeKind::Enum { .. }
+                if place != original =>
+            {
+                Ok(place)
+            }
             TypeKind::Pointer(Some(target)) => {
                 Ok(Place::new(self.read_pointer(place.addr, memory)?, *target))
             }

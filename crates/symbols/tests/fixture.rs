@@ -110,6 +110,9 @@ fn follows_pointers_and_references() {
     assert_eq!(value(&db, &mut m, "g_state_ptr->cursor->gain"), "2.5");
     assert_eq!(value(&db, &mut m, "g_state_ptr->cursor[1].a"), "7");
     assert_eq!(value(&db, &mut m, "g_state_ref.items[1].a"), "6");
+    // A variable tree names a reference's target as `*ref`.
+    assert_eq!(value(&db, &mut m, "(*g_state_ref).items[1].a"), "6");
+    assert_eq!(value(&db, &mut m, "(*g_state_ref).cursor->gain"), "2.5");
 }
 
 #[test]

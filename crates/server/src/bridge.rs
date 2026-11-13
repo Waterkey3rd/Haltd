@@ -45,7 +45,48 @@ fn start_daemon(port: u16) -> io::Result<()> {
         .map(|_| ())
 }
 
+/// Stop a backend left running by another build of this program. It can
+/// outlive an upgrade for as long as a Timeline page stays connected, and
+/// would then serve new sessions with the old code.
+#[cfg(target_os = "linux")]
+fn stop_stale_daemon(port: u16) {
+    let Ok(own) = std::env::current_exe() else {
+        return;
+    };
+    let wanted = format!("serve\0--dap-port\0{port}\0");
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in processes.flatten() {
+        let directory = entry.path();
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let is_backend = fs::read(directory.join("cmdline"))
+            .is_ok_and(|line| String::from_utf8_lossy(&line).contains(&wanted));
+        // A replaced executable reads as its old path with " (deleted)" added.
+        let same_build = fs::read_link(directory.join("exe")).is_ok_and(|exe| exe == own);
+        if pid == std::process::id() || !is_backend || same_build {
+            continue;
+        }
+        tracing::info!("stopping backend {pid}, which is a different build");
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+        let stopped = Instant::now();
+        while directory.exists() && stopped.elapsed() < START_TIMEOUT {
+            thread::sleep(RETRY_INTERVAL);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stop_stale_daemon(_port: u16) {}
+
 fn connect_or_start(port: u16) -> io::Result<TcpStream> {
+    stop_stale_daemon(port);
     if let Ok(stream) = connect(port) {
         return Ok(stream);
     }
