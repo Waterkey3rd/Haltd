@@ -37,7 +37,7 @@ New-Item -ItemType Directory -Force $output | Out-Null
 New-Item -ItemType Directory -Force "vscode-ext\bin" | Out-Null
 Copy-Item "target\dist\jlinkd.exe" "vscode-ext\bin\jlinkd.exe"
 Copy-Item "target\dist\jlinkd.exe" "$output\jlinkd.exe"
-Copy-Item "docs\windows-usage.md" "$output\README.md"
+Copy-Item "docs\usage.md" "$output\README.md"
 
 $vsix = "$output\jlinkd-$version-win32-x64.vsix"
 Invoke-Step "vscode-ext" "npx.cmd" @("--yes", "@vscode/vsce@3", "package", "--target", "win32-x64",
