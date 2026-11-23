@@ -574,9 +574,44 @@ pub(crate) fn c_buffer(buf: &[c_char]) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(windows))]
 pub(crate) fn c_path(path: &Path) -> Result<CString> {
     use std::os::unix::ffi::OsStrExt;
     CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| ProbeError::Other(format!("path contains a NUL byte: {}", path.display())))
+}
+
+/// The Windows DLL takes paths in the system code page; UTF-8 fails on
+/// anything outside ASCII (measured: `JLINK_DownloadFile` returns -268).
+#[cfg(windows)]
+pub(crate) fn c_path(path: &Path) -> Result<CString> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Globalization::{WideCharToMultiByte, CP_ACP};
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let mut bytes = vec![0u8; wide.len() * 4];
+    let mut lossy = 0;
+    // SAFETY: both buffers are valid for the lengths passed.
+    let written = unsafe {
+        WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            wide.len() as i32,
+            bytes.as_mut_ptr(),
+            bytes.len() as i32,
+            std::ptr::null(),
+            &mut lossy,
+        )
+    };
+    if written <= 0 || lossy != 0 {
+        return Err(ProbeError::Other(format!(
+            "path cannot be expressed in the system code page: {}",
+            path.display()
+        )));
+    }
+    bytes.truncate(written as usize);
+    CString::new(bytes)
         .map_err(|_| ProbeError::Other(format!("path contains a NUL byte: {}", path.display())))
 }
 

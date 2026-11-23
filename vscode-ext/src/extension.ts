@@ -35,10 +35,8 @@ function adapterPath(extensionPath: string): string {
   if (configured !== "jlinkd") {
     return configured;
   }
-  const candidates = [
-    path.join(extensionPath, "bin", "jlinkd"),
-    path.join(os.homedir(), ".cargo", "bin", "jlinkd"),
-  ];
+  const executable = process.platform === "win32" ? "jlinkd.exe" : "jlinkd";
+  const candidates = [path.join(extensionPath, "bin", executable), path.join(os.homedir(), ".cargo", "bin", executable)];
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? configured;
 }
 

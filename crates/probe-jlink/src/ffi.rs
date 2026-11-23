@@ -155,14 +155,65 @@ jlink_api! {
     JLINK_RTTERMINAL_Write: fn(u32, *const u8, u32) -> c_int;
 }
 
-const DEFAULT_PATH: &str = "/opt/SEGGER/JLink/libjlinkarm.so";
+#[cfg(not(windows))]
+fn default_candidates() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/opt/SEGGER/JLink/libjlinkarm.so"),
+        PathBuf::from("libjlinkarm.so"),
+    ]
+}
 
-/// Load the DLL: explicit path, then the standard install location, then the
-/// system search path (which honours `LD_LIBRARY_PATH`).
+/// Where the SEGGER installer recorded itself, then the system search path.
+#[cfg(windows)]
+fn default_candidates() -> Vec<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
+
+    const LIBRARY: &str = "JLink_x64.dll";
+    let wide = |text: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(text)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let key = wide(r"Software\SEGGER\J-Link");
+    let value = wide("InstallPath");
+    let mut candidates = Vec::new();
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut buffer = [0u16; 1024];
+        let mut size = size_of_val(&buffer) as u32;
+        // SAFETY: both names are NUL-terminated and `size` is the buffer's size in bytes.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if status == ERROR_SUCCESS {
+            // `size` counts the terminating NUL.
+            let length = (size as usize / 2).saturating_sub(1);
+            let directory = std::ffi::OsString::from_wide(&buffer[..length]);
+            candidates.push(PathBuf::from(directory).join(LIBRARY));
+        }
+    }
+    candidates.push(PathBuf::from(LIBRARY));
+    candidates
+}
+
+/// Load the DLL: the explicit path, or else the standard install location and
+/// then the system search path.
 pub fn load(explicit: Option<&Path>) -> Result<Api> {
     let candidates: Vec<PathBuf> = match explicit {
         Some(path) => vec![path.to_owned()],
-        None => vec![PathBuf::from(DEFAULT_PATH), PathBuf::from("libjlinkarm.so")],
+        None => default_candidates(),
     };
     let mut errors = Vec::new();
     for path in &candidates {

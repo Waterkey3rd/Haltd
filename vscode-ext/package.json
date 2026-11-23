@@ -2,9 +2,10 @@
   "name": "jlinkd",
   "displayName": "jlinkd",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.5.2",
+  "version": "1.0.0",
   "publisher": "jlinkd",
   "license": "MIT",
+  "icon": "icon.png",
   "engines": {
     "vscode": "^1.90.0"
   },

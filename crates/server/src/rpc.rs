@@ -72,12 +72,9 @@ fn series_ids(params: &Value) -> Result<Vec<u32>, (i64, String)> {
 }
 
 fn default_output(extension: &str) -> Result<PathBuf, (i64, String)> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .ok_or_else(|| server_error("no cache directory"))?;
-    let directory = base.join("jlinkd").join("recordings");
+    let directory = symbols::paths::cache_root()
+        .ok_or_else(|| server_error("no cache directory: set JLINKD_CACHE_DIR or give a path"))?
+        .join("recordings");
     std::fs::create_dir_all(&directory).map_err(server_error)?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

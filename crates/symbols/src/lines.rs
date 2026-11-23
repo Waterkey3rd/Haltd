@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::db::SymbolDb;
 use crate::index::join_path;
-use crate::Result;
+use crate::{paths, Result};
 
 /// How far a breakpoint may slide forward to the next line with code.
 const MAX_LINE_SLIDE: u32 = 10;
@@ -62,7 +62,7 @@ fn row_index(rows: &[Row], pc: u32) -> Option<usize> {
 fn common_suffix(a: &str, b: &str) -> usize {
     a.rsplit('/')
         .zip(b.rsplit('/'))
-        .take_while(|(x, y)| x == y)
+        .take_while(|(x, y)| paths::same(x, y))
         .count()
 }
 
@@ -241,22 +241,24 @@ impl SymbolDb {
     /// Compiler-recorded paths best matching an editor's path. An exact match
     /// wins; otherwise the longest shared tail handles builds made elsewhere.
     pub(crate) fn matching_files(&self, path: &str) -> Vec<usize> {
-        let paths = &self.index.files;
-        let exact: Vec<usize> = (0..paths.len())
-            .filter(|i| self.index.str(paths[*i].path) == path)
+        let path = paths::normalize(path);
+        let path = path.as_ref();
+        let files = &self.index.files;
+        let exact: Vec<usize> = (0..files.len())
+            .filter(|i| paths::same(self.index.str(files[*i].path), path))
             .collect();
         if !exact.is_empty() {
             return exact;
         }
-        let best = (0..paths.len())
-            .map(|i| common_suffix(self.index.str(paths[i].path), path))
+        let best = (0..files.len())
+            .map(|i| common_suffix(self.index.str(files[i].path), path))
             .max()
             .unwrap_or(0);
         if best == 0 {
             return Vec::new();
         }
-        (0..paths.len())
-            .filter(|i| common_suffix(self.index.str(paths[*i].path), path) == best)
+        (0..files.len())
+            .filter(|i| common_suffix(self.index.str(files[*i].path), path) == best)
             .collect()
     }
 

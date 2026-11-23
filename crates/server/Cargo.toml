@@ -22,3 +22,6 @@ sampler.workspace = true
 rtt.workspace = true
 tokio.workspace = true
 tsdb.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Media"] }

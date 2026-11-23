@@ -11,6 +11,7 @@ mod format;
 mod index;
 mod lines;
 mod loc;
+pub mod paths;
 mod scalar;
 mod scope;
 mod types;

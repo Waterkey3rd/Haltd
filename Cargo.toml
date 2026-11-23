@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -57,6 +57,7 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 rust-embed = { version = "8", features = ["debug-embed"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+windows-sys = "0.61"
 
 [profile.release]
 debug = 1

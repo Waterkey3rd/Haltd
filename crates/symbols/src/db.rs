@@ -1,23 +1,43 @@
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gimli::{AttributeValue, DebugInfoOffset, Dwarf, UnitOffset};
-use memmap2::Mmap;
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 
 use crate::cache;
 use crate::index::{self, FunctionEntry, Index, RawElfSymbol, R};
 use crate::lines::LineTable;
+use crate::paths;
 use crate::scope::Node;
 use crate::types::{Type, TypeRef};
 use crate::{Result, SymbolError};
 
+/// The ELF stays mapped on Linux, where linkers replace their output by
+/// unlinking it. Windows cannot write a file while it is mapped, which would
+/// break the next link, so there it is read into memory instead.
+#[cfg(not(windows))]
+type ElfBytes = memmap2::Mmap;
+#[cfg(windows)]
+type ElfBytes = Vec<u8>;
+
+#[cfg(not(windows))]
+fn read_elf(path: &Path) -> std::io::Result<ElfBytes> {
+    let file = std::fs::File::open(path)?;
+    // SAFETY: the file is opened read-only. Linkers replace their output by
+    // unlinking it, so the mapped inode is not modified in place.
+    unsafe { memmap2::Mmap::map(&file) }
+}
+
+#[cfg(windows)]
+fn read_elf(path: &Path) -> std::io::Result<ElfBytes> {
+    std::fs::read(path)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
-    /// Index cache location; defaults to `~/.cache/jlinkd/index`.
+    /// Index cache location; defaults to `index` under [`paths::cache_root`].
     pub cache_dir: Option<PathBuf>,
     /// Ignore any cached index and do not write a new one.
     pub no_cache: bool,
@@ -69,7 +89,7 @@ pub struct SymbolDb {
     pub(crate) function_trees: Mutex<HashMap<TypeRef, Arc<Node>>>,
     hash: String,
     stats: LoadStats,
-    _map: Mmap,
+    _map: ElfBytes,
 }
 
 impl SymbolDb {
@@ -79,10 +99,7 @@ impl SymbolDb {
             path: path.display().to_string(),
             source,
         };
-        let file = File::open(path).map_err(io_error)?;
-        // SAFETY: the file is opened read-only. Linkers replace their output
-        // by unlinking it, so the mapped inode is not modified in place.
-        let map = unsafe { Mmap::map(&file) }.map_err(io_error)?;
+        let map = read_elf(path).map_err(io_error)?;
 
         let hash_started = Instant::now();
         let hash = blake3::Hasher::new()
@@ -93,10 +110,10 @@ impl SymbolDb {
         let hash_time = hash_started.elapsed();
 
         // SAFETY: the slices borrowed from this reference live in `dwarf` and
-        // `index` construction only. `_map` is moved into the same struct, is
-        // never mutated, and its heap-independent mapping does not move, so
-        // every slice stays valid for the life of the `SymbolDb`. The 'static
-        // lifetime is not exposed outside this crate.
+        // `index` construction only. `_map` is moved into the same struct and
+        // never mutated; neither a mapping nor a Vec's heap buffer moves with
+        // its owner, so every slice stays valid for the life of the `SymbolDb`.
+        // The 'static lifetime is not exposed outside this crate.
         let data: &'static [u8] = unsafe { std::slice::from_raw_parts(map.as_ptr(), map.len()) };
 
         let object =
@@ -282,17 +299,13 @@ impl SymbolDb {
     /// Normalized source paths ending in `path`, for matching what an editor
     /// sends against what the compiler recorded.
     pub fn source_files(&self, path: &str) -> Vec<String> {
+        let path = paths::normalize(path);
         let suffix = path.trim_start_matches("./");
         self.index
             .files
             .iter()
             .map(|f| self.index.str(f.path))
-            .filter(|candidate| {
-                *candidate == suffix
-                    || candidate
-                        .strip_suffix(suffix)
-                        .is_some_and(|rest| rest.ends_with('/'))
-            })
+            .filter(|candidate| paths::ends_with_components(candidate, suffix))
             .map(str::to_owned)
             .collect()
     }

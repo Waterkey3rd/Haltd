@@ -1,4 +1,4 @@
-//! J-Link backend: runtime binding of `libjlinkarm.so` and the single-threaded
+//! J-Link backend: runtime binding of the J-Link library and the single-threaded
 //! actor that serializes all access to it (DESIGN §5.2).
 
 pub mod actor;

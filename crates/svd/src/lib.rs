@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 use roxmltree::{Document, Node};
 
+#[cfg(not(windows))]
 const SEGGER_DIR: &str = "/opt/SEGGER";
+#[cfg(windows)]
+const SEGGER_DIR: &str = r"C:\Program Files\SEGGER";
 const OZONE_PERIPHERALS: &str = "Config/Peripherals";
 const DEFAULT_REGISTER_BITS: u32 = 32;
 

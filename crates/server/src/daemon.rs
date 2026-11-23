@@ -113,6 +113,13 @@ fn watch_for_idle(shared: Arc<Shared>, app: Arc<App>, limit: Duration) {
 /// exit after being unused for that long; the next debug session starts a new
 /// process.
 pub fn serve(http_port: u16, dap_port: u16, idle_limit: Option<Duration>) -> io::Result<()> {
+    // The default 15.6 ms tick is longer than the 5-20 ms polling periods. The
+    // setting ends with the process.
+    #[cfg(windows)]
+    // SAFETY: takes only a value and has no preconditions.
+    unsafe {
+        windows_sys::Win32::Media::timeBeginPeriod(1);
+    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, dap_port))?;
     tracing::info!("listening for DAP clients on 127.0.0.1:{dap_port}");
     let session = Arc::new(Mutex::new(None));

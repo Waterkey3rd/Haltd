@@ -125,7 +125,7 @@ struct Connection {
     /// Serial number, when several probes are attached.
     #[arg(long)]
     serial: Option<u32>,
-    /// Path of libjlinkarm.so.
+    /// Path of the J-Link library (libjlinkarm.so or JLink_x64.dll).
     #[arg(long, env = "JLINKD_DLL")]
     dll: Option<PathBuf>,
 }
