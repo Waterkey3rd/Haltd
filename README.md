@@ -2,13 +2,17 @@
   <img src="assets/logo.svg" alt="jlinkd" width="460" />
 </p>
 
+<p align="center">
+  <strong>中文</strong> | <a href="README.en.md">English</a>
+</p>
+
 # jlinkd
 
 面向 STM32（ARM Cortex-M）的 J-Link 调试后端、VS Code 插件与命令行工具，采用「常驻后台进程 + DAP + WebSocket 数据通道」架构。
 
 ## 写在前面
 
-这个项目是作为 **Ozone 的一种开源替代** 写给自己用的，采用「常驻后台进程 + DAP + WebSocket 数据通道」架构，把大工程符号缓存、`-O2` 单步、HardFault 定位、FreeRTOS 感知、1 kHz 高速波形与 RTT 结构化解码统一放进 VS Code 与命令行工作流中，主要为了解决平时调试 STM32 时遇到的一些痛点：
+这个项目是作为 **Ozone 的一种开源替代** 开发的，采用「常驻后台进程 + DAP + WebSocket 数据通道」架构，把大工程符号缓存、`-O2` 单步、HardFault 定位、FreeRTOS 感知、1 kHz 高速波形与 RTT 结构化解码统一放进 VS Code 与命令行工作流中，主要为了解决平时调试 STM32 时遇到的一些痛点：
 
 - 工程开启 `-O2` 优化后，常规调试器经常单步乱跳、局部变量看不准或内联栈帧断掉；
 - 调试控制算法/电机/实时系统时，既想打断点、看 HardFault 和 FreeRTOS 任务栈，又不想停机，希望能直接在 VS Code / 浏览器里一边跑一边看 Live Watch、1 kHz 高速波形（Timeline）和 RTT 日志；
