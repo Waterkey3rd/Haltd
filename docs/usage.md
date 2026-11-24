@@ -384,6 +384,6 @@ haltd devices --filter STM32H7 --json                    # 查询 J-Link 支持�
 1. **工程配置目录**：将工程根目录下的 `.jlinkd/` 重命名为 `.haltd/`（包含 `project.yaml`、`rtt.yaml`、`state.json` 及自定义的 Lua 脚本路径）。
 2. **`launch.json`**：将配置中的 `"type": "jlinkd"` 改为 `"type": "haltd"`，如自定义了 `project` 字段或用户设置 `jlinkd.*`，一并改为 `.haltd/...` 与 `haltd.*`。
 3. **环境变量**：`JLINKD_CACHE_DIR` / `JLINKD_DLL` / `JLINKD_DEVICE` / `JLINKD_LOG` 统一更名为 `HALTD_CACHE_DIR` / `HALTD_DLL` / `HALTD_DEVICE` / `HALTD_LOG`。
-4. **VS Code 扩展**：扩展标识已变更为 `WaterKeyqwq.haltd`（与旧的 `jlinkd.jlinkd` 不同）。升级前请先在 VS Code 中卸载旧的 `jlinkd` 扩展，再安装新的 `haltd` `.vsix`。
+4. **VS Code 扩展**：扩展标识已变更为 `WaterKeyqwq.haltd-embedded`（与旧的 `jlinkd.jlinkd` 不同）。升级前请先在 VS Code 中卸载旧的 `jlinkd` 扩展，再安装新的 `haltd` `.vsix`。
 5. **缓存目录**：默认缓存目录已变更为 `~/.cache/haltd`（Linux）或「文档」目录下的 `haltd`（Windows）。旧的 `jlinkd` 缓存目录可直接删除，符号索引会按需自动重建。
 6. **录制文件兼容**：新录制的波形文件扩展名为 `.hlrec`，旧版录制的 `.jlrec` 文件仍可由 `Haltd` 正常读取。
