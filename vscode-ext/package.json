@@ -5,6 +5,14 @@
   "version": "0.7.0",
   "publisher": "WaterKeyqwq",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Waterkey3rd/Haltd.git"
+  },
+  "homepage": "https://github.com/Waterkey3rd/Haltd#readme",
+  "bugs": {
+    "url": "https://github.com/Waterkey3rd/Haltd/issues"
+  },
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.90.0"
