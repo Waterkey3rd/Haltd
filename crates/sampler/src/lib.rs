@@ -74,6 +74,22 @@ impl Default for SamplingConfig {
     }
 }
 
+/// Automatic decoding / Timeline behavior for unconfigured RTT channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RttAuto {
+    pub decode: bool,
+    pub timeline: bool,
+}
+
+impl Default for RttAuto {
+    fn default() -> Self {
+        Self {
+            decode: true,
+            timeline: true,
+        }
+    }
+}
+
 /// Everything needed to sample a connected target.
 #[derive(Clone)]
 pub struct Binding {
@@ -88,6 +104,7 @@ pub struct Binding {
     pub visualizer_files: Vec<PathBuf>,
     pub config: SamplingConfig,
     pub rtt_config: Option<PathBuf>,
+    pub rtt_auto: RttAuto,
     pub workspace: Option<PathBuf>,
 }
 

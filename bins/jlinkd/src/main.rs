@@ -8,7 +8,7 @@ use probe_api::{
     AccessWidth, BpKind, ConnectCfg, Interface, Probe, ProbeInfo, Progress, Reg, ResetKind,
     TargetInfo, DEFAULT_SPEED_KHZ,
 };
-use probe_jlink::{JLink, JLinkOptions};
+use probe_jlink::{list_devices, JLink, JLinkOptions};
 use symbols::{
     CoreRegisters, FormatOptions, FrameKind, LoadOptions, MemoryReader, StackFrame, SymbolDb,
 };
@@ -104,6 +104,18 @@ enum Command {
         /// Names of globals or functions to look up.
         #[arg(long)]
         lookup: Vec<String>,
+    },
+    /// List target devices known to the J-Link library; no probe is needed.
+    Devices {
+        /// Case-insensitive substring filter on device name (e.g. "STM32").
+        #[arg(long)]
+        filter: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Path of the J-Link library (libjlinkarm.so or JLink_x64.dll).
+        #[arg(long, env = "JLINKD_DLL")]
+        dll: Option<PathBuf>,
     },
 }
 
@@ -233,6 +245,7 @@ fn main() -> Result<()> {
             no_cache,
             lookup,
         } => symbols_report(&elf, no_cache, &lookup),
+        Command::Devices { filter, json, dll } => devices_report(filter.as_deref(), json, dll),
     }
 }
 
@@ -542,6 +555,29 @@ fn symbols_report(elf: &Path, no_cache: bool, lookups: &[String]) -> Result<()> 
         if let (true, Some((address, size))) = (globals.is_empty() && functions.is_empty(), symbol)
         {
             println!("{name}: ELF symbol @ {address:#010x}, {size} bytes");
+        }
+    }
+    Ok(())
+}
+
+fn devices_report(filter: Option<&str>, json: bool, dll: Option<PathBuf>) -> Result<()> {
+    let filter_upper = filter.map(str::to_ascii_uppercase);
+    let mut devices = list_devices(dll.as_deref()).context("cannot list J-Link devices")?;
+    if let Some(needle) = filter_upper.as_deref() {
+        devices.retain(|entry| entry.name.to_ascii_uppercase().contains(needle));
+    }
+    if json {
+        println!("{}", serde_json::to_string(&devices)?);
+    } else {
+        for entry in &devices {
+            println!(
+                "{:<22} {:<16} flash={} KiB ram={} KiB ({})",
+                entry.name,
+                entry.core,
+                entry.flash_size / 1024,
+                entry.ram_size / 1024,
+                entry.manufacturer
+            );
         }
     }
     Ok(())

@@ -10,6 +10,7 @@ import {
   TasksView,
   type PeripheralNode,
 } from "./debugViews";
+import { registerDeviceAssist } from "./deviceAssist";
 import { LiveWatch } from "./liveWatch";
 
 const DEBUG_TYPE = "jlinkd";
@@ -30,7 +31,7 @@ const RTT_URL = `http://127.0.0.1:${BACKEND_PORT}/rtt`;
 
 /** The configured path, then the copy packaged with the extension, then
  *  ~/.cargo/bin, which VS Code started from a desktop launcher often lacks on PATH. */
-function adapterPath(extensionPath: string): string {
+export function adapterPath(extensionPath: string): string {
   const configured = vscode.workspace.getConfiguration("jlinkd").get<string>("path", "jlinkd");
   if (configured !== "jlinkd") {
     return configured;
@@ -447,6 +448,7 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  registerDeviceAssist(context, () => adapterPath(context.extensionPath));
   const client = new DataClient();
   const status = new StatusBar(client);
   const liveWatch = new LiveWatch(client);
@@ -461,7 +463,10 @@ export function activate(context: vscode.ExtensionContext): void {
   rttButton.text = "$(terminal) RTT";
   rttButton.tooltip = "Open the RTT terminal";
   rttButton.command = "jlinkd.openRttTerminal";
-  const tree = vscode.window.createTreeView("jlinkd.liveWatch", { treeDataProvider: liveWatch });
+  const tree = vscode.window.createTreeView("jlinkd.liveWatch", {
+    treeDataProvider: liveWatch,
+    canSelectMany: true,
+  });
   const peripherals = new PeripheralsView();
   const tasks = new TasksView();
   const cyclesItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 47);
@@ -562,6 +567,9 @@ export function activate(context: vscode.ExtensionContext): void {
         await liveWatch.add(expression).catch(report);
       }
     }),
+    vscode.commands.registerCommand("jlinkd.addSelectionToWatch", () =>
+      addFromDebugger().catch(report),
+    ),
     vscode.commands.registerCommand("jlinkd.addToTimeline", async (item?: VariableContext | WatchInfo) => {
       if (item && "expr" in item && !item.plottable) {
         report(new Error(`${item.name} cannot be plotted by itself`));
@@ -572,6 +580,87 @@ export function activate(context: vscode.ExtensionContext): void {
       if (expression) {
         await addToTimelineByHss(client, expression, timeline).catch(report);
       }
+    }),
+    vscode.commands.registerCommand("jlinkd.addSelectionToTimeline", async (source?: string) => {
+      if (source === "liveWatch" || (source !== "editor" && !vscode.window.activeTextEditor && tree.selection.length > 0)) {
+        const selected = tree.selection;
+        if (selected.length === 0) {
+          return;
+        }
+        const plottable = selected.filter((item) => item.plottable);
+        const skipped = selected.filter((item) => !item.plottable);
+        if (plottable.length === 0) {
+          report(new Error(`${skipped[0].name} cannot be plotted by itself`));
+          return;
+        }
+        if (skipped.length > 0) {
+          void vscode.window.showWarningMessage(
+            `jlinkd: ${skipped.length} selected item(s) cannot be plotted directly`,
+          );
+        }
+        for (const item of plottable) {
+          await addToTimelineByHss(client, item.expr, timeline).catch(report);
+        }
+        return;
+      }
+      const expression = await chooseExpression();
+      if (expression) {
+        await addToTimelineByHss(client, expression, timeline).catch(report);
+      }
+    }),
+    vscode.commands.registerCommand("jlinkd.removeSelectedWatch", async () => {
+      const selected = tree.selection;
+      if (selected.length === 0) {
+        return;
+      }
+      const ids = new Set(selected.map((item) => item.id));
+      const top = selected.filter((item) => item.parent === null || !ids.has(item.parent));
+      for (const item of top) {
+        await liveWatch.remove(item).catch(report);
+      }
+    }),
+    vscode.commands.registerCommand("jlinkd.editSelectedWatch", async (trigger?: string) => {
+      if (tree.selection.length !== 1) {
+        return;
+      }
+      const item = tree.selection[0];
+      if (!item.writable) {
+        if (trigger === "enter" && item.expandable) {
+          await vscode.commands.executeCommand("list.toggleExpand");
+        }
+        return;
+      }
+      const value = await vscode.window.showInputBox({
+        prompt: `New value for ${item.name}`,
+        value: item.value,
+      });
+      if (value !== undefined) {
+        await liveWatch.write(item, value).catch(report);
+      }
+    }),
+    vscode.commands.registerCommand("jlinkd.setSelectedWatchRate", async () => {
+      const selected = tree.selection;
+      if (selected.length === 0) {
+        return;
+      }
+      const label = selected.length === 1 ? selected[0].name : `${selected.length} items`;
+      const choice = await vscode.window.showQuickPick(RATES, {
+        placeHolder: `Refresh rate for ${label}`,
+      });
+      if (!choice) {
+        return;
+      }
+      for (const item of selected) {
+        await liveWatch.setRate(item, choice.rateHz).catch(report);
+      }
+    }),
+    vscode.commands.registerCommand("jlinkd.copySelectedWatch", async () => {
+      const selected = tree.selection;
+      if (selected.length === 0) {
+        return;
+      }
+      const text = selected.map((item) => `${item.expr} = ${item.value}`).join("\n");
+      await vscode.env.clipboard.writeText(text);
     }),
     vscode.commands.registerCommand("jlinkd.removeWatch", (item: WatchInfo) =>
       liveWatch.remove(item).catch(report),

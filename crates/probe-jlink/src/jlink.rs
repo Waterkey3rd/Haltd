@@ -10,7 +10,72 @@ use probe_api::{
     SwoApi, TargetInfo, WatchpointSpec, WpAccess, WpHandle,
 };
 
-use crate::ffi::{self, Api};
+use crate::ffi::{self, Api, DeviceInfoRaw};
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceEntry {
+    pub name: String,
+    pub manufacturer: String,
+    pub core: String,
+    pub flash_size: u32,
+    pub ram_size: u32,
+}
+
+/// Enumerate devices known to the installed J-Link library without opening a probe.
+pub fn list_devices(dll: Option<&Path>) -> Result<Vec<DeviceEntry>> {
+    let api = ffi::load(dll)?;
+    let get_info = api
+        .JLINKARM_DEVICE_GetInfo
+        .ok_or_else(|| ProbeError::Unsupported("JLINKARM_DEVICE_GetInfo".to_owned()))?;
+    // SAFETY: index `-1` with NULL queries the total count in the DLL's device table.
+    let count = unsafe { get_info(-1, std::ptr::null_mut()) };
+    if count < 0 {
+        return Err(call_error("JLINKARM_DEVICE_GetInfo", count));
+    }
+    let mut devices = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let mut raw = DeviceInfoRaw::default();
+        // SAFETY: `raw.size_of_struct` is initialized to `size_of::<DeviceInfoRaw>()`
+        // and `raw` is a valid mutable stack struct for the call.
+        let code = unsafe { get_info(index, &mut raw) };
+        if code < 0 {
+            continue;
+        }
+        let name = callback_text(raw.s_name);
+        if name.is_empty() {
+            continue;
+        }
+        let manufacturer = callback_text(raw.s_manu);
+        let core_id = if raw.core != 0 { raw.core } else { raw.core_id };
+        let core = if let Some(core_fn) = api.JLINKARM_Core2CoreName {
+            let mut buf = [0 as c_char; 64];
+            // SAFETY: `buf` holds 64 writable bytes for the NUL-terminated core name.
+            unsafe { core_fn(core_id, buf.as_mut_ptr(), buf.len() as c_int) };
+            let text = c_buffer(&buf);
+            if text.is_empty() {
+                format!("0x{core_id:08x}")
+            } else {
+                text
+            }
+        } else {
+            format!("0x{core_id:08x}")
+        };
+        let flash_size = if raw.a_flash_area[0].size != 0 {
+            raw.a_flash_area[0].size
+        } else {
+            raw.flash_size
+        };
+        devices.push(DeviceEntry {
+            name,
+            manufacturer,
+            core,
+            flash_size,
+            ram_size: raw.ram_size,
+        });
+    }
+    Ok(devices)
+}
 
 const DWT_CTRL: u32 = 0xE000_1000;
 const DWT_CTRL_NUMCOMP_SHIFT: u32 = 28;

@@ -1,17 +1,20 @@
 //! Turning channel bytes into terminal text and named signals (DESIGN §5.8).
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use mlua::{Function, Lua, Table, Value};
 use regex::Regex;
 use sampler::codec::{leaves_of_place, Scalar};
 use sampler::timesync::ProbeClock;
-use symbols::{MemoryReader, Place, SymbolDb};
+use symbols::{MemoryReader, Place, SymbolDb, TypeKind, TypeRef};
 use visualizer::Visualizers;
 
-use crate::config::{Decode, StructConfig};
+use crate::config::{Decode, StructConfig, TimelineEntry, Timestamp};
 
 pub trait Sink {
     /// `plot` asks for a Timeline series; the latest value is kept regardless.
@@ -115,6 +118,136 @@ impl Decoder for RegexDecoder {
     }
 }
 
+const MAX_KV_SIGNALS: usize = 32;
+const MAX_KV_LINE: usize = 4096;
+
+fn kv_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?:^|[^A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.\[\]]*)\s*[=:]\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)",
+        )
+        .expect("valid key=value regex")
+    })
+}
+
+fn ansi_csi_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").expect("valid ANSI CSI regex"))
+}
+
+fn strip_ansi(line: &str) -> Cow<'_, str> {
+    if line.contains('\x1b') {
+        ansi_csi_regex().replace_all(line, "")
+    } else {
+        Cow::Borrowed(line)
+    }
+}
+
+/// Automatic text decoder that forwards raw bytes to the terminal while
+/// extracting `name=value` / `name: value` numbers into signals.
+pub struct KeyValueDecoder {
+    channel: String,
+    line: Vec<u8>,
+    seen: HashSet<String>,
+    warned_cap: bool,
+    matched: u64,
+}
+
+impl KeyValueDecoder {
+    pub fn new(channel: &str) -> Self {
+        Self {
+            channel: channel.to_owned(),
+            line: Vec::new(),
+            seen: HashSet::new(),
+            warned_cap: false,
+            matched: 0,
+        }
+    }
+
+    fn finish_line(&mut self, t: i64, sink: &mut dyn Sink) {
+        if self.line.is_empty() {
+            return;
+        }
+        let raw = String::from_utf8_lossy(&self.line).into_owned();
+        self.line.clear();
+        let clean = strip_ansi(&raw);
+        let mut line_matched = false;
+        for captures in kv_regex().captures_iter(&clean) {
+            let Some(name_match) = captures.get(1) else {
+                continue;
+            };
+            let Some(num_match) = captures.get(2) else {
+                continue;
+            };
+            let tail = &clean[num_match.end()..];
+            // Skip version chains like 1.2.3 and hex/binary literals like 0x2000.
+            if tail.starts_with('.') {
+                continue;
+            }
+            if matches!(num_match.as_str(), "0" | "-0")
+                && tail
+                    .chars()
+                    .next()
+                    .is_some_and(|c| matches!(c, 'x' | 'X' | 'b' | 'B'))
+            {
+                continue;
+            }
+            let Ok(value) = num_match.as_str().parse::<f64>() else {
+                continue;
+            };
+            if !value.is_finite() {
+                continue;
+            }
+            let signal = format!("{}.{}", self.channel, name_match.as_str());
+            if !self.seen.contains(&signal) {
+                if self.seen.len() >= MAX_KV_SIGNALS {
+                    if !self.warned_cap {
+                        self.warned_cap = true;
+                        tracing::warn!(
+                            "RTT channel {}: exceeded {MAX_KV_SIGNALS} auto-decoded signals; ignoring further names",
+                            self.channel
+                        );
+                    }
+                    continue;
+                }
+                self.seen.insert(signal.clone());
+            }
+            line_matched = true;
+            sink.sample(&signal, None, true, t, value);
+        }
+        if line_matched {
+            self.matched += 1;
+        }
+    }
+}
+
+impl Decoder for KeyValueDecoder {
+    fn feed(&mut self, data: &[u8], t: i64, sink: &mut dyn Sink) {
+        if data.is_empty() {
+            return;
+        }
+        sink.text(data);
+        for &byte in data {
+            if byte == b'\n' {
+                self.finish_line(t, sink);
+            } else if byte != b'\r' {
+                if self.line.len() >= MAX_KV_LINE {
+                    self.line.clear();
+                }
+                self.line.push(byte);
+            }
+        }
+    }
+
+    fn stats(&self) -> DecoderStats {
+        DecoderStats {
+            frames: self.matched,
+            ..DecoderStats::default()
+        }
+    }
+}
+
 /// Field of a binary frame.
 #[derive(Clone, Debug)]
 pub struct FrameField {
@@ -171,6 +304,14 @@ impl StructDecoder {
     /// straight away if it follows a confirmed frame directly.
     fn extract(&mut self) -> (Vec<usize>, usize) {
         let size = self.layout.size;
+        if size == 0 {
+            return (Vec::new(), self.buffer.len());
+        }
+        if self.layout.sync.is_empty() {
+            let count = self.buffer.len() / size;
+            let frames = (0..count).map(|i| i * size).collect();
+            return (frames, count * size);
+        }
         let sync_length = self.layout.sync.len();
         let origin = self.layout.sync_offset;
         let mut frames = Vec::new();
@@ -278,9 +419,27 @@ pub fn layout_from_elf(
     channel: &str,
     config: &StructConfig,
 ) -> Result<FrameLayout, String> {
+    build_layout_from_elf(
+        db,
+        channel,
+        &config.type_name,
+        Some(config.sync),
+        config.timestamp.as_ref(),
+        config.timeline.as_deref(),
+    )
+}
+
+fn build_layout_from_elf(
+    db: &SymbolDb,
+    channel: &str,
+    type_name: &str,
+    sync_word: Option<u32>,
+    timestamp_cfg: Option<&Timestamp>,
+    timeline_cfg: Option<&[TimelineEntry]>,
+) -> Result<FrameLayout, String> {
     let ty = db
-        .type_by_name(&config.type_name)
-        .ok_or_else(|| format!("no type named {} in the ELF", config.type_name))?;
+        .type_by_name(type_name)
+        .ok_or_else(|| format!("no type named {type_name} in the ELF"))?;
     let size = db.size_of(ty, 0).map_err(|e| e.to_string())? as usize;
     let rules = Visualizers::with_builtin().ok();
     let leaves = leaves_of_place(
@@ -299,23 +458,30 @@ pub fn layout_from_elf(
             .map(|leaf| (leaf.place.addr as usize, leaf.scalar))
     };
 
-    let sync_bytes = if config.sync > 0xFFFF { 4 } else { 2 };
-    let sync = config.sync.to_le_bytes()[..sync_bytes].to_vec();
-    let sync_offset = find("sync").map_or(0, |(offset, _)| offset);
+    let sync = match sync_word {
+        Some(word) => {
+            let sync_bytes = if word > 0xFFFF { 4 } else { 2 };
+            word.to_le_bytes()[..sync_bytes].to_vec()
+        }
+        None => Vec::new(),
+    };
+    let sync_offset = if sync.is_empty() {
+        0
+    } else {
+        find("sync").map_or(0, |(offset, _)| offset)
+    };
     let sequence = find("seq");
-    let timestamp = match &config.timestamp {
+    let timestamp = match timestamp_cfg {
         Some(stamp) => {
             let (offset, scalar) = find(&stamp.field)
-                .ok_or_else(|| format!("{} has no field {}", config.type_name, stamp.field))?;
+                .ok_or_else(|| format!("{type_name} has no field {}", stamp.field))?;
             Some((offset, scalar, 1e9 / stamp.clock_hz))
         }
         None => None,
     };
 
-    let selected: Option<Vec<(Vec<String>, Option<String>)>> = config
-        .timeline
-        .as_ref()
-        .map(|entries| entries.iter().map(|entry| entry.expand()).collect());
+    let selected: Option<Vec<(Vec<String>, Option<String>)>> =
+        timeline_cfg.map(|entries| entries.iter().map(|entry| entry.expand()).collect());
     let mut fields = Vec::with_capacity(leaves.len());
     for leaf in &leaves {
         let name = short(&leaf.name);
@@ -346,6 +512,100 @@ pub fn layout_from_elf(
         timestamp,
         fields,
     })
+}
+
+fn is_cpp_type_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name.split("::").all(|seg| {
+            let mut chars = seg.chars();
+            let Some(first) = chars.next() else {
+                return false;
+            };
+            (first.is_ascii_alphabetic() || first == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// Parse an unconfigured RTT channel name as `Type`, `struct:Type`, or `Type@0xA55A`.
+pub fn parse_struct_channel(name: &str) -> Option<(&str, Option<u32>)> {
+    let body = name.strip_prefix("struct:").unwrap_or(name);
+    let (ty, sync) = match body.split_once('@') {
+        Some((ty, raw_sync)) => {
+            let hex = raw_sync
+                .strip_prefix("0x")
+                .or_else(|| raw_sync.strip_prefix("0X"))?;
+            if hex.is_empty() || hex.len() > 8 {
+                return None;
+            }
+            let sync = u32::from_str_radix(hex, 16).ok()?;
+            (ty, Some(sync))
+        }
+        None => (body, None),
+    };
+    is_cpp_type_ident(ty).then_some((ty, sync))
+}
+
+fn struct_definition(db: &SymbolDb, type_name: &str) -> Option<TypeRef> {
+    let ty = db.type_by_name(type_name)?;
+    let (resolved, info) = db.strip(ty).ok()?;
+    match info.kind {
+        TypeKind::Struct {
+            declaration: false, ..
+        } => Some(resolved),
+        _ => None,
+    }
+}
+
+/// Pick an automatic decoder for an RTT up-channel omitted from `.jlinkd/rtt.yaml`.
+pub fn auto_decoder(
+    db: &SymbolDb,
+    channel_name: &str,
+    index: u32,
+) -> (Box<dyn Decoder>, &'static str, Option<String>) {
+    if let Some((type_name, sync)) = parse_struct_channel(channel_name) {
+        if let Some(ty) = struct_definition(db, type_name) {
+            if sync.is_none() && db.find_member(ty, "sync").ok().flatten().is_some() {
+                return (
+                    Box::new(TextDecoder),
+                    "text",
+                    Some(format!(
+                        "channel {index}: {type_name} has a sync field; name the channel {type_name}@0x<value>"
+                    )),
+                );
+            }
+            match build_layout_from_elf(db, channel_name, type_name, sync, None, None) {
+                Ok(layout) if !layout.fields.is_empty() && layout.size > 0 => {
+                    let problem = sync.is_none().then(|| {
+                        format!(
+                            "channel {index}: {type_name} framed by size only; use SEGGER_RTT_MODE_NO_BLOCK_SKIP"
+                        )
+                    });
+                    return (Box::new(StructDecoder::new(layout)), "auto-struct", problem);
+                }
+                Ok(_) => {
+                    return (
+                        Box::new(TextDecoder),
+                        "text",
+                        Some(format!(
+                            "channel {index}: {type_name} has no numeric fields to decode"
+                        )),
+                    );
+                }
+                Err(error) => {
+                    return (
+                        Box::new(TextDecoder),
+                        "text",
+                        Some(format!("channel {index}: {error}")),
+                    );
+                }
+            }
+        }
+    }
+    (
+        Box::new(KeyValueDecoder::new(channel_name)),
+        "auto-text",
+        None,
+    )
 }
 
 /// A user script: `decode(bytes, state) -> { {name, t, value}, ... }`. `t` is
@@ -676,5 +936,97 @@ mod tests {
             decoder.feed(&[], 0, &mut sink);
         }
         assert_eq!(std::fs::read(&path).unwrap(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn struct_channel_names_parse_sync_and_prefix() {
+        assert_eq!(
+            parse_struct_channel("TelemetryFrame"),
+            Some(("TelemetryFrame", None))
+        );
+        assert_eq!(
+            parse_struct_channel("struct:fw::Telemetry"),
+            Some(("fw::Telemetry", None))
+        );
+        assert_eq!(
+            parse_struct_channel("TelemetryFrame@0xA55A"),
+            Some(("TelemetryFrame", Some(0xA55A)))
+        );
+        assert_eq!(
+            parse_struct_channel("struct:fw::Frame@0X1234ABCD"),
+            Some(("fw::Frame", Some(0x1234_ABCD)))
+        );
+        assert_eq!(parse_struct_channel("Channel 0"), None);
+        assert_eq!(parse_struct_channel("Telemetry@bad"), None);
+        assert_eq!(parse_struct_channel("Telemetry@0x"), None);
+        assert_eq!(parse_struct_channel("@0x1234"), None);
+        assert_eq!(parse_struct_channel("Telemetry@1234"), None);
+    }
+
+    #[test]
+    fn sync_less_struct_decoder_splits_consecutive_frames() {
+        let layout = FrameLayout {
+            size: 4,
+            sync: Vec::new(),
+            sync_offset: 0,
+            sequence: None,
+            timestamp: None,
+            fields: vec![FrameField {
+                name: "Frame.v".to_owned(),
+                offset: 0,
+                scalar: unsigned(4),
+                plot: true,
+                group: None,
+            }],
+        };
+        let mut decoder = StructDecoder::new(layout);
+        let mut sink = Collect::default();
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&10u32.to_le_bytes());
+        stream.extend_from_slice(&20u32.to_le_bytes());
+        stream.extend_from_slice(&30u32.to_le_bytes());
+        // Feed misaligned chunks (5 bytes, then 3 bytes, then 4 bytes).
+        decoder.feed(&stream[..5], 100, &mut sink);
+        assert_eq!(values(&sink), [10.0]);
+        decoder.feed(&stream[5..8], 200, &mut sink);
+        assert_eq!(values(&sink), [10.0, 20.0]);
+        decoder.feed(&stream[8..], 300, &mut sink);
+        assert_eq!(values(&sink), [10.0, 20.0, 30.0]);
+        assert_eq!(decoder.stats().frames, 3);
+    }
+
+    #[test]
+    fn kv_decoder_extracts_numbers_forwards_text_and_caps_at_32() {
+        let mut decoder = KeyValueDecoder::new("log");
+        let mut sink = Collect::default();
+        decoder.feed(b"\x1b[32mspeed=-12.5\x1b[0m, err: 1.5e-2", 10, &mut sink);
+        assert!(sink.samples.is_empty());
+        decoder.feed(b" addr=0x2000 ver=1.2.3\r\n", 20, &mut sink);
+        assert_eq!(
+            sink.samples,
+            [
+                ("log.speed".to_owned(), 20, -12.5, true),
+                ("log.err".to_owned(), 20, 0.015, true),
+            ]
+        );
+        assert!(sink
+            .text
+            .starts_with(b"\x1b[32mspeed=-12.5\x1b[0m, err: 1.5e-2"));
+
+        let mut capped = KeyValueDecoder::new("cap");
+        let mut cap_sink = Collect::default();
+        let mut line = String::new();
+        for i in 0..40 {
+            line.push_str(&format!("k{i}={i} "));
+        }
+        line.push('\n');
+        capped.feed(line.as_bytes(), 50, &mut cap_sink);
+        assert_eq!(cap_sink.samples.len(), MAX_KV_SIGNALS);
+        assert_eq!(cap_sink.samples[0].0, "cap.k0");
+        assert_eq!(cap_sink.samples[31].0, "cap.k31");
+        // Previously seen names still update after reaching the cap.
+        capped.feed(b"k0=99 k39=1\n", 60, &mut cap_sink);
+        assert_eq!(cap_sink.samples.len(), MAX_KV_SIGNALS + 1);
+        assert_eq!(cap_sink.samples.last().unwrap().2, 99.0);
     }
 }

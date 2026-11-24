@@ -2,7 +2,7 @@
   "name": "jlinkd",
   "displayName": "jlinkd",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "jlinkd",
   "license": "MIT",
   "icon": "icon.png",
@@ -14,7 +14,10 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onDebugResolve:jlinkd"
+    "onDebugResolve:jlinkd",
+    "onLanguage:jsonc",
+    "workspaceContains:.vscode/launch.json",
+    "onCommand:jlinkd.selectDevice"
   ],
   "contributes": {
     "breakpoints": [
@@ -42,7 +45,15 @@
             "properties": {
               "device": {
                 "type": "string",
-                "description": "J-Link device name, such as STM32H723VG."
+                "description": "J-Link device name, such as STM32H723VG.",
+                "examples": [
+                  "STM32H723VG",
+                  "STM32H743ZI",
+                  "STM32G474RE",
+                  "STM32F103C8",
+                  "STM32F407VG",
+                  "STM32L476RG"
+                ]
               },
               "interface": {
                 "type": "string",
@@ -99,6 +110,22 @@
                   "string"
                 ],
                 "description": "Serial number of the J-Link to use when several are attached."
+              },
+              "rtt": {
+                "type": "object",
+                "description": "RTT auto-decoding and Timeline options for channels not configured in .jlinkd/rtt.yaml.",
+                "properties": {
+                  "autoDecode": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically decode unconfigured RTT channels matching ELF struct types or key=value text."
+                  },
+                  "autoTimeline": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically add auto-decoded RTT signals to the Timeline."
+                  }
+                }
               }
             }
           },
@@ -109,7 +136,16 @@
             ],
             "properties": {
               "device": {
-                "type": "string"
+                "type": "string",
+                "description": "J-Link device name, such as STM32H723VG.",
+                "examples": [
+                  "STM32H723VG",
+                  "STM32H743ZI",
+                  "STM32G474RE",
+                  "STM32F103C8",
+                  "STM32F407VG",
+                  "STM32L476RG"
+                ]
               },
               "interface": {
                 "type": "string",
@@ -146,6 +182,22 @@
                   "string"
                 ],
                 "description": "Serial number of the J-Link to use when several are attached."
+              },
+              "rtt": {
+                "type": "object",
+                "description": "RTT auto-decoding and Timeline options for channels not configured in .jlinkd/rtt.yaml.",
+                "properties": {
+                  "autoDecode": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically decode unconfigured RTT channels matching ELF struct types or key=value text."
+                  },
+                  "autoTimeline": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically add auto-decoded RTT signals to the Timeline."
+                  }
+                }
               }
             }
           }
@@ -238,6 +290,34 @@
         "command": "jlinkd.refreshTasks",
         "title": "Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "jlinkd.selectDevice",
+        "title": "jlinkd: Select Device"
+      },
+      {
+        "command": "jlinkd.addSelectionToWatch",
+        "title": "jlinkd: Add Selection to Live Watch"
+      },
+      {
+        "command": "jlinkd.addSelectionToTimeline",
+        "title": "jlinkd: Add Selection to Timeline (HSS)"
+      },
+      {
+        "command": "jlinkd.removeSelectedWatch",
+        "title": "Remove Selected from Live Watch"
+      },
+      {
+        "command": "jlinkd.editSelectedWatch",
+        "title": "Edit Selected Live Watch Value"
+      },
+      {
+        "command": "jlinkd.setSelectedWatchRate",
+        "title": "Set Selected Live Watch Refresh Rate"
+      },
+      {
+        "command": "jlinkd.copySelectedWatch",
+        "title": "Copy Selected Live Watch Value"
       }
     ],
     "keybindings": [
@@ -245,6 +325,61 @@
         "command": "jlinkd.buildAndReload",
         "key": "f6",
         "when": "debugType == jlinkd"
+      },
+      {
+        "command": "jlinkd.addSelectionToWatch",
+        "key": "ctrl+g",
+        "mac": "cmd+g",
+        "when": "inDebugMode && debugType == 'jlinkd' && editorTextFocus"
+      },
+      {
+        "command": "jlinkd.addSelectionToTimeline",
+        "args": "editor",
+        "key": "ctrl+h",
+        "mac": "cmd+h",
+        "when": "inDebugMode && debugType == 'jlinkd' && editorTextFocus"
+      },
+      {
+        "command": "jlinkd.addSelectionToTimeline",
+        "args": "liveWatch",
+        "key": "ctrl+h",
+        "mac": "cmd+h",
+        "when": "inDebugMode && debugType == 'jlinkd' && focusedView == 'jlinkd.liveWatch'"
+      },
+      {
+        "command": "jlinkd.removeSelectedWatch",
+        "key": "delete",
+        "mac": "backspace",
+        "when": "focusedView == 'jlinkd.liveWatch'"
+      },
+      {
+        "command": "jlinkd.editSelectedWatch",
+        "key": "f2",
+        "when": "focusedView == 'jlinkd.liveWatch'"
+      },
+      {
+        "command": "jlinkd.editSelectedWatch",
+        "args": "enter",
+        "key": "enter",
+        "when": "focusedView == 'jlinkd.liveWatch'"
+      },
+      {
+        "command": "jlinkd.setSelectedWatchRate",
+        "key": "ctrl+r",
+        "mac": "cmd+r",
+        "when": "focusedView == 'jlinkd.liveWatch'"
+      },
+      {
+        "command": "jlinkd.copySelectedWatch",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "focusedView == 'jlinkd.liveWatch'"
+      },
+      {
+        "command": "jlinkd.openTimeline",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "debugType == 'jlinkd'"
       }
     ],
     "configuration": {
@@ -379,6 +514,30 @@
         },
         {
           "command": "jlinkd.writePeripheral",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.addSelectionToWatch",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.addSelectionToTimeline",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.removeSelectedWatch",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.editSelectedWatch",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.setSelectedWatchRate",
+          "when": "false"
+        },
+        {
+          "command": "jlinkd.copySelectedWatch",
           "when": "false"
         }
       ]

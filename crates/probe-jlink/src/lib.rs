@@ -8,4 +8,4 @@ mod hss;
 mod jlink;
 mod rtt;
 
-pub use jlink::{JLink, JLinkOptions};
+pub use jlink::{list_devices, DeviceEntry, JLink, JLinkOptions};

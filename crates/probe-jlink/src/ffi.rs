@@ -59,6 +59,48 @@ pub struct RttStatusRaw {
     pub reserved: [u32; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DeviceMemArea {
+    pub addr: u32,
+    pub size: u32,
+}
+
+#[repr(C)]
+pub struct DeviceInfoRaw {
+    pub size_of_struct: u32,
+    pub s_name: *const c_char,
+    pub core_id: u32,
+    pub flash_addr: u32,
+    pub ram_addr: u32,
+    pub endian_mode: u8,
+    pub flash_size: u32,
+    pub ram_size: u32,
+    pub s_manu: *const c_char,
+    pub a_flash_area: [DeviceMemArea; 32],
+    pub a_ram_area: [DeviceMemArea; 32],
+    pub core: u32,
+}
+
+impl Default for DeviceInfoRaw {
+    fn default() -> Self {
+        Self {
+            size_of_struct: size_of::<Self>() as u32,
+            s_name: std::ptr::null(),
+            core_id: 0,
+            flash_addr: 0,
+            ram_addr: 0,
+            endian_mode: 0,
+            flash_size: 0,
+            ram_size: 0,
+            s_manu: std::ptr::null(),
+            a_flash_area: [DeviceMemArea::default(); 32],
+            a_ram_area: [DeviceMemArea::default(); 32],
+            core: 0,
+        }
+    }
+}
+
 pub const RTT_CMD_START: u32 = 0;
 pub const RTT_CMD_STOP: u32 = 1;
 pub const RTT_CMD_GETDESC: u32 = 2;
@@ -153,6 +195,9 @@ jlink_api! {
     JLINK_RTTERMINAL_Control: fn(u32, *mut c_void) -> c_int;
     JLINK_RTTERMINAL_Read: fn(u32, *mut u8, u32) -> c_int;
     JLINK_RTTERMINAL_Write: fn(u32, *const u8, u32) -> c_int;
+    // Device database.
+    JLINKARM_DEVICE_GetInfo: fn(c_int, *mut DeviceInfoRaw) -> c_int;
+    JLINKARM_Core2CoreName: fn(u32, *mut c_char, c_int);
 }
 
 #[cfg(not(windows))]
@@ -243,5 +288,8 @@ mod tests {
         assert_eq!(size_of::<RttStart>(), 16);
         assert_eq!(size_of::<RttBufDesc>(), 48);
         assert_eq!(size_of::<RttStatusRaw>(), 32);
+        assert_eq!(size_of::<DeviceMemArea>(), 8);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(size_of::<DeviceInfoRaw>(), 568);
     }
 }

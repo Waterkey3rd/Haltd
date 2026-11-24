@@ -17,11 +17,25 @@ pub struct ProjectConfig {
     pub svd: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct RttOptions {
     /// Decoder configuration, relative to the workspace.
     pub config: Option<String>,
+    /// Automatically decode unconfigured RTT channels from ELF types or key=value text.
+    pub auto_decode: bool,
+    /// Automatically add decoded RTT signals to the Timeline.
+    pub auto_timeline: bool,
+}
+
+impl Default for RttOptions {
+    fn default() -> Self {
+        Self {
+            config: None,
+            auto_decode: true,
+            auto_timeline: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -143,5 +157,19 @@ mod tests {
         assert_eq!(family_for_device("STM32G431CB"), Some("stm32g4"));
         assert_eq!(family_for_device("stm32f103c8"), Some("stm32f1"));
         assert_eq!(family_for_device("nRF52840"), None);
+    }
+
+    #[test]
+    fn rtt_options_default_true_and_parse_camel_case() {
+        let default_cfg: ProjectConfig = serde_yaml::from_str("").unwrap();
+        assert!(default_cfg.rtt.auto_decode);
+        assert!(default_cfg.rtt.auto_timeline);
+        let parsed: ProjectConfig = serde_yaml::from_str(
+            "rtt: { config: custom.yaml, autoDecode: false, autoTimeline: false }",
+        )
+        .unwrap();
+        assert_eq!(parsed.rtt.config.as_deref(), Some("custom.yaml"));
+        assert!(!parsed.rtt.auto_decode);
+        assert!(!parsed.rtt.auto_timeline);
     }
 }

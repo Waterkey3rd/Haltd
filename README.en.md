@@ -45,9 +45,10 @@ Core daily debugging workflows are ready to serve as a primary debug environment
 - **HardFault Interception & Decoding**: halts on fault entry, decodes `CFSR` / `HFSR` / `MMFAR` / `BFAR` / `AFSR`, and unwinds past `<exception N>` straight to the offending source line.
 - **FreeRTOS Awareness**: reads TCB and task list layouts directly from DWARF (CM3 / CM4F) with no hardcoded offsets; displays task states, priorities, stack high-water marks, and per-task call stacks.
 - **Live Watch & Timeline**:
-  - **Live Watch**: read and write global/static variables, structs, and bitfields at 0–5 Hz via AHB-AP without halting the CPU.
-  - **Timeline (HSS / Polling)**: up to 1 kHz HSS sampling (signals exceeding the probe's HSS bandwidth budget automatically fall back to polling), embedded VS Code / browser oscilloscope UI with cursors, grouped subplots, `.jlrec` recording, and CSV/PNG export.
-- **RTT Terminal & Structured Decoding**: supports plain ANSI text, regex extraction, DWARF-layout binary struct frames, custom Lua decoders, and SystemView pass-through.
+  - **Live Watch**: read and write global/static variables, structs, and bitfields at 0–5 Hz via AHB-AP without halting the CPU, with Ozone-style shortcuts (`Ctrl+G` add to Live Watch, `Ctrl+H` add to Timeline, etc.).
+  - **Timeline (HSS / Polling / RTT)**: up to 1 kHz HSS sampling (overflow falls back to polling) rendered in an Ozone Timeline / Data Graph-inspired multi-track oscilloscope UI unifying HSS and RTT signals, with hover value boxes, sample/delta cursors, drag-and-drop track grouping, dark/light themes, `.jlrec` recording, and CSV/PNG export.
+- **RTT Terminal & Structured Decoding**: besides ANSI text, regex, `.jlinkd/rtt.yaml`, Lua, and SystemView, supports zero-config auto-decoding from ELF struct types and `key=value` text with automatic Timeline plotting (configurable in `launch.json`).
+- **VS Code Device Selection Assist**: provides J-Link device completion, core/Flash/RAM + built-in profile hover info, unknown-device warnings in `launch.json`, and `jlinkd: Select Device`.
 - **CMSIS-SVD Peripherals View**: protects registers with read side-effects (such as `DR` / `RDR` / `RXDR`) from automatic reads, with field-level read-modify-write editing.
 - **C++ Type Visualizers**: built-in Lua rules for `units`, `Eigen::Matrix` / `Quaternion`, `std::array` / `std::tuple` / `std::optional` / `std::variant` / `std::span` / `std::string_view`, plus custom project rules.
 

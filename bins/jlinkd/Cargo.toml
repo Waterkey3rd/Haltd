@@ -10,6 +10,7 @@ clap.workspace = true
 engine.workspace = true
 probe-api.workspace = true
 probe-jlink.workspace = true
+serde_json.workspace = true
 server.workspace = true
 symbols.workspace = true
 tracing.workspace = true

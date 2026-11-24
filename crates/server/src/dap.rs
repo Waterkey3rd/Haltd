@@ -22,7 +22,7 @@ use probe_api::{ConnectCfg, Interface, Probe, Progress, WpAccess, DEFAULT_SPEED_
 use probe_jlink::actor::Priority;
 use probe_jlink::{JLink, JLinkOptions};
 use sampler::codec::joined;
-use sampler::{Binding, Sampler, SamplingConfig};
+use sampler::{Binding, RttAuto, Sampler, SamplingConfig};
 use serde_json::{json, Value};
 use symbols::{Place, Scalar, ScalarKind};
 use tsdb::EventKind;
@@ -201,6 +201,10 @@ pub(crate) fn binding_of(session: &Session) -> Binding {
             (Some(file), None) => Some(PathBuf::from(file)),
             (None, Some(workspace)) => rtt::default_config_path(workspace),
             (None, None) => None,
+        },
+        rtt_auto: RttAuto {
+            decode: options.project.rtt.auto_decode,
+            timeline: options.project.rtt.auto_timeline,
         },
         workspace: options.workspace.clone(),
     }
@@ -435,6 +439,14 @@ fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
     };
     if let Some(svd) = arguments["svd"].as_str() {
         project.svd = Some(svd.to_owned());
+    }
+    if let Some(rtt) = arguments.get("rtt").and_then(Value::as_object) {
+        if let Some(auto_decode) = rtt.get("autoDecode").and_then(Value::as_bool) {
+            project.rtt.auto_decode = auto_decode;
+        }
+        if let Some(auto_timeline) = rtt.get("autoTimeline").and_then(Value::as_bool) {
+            project.rtt.auto_timeline = auto_timeline;
+        }
     }
     Ok(LaunchOptions {
         connect: ConnectCfg {

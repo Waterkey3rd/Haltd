@@ -65,7 +65,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `device` | 是 | J-Link 器件名称，如 `STM32F103C8`、`STM32G474RE`、`STM32H723VG` |
+| `device` | 是 | J-Link 器件名称，如 `STM32F103C8`、`STM32G474RE`、`STM32H723VG`（在 `launch.json` 中支持自动补全、悬停查看内核/Flash/RAM 与匹配 profile、未知型号 Warning 提示，也可运行命令 `jlinkd: Select Device` 快捷选择） |
 | `elf` | 是 | 带调试信息的 ELF 固件路径 |
 | `interface` | | `SWD`（默认）或 `JTAG` |
 | `speed` | | 接口时钟（kHz），默认 `4000`；也可写 `"auto"` |
@@ -77,8 +77,9 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 | `project` | | 项目配置文件路径，默认 `${workspaceFolder}/.jlinkd/project.yaml`，没有也可以 |
 | `dll` | | 显式指定 `libjlinkarm.so` 或 `JLink_x64.dll` 的路径（多版本共存或绿色版时使用） |
 | `serial` | | 连接多台探针时指定序列号（数字或字符串） |
+| `rtt` | | RTT 自动解析选项：`{ "autoDecode": true, "autoTimeline": true }`（均默认 `true`），可控制未在 `rtt.yaml` 配置的通道是否自动按 ELF 结构体/文本解码及自动加入 Timeline |
 
-**附加到正在运行的固件（Attach）**：把 `request` 改成 `"attach"`，不会复位也不会烧录。可用字段为 `device`、`elf`、`interface`、`speed`、`project`、`svd`、`dll`、`serial`。
+**附加到正在运行的固件（Attach）**：把 `request` 改成 `"attach"`，不会复位也不会烧录。可用字段为 `device`、`elf`、`interface`、`speed`、`project`、`svd`、`dll`、`serial`、`rtt`。
 
 ---
 
@@ -130,17 +131,31 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 位于调试侧栏。在源码或 Variables 中右键「Add to Live Watch」，或点击视图标题栏 `+` 添加表达式。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `jlinkd.replaceWatchView: false` 关闭）。
 
 - 刷新率支持 `0–5 Hz` 每行独立设置（`0` 表示仅在目标暂停时刷新）。
-- 结构体、数组与指针可逐层展开，展开后的成员可直接右键加入 Timeline。
-- 支持右键「Set Value」直接修改目标内存值。
+- 结构体、数组与指针可逐层展开，支持多选，展开后的成员可直接加入 Timeline。
+- 支持直接修改目标内存值，并将表达式列表保存到 `.jlinkd/state.json`。
 - 指针表达式只在添加或 Reload 时解析一次地址，运行期间指针自身变化不会自动重新寻址。
+
+**Live Watch 与调试快捷操作**（仅在 `jlinkd` 调试会话期间生效，可在 VS Code Keyboard Shortcuts 中自定义）：
+
+| 快捷键 | 作用域 | 效果 |
+|---|---|---|
+| `Ctrl+G`（macOS `Cmd+G`） | 源码编辑器 | 将选中表达式或光标所在变量加入 Live Watch（调试结束后恢复原生「转到行」） |
+| `Ctrl+H`（macOS `Cmd+H`） | 源码编辑器 / Live Watch | 将选中变量加入 Timeline（HSS） |
+| `Del`（macOS `Backspace`） | Live Watch 视图 | 删除选中监视项 |
+| `F2` / `Enter` | Live Watch 视图 | 编辑可写标量值（结构体按 `Enter` 展开/折叠） |
+| `Ctrl+R`（macOS `Cmd+R`） | Live Watch 视图 | 设置选中项刷新率（0–5 Hz） |
+| `Ctrl+C`（macOS `Cmd+C`） | Live Watch 视图 | 复制选中项为 `expr = value` |
+| `Ctrl+Shift+T`（macOS `Cmd+Shift+T`） | 调试会话内 | 打开 Timeline 面板 |
+
+> 注：受限于 VS Code 扩展 API，原生 Variables 视图无法通过快捷键读取当前焦点行，Variables 视图仍通过右键菜单加入 Live Watch 或 Timeline。
 
 ### Timeline
 
-像示波器一样绘制变量随时间变化的波形。点击状态栏 Timeline 按钮或执行命令 `jlinkd: Open Timeline` 在 VS Code 内打开，也可使用 `jlinkd: Open Timeline in Browser` 在浏览器访问 <http://127.0.0.1:47110/timeline>。
+采用参考 SEGGER Ozone Timeline / Data Graph 的多轨道同步示波器布局：每条轨道左侧为独立图例与控制栏（含来源标识 `HSS` / `POLL` / `RTT` 与数值读数），右侧为波形画布，底部共用同一条时间轴与可拖拽游标手柄（`S` / `A` / `B`）。点击状态栏 Timeline 按钮、按 `Ctrl+Shift+T` 或执行 `jlinkd: Open Timeline` 打开，也可通过 <http://127.0.0.1:47110/timeline> 在浏览器访问。
 
 **添加信号与采样率**：
-- 在源码或 Live Watch 右键「Add to Timeline (HSS)」，或在网页顶部输入表达式后回车；结构体与数组会自动展开为多路（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
-- **选好信号后，需在工具栏 `Sample` 下拉框选择采样率（`20 Hz` ~ `1 kHz`）才会开始采集**；选 `Off` 时停止采集。
+- 在源码或 Live Watch 按 `Ctrl+H`（或右键「Add to Timeline (HSS)」）、在顶部输入表达式回车，或将左下角 `RTT` 抽屉中的解码信号直接拖拽到任意轨道或空白区新建轨道；结构体与数组会自动展开（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
+- **选好信号后，需在工具栏 `Sample` 下拉框选择采样率（`20 Hz` ~ `1 kHz`）才会开始采集 HSS/Poll**；选 `Off` 时暂停采样（RTT 自动解码信号在固件输出时即会到达）。
 
 | 采样模式 | 说明 |
 |---|---|
@@ -149,30 +164,44 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 | `poll` | 主机轮询读取，最高 100 Hz |
 | `rtt` | 来自 RTT 解码通道的信号 |
 
-**常用交互与快捷键**：
+**鼠标操作（Ozone 交互逻辑）**：
 
 | 操作 | 效果 |
 |---|---|
 | 滚轮 | 以鼠标位置为中心缩放时间轴 |
-| `Shift` + 滚轮 | 缩放当前子图的 Y 轴 |
-| 左键拖动 | 平移时间并暂停自动跟随 |
-| `Shift` + 拖动 | 平移当前子图的 Y 轴 |
-| `Ctrl` + 拖动 | 框选时间区间放大 |
-| 单击 | 依次放置游标 A、B，侧栏显示 `Δt` 与各信号差值 |
-| 双击 | 当前子图 Y 轴恢复自动缩放 |
+| `Shift` + 滚轮 | 横向滚动时间窗 |
+| `Ctrl` + 滚轮 | 缩放鼠标所在轨道的 Y 轴 |
+| 左键拖动 / 中键拖动 | 上下左右自由平移（纯纵向拖动保持实时跟随，横向拖动暂停跟随） |
+| `Shift` + 左键拖动 | 仅上下平移当前轨道 Y 轴（保持时间轴实时跟随） |
+| `Ctrl` + 左键拖动 | 框选时间区间放大 |
+| 双击轨道或时间轴 | 在该位置放置采样游标 `S`（Ozone Sample Cursor），图例立即显示该时刻各信号值 |
+| 拖动游标线或底部手柄 | 移动采样游标 `S` 或测量游标 `A` / `B` |
+| 右键菜单 | Zoom to Fit、Y 自动缩放、放置 `A`/`B`/`S`、清除游标、改色、移动到其他轨道/新建轨道、隐藏/独显、删除信号、导出可见 CSV |
+| 拖动图例信号 / RTT 信号 | 拖到其他轨道改变分组，拖到空白区域新建轨道 |
+| 拖动轨道底边框 | 调整该轨道高度（自动记忆）；拖动图例右边界可调整图例栏宽度 |
+
+**键盘快捷键**：
+
+| 快捷键 | 效果 |
+|---|---|
 | `Space` | 切换跟随 / 暂停 |
-| `←` / `→` | 前后移动时间窗 |
-| `-` / `+` | 缩放时间窗 |
-| `A` / `B` | 在鼠标当前位置放置游标 A / B |
-| `Esc` | 清除游标 |
-| `/` | 聚焦表达式输入框 |
-| `?` | 显示快捷键帮助 |
+| `←` / `→` | 后退 / 前进 1 格（1 Division） |
+| `Ctrl+←` / `Ctrl+→` | 后退 / 前进 1 屏 |
+| `Home` / `End` | 跳到最早记录 / 最新位置并恢复跟随 |
+| `+` / `-` | 放大 / 缩小时间刻度 |
+| `Ctrl+0` | 缩放以适配全部历史区间（Fit） |
+| `↑` / `↓` | 选择上一条 / 下一条轨道 |
+| `Del` | 删除当前选中的信号 |
+| `A` / `B` | 在鼠标悬停处放置游标 `A` / `B`（底部 `Cursors` 抽屉与状态栏显示 `Δt`、`1/Δt`、`ΔV`、`dV/dt`） |
+| `Esc` | 关闭弹窗或清除游标 `S` / `A` / `B` |
+| `H` / `S` | 隐藏或显示选中信号 / 独显选中信号（Solo） |
+| `Y` | 恢复当前选中轨道的 Y 轴自动缩放 |
+| `/` / `?` | 聚焦表达式输入框 / 显示快捷键与鼠标帮助 |
 
 **其他面板功能**：
-- 顶部概览条可点击或拖动跳转历史波形。
-- 工具栏可直接对目标执行暂停、继续、复位。
-- 侧栏支持显示/隐藏、独显（`S`）、改色与修改 `group`（同组信号画在同一张子图，`Grouped` 按钮可切换平铺或分组）。
-- 支持 `Min/Max` 包络显示、状态栏 `Events` 事件跳转、导出可见窗口 CSV、保存 PNG 截图、主题切换（默认跟随 VS Code）。
+- 顶部概览条显示全部历史与暂停/异常事件，点击或拖动可快速跳转。
+- 工具栏可直接对目标执行运行（`▶`）、暂停（`❚❚`）、复位（`⟲`）与 `Fit`。
+- 支持 `Grouped`（按轨道分组）/ `Split`（每路独立轨道）切换、`Bands`（Min/Max 包络）、状态栏 `Events` 事件跳转、导出可见窗口 CSV、保存 PNG 截图、深色/浅色/高对比主题切换（`Auto` 自动跟随 VS Code）。
 - 支持录制 `.jlrec` 文件（`Record` 按钮或命令 `jlinkd: Start/Stop Recording`）；当前网页端暂不支持直接回放 `.jlrec`。
 
 ### 状态与统计
@@ -183,12 +212,32 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 
 ## 5. RTT 终端与结构化解码
 
-只要在工程中提供 `.jlinkd/rtt.yaml`（或在 ELF 中包含 `_SEGGER_RTT` 符号并配置通道），即可启用 RTT；未配置 RTT 时不会主动扫描 RAM，以免抢占 SWD 带宽影响 HSS。
+只要在 ELF 中包含 `_SEGGER_RTT` 符号或提供 `.jlinkd/rtt.yaml`，即可启用 RTT；未检测到 `_SEGGER_RTT` 且未配置 `rtt.yaml` 时不会主动扫描 RAM，以免抢占 SWD 带宽影响 HSS。
 
 - 状态栏 `RTT` 按钮可打开通道 0 终端并支持下行输入。
 - 命令 `jlinkd: Open RTT Signals` 可打开网页端 RTT 终端与解码信号列表（`http://127.0.0.1:47110/rtt`）。
 
-`.jlinkd/rtt.yaml` 示例：
+### 零配置自动解码（`rtt.autoDecode` / `rtt.autoTimeline`）
+
+未写在 `.jlinkd/rtt.yaml` 中的上行通道默认按以下规则自动解码（`rtt.yaml` 中显式配置的通道始终优先级最高）：
+
+1. **按 ELF 结构体自动解码（`auto-struct`）**：当固件调用 `SEGGER_RTT_ConfigUpBuffer` 设置的通道名形如 `Type`、`struct:Type` 或 `Type@0xA55A`（支持 `ns::Type` 与 `typedef struct`），且 ELF 中存在该结构体/类/联合体定义时，自动按 DWARF 布局解码各数值字段为 `<通道名>.<字段>` 信号：
+   - 带 `@0x<十六进制>` 后缀（如 `TelemetryFrame@0xA55A`）时使用同步字对齐与丢帧重同步（配合结构体里的 `sync` / `seq` 字段）。
+   - 无 `@0x..` 且结构体不含 `sync` 字段时按 `sizeof(Type)` 连续切分；**固件必须使用 `SEGGER_RTT_MODE_NO_BLOCK_SKIP` 模式**（避免半帧截断，RTT 状态栏会给出提示）。
+   - 若结构体中存在 `sync` 字段但通道名未附带 `@0x<值>`，会回退为文本模式并在 RTT 状态中报错提示。
+2. **文本键值自动提取（`auto-text`）**：其余上行通道保留完整文本终端输出，同时按行自动提取 `name=value` 或 `name: value` 形式的数值（忽略 `0x...` 十六进制与 `1.2.3` 版本号），生成 `<通道名>.<name>` 信号；每通道最多自动追踪 32 个去重信号名。
+3. **自动加入 Timeline**：自动解码出的信号默认归入 `rtt:<通道名>` 轨道；当 `autoTimeline` 为 `true`（默认）时自动绘制到 Timeline；设为 `false` 时仅在 RTT 信号列表更新数值，可手动点击或拖拽加入 Timeline。
+
+可在 `launch.json` 中按配置项开关（也可写在 `.jlinkd/project.yaml`）：
+
+```jsonc
+"rtt": {
+  "autoDecode": true,
+  "autoTimeline": true
+}
+```
+
+### 手动配置 `.jlinkd/rtt.yaml` 示例：
 
 ```yaml
 controlBlock: auto                 # auto 取 ELF 中 _SEGGER_RTT 地址，也可写具体十六进制地址
@@ -257,6 +306,8 @@ visualizers:                           # 用 Lua 自定义 C++ 模板类型的�
   - .jlinkd/visualizers.lua
 rtt:
   config: .jlinkd/rtt.yaml
+  autoDecode: true
+  autoTimeline: true
 ```
 
 ---
@@ -272,6 +323,7 @@ jlinkd read uwTick --elf firmware.elf --device STM32G474RE # 不暂停读取变�
 jlinkd read 0x20000000 --count 16 --device STM32G474RE    # 读取内存
 jlinkd tasks --elf firmware.elf --backtrace --device STM32G474RE # 查看 FreeRTOS 任务与调用栈
 jlinkd symbols firmware.elf --lookup main                 # 离线查看 ELF 符号与缓存耗时（无需连接探针）
+jlinkd devices --filter STM32H7 --json                    # 查询 J-Link 支持器件列表、内核与 Flash/RAM 大小（仅需 J-Link 库，无需连接探针）
 ```
 
 常用全局选项：`--interface <swd|jtag>`、`--speed <khz>`、`--serial <sn>`、`--dll <path>`、`--log <filter>`，完整参数请执行 `jlinkd --help`。

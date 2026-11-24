@@ -121,19 +121,23 @@ struct ChannelSink<'a> {
     shared: &'a Shared,
     tsdb: &'a Tsdb,
     channel: u32,
+    auto_plot: bool,
+    default_group: Option<&'a str>,
 }
 
 impl Sink for ChannelSink<'_> {
     fn sample(&mut self, name: &str, group: Option<&str>, plot: bool, t: i64, value: f64) {
         let mut signals = self.shared.signals.lock().expect("signal lock");
+        let effective_group = group.or(self.default_group);
+        let effective_plot = plot && self.auto_plot;
         let signal = signals.entry(name.to_owned()).or_insert_with(|| Signal {
             series: None,
-            group: group.map(str::to_owned),
+            group: effective_group.map(str::to_owned),
             removed: false,
             latest: None,
         });
         signal.latest = Some(value);
-        if signal.series.is_none() && plot && !signal.removed {
+        if signal.series.is_none() && effective_plot && !signal.removed {
             signal.series = Some(self.tsdb.create_series(
                 name.to_owned(),
                 signal.group.clone(),
@@ -345,6 +349,12 @@ struct Worker {
     stop: Arc<AtomicBool>,
 }
 
+struct ActiveDecoder {
+    decoder: Box<dyn Decoder>,
+    auto_plot: bool,
+    default_group: Option<String>,
+}
+
 impl Worker {
     fn set_status(&self, state: &'static str, control_block: Option<u32>, error: Option<String>) {
         *self.shared.status.lock().expect("status lock") = RttStatus {
@@ -447,30 +457,66 @@ impl Worker {
 
     fn build_decoders(
         &self,
-        channels: &[ChannelStatus],
+        channels: &mut [ChannelStatus],
         config: &RttConfig,
-    ) -> (BTreeMap<u32, Box<dyn Decoder>>, Option<String>) {
-        let mut decoders: BTreeMap<u32, Box<dyn Decoder>> = BTreeMap::new();
+    ) -> (BTreeMap<u32, ActiveDecoder>, Option<String>) {
+        let mut decoders: BTreeMap<u32, ActiveDecoder> = BTreeMap::new();
         let mut problems = Vec::new();
         for channel in channels
-            .iter()
+            .iter_mut()
             .filter(|c| c.direction == "up" && c.size > 0)
         {
-            let built = match config.channels.get(&channel.index) {
-                Some(entry) => decode::build(
+            match config.channels.get(&channel.index) {
+                Some(entry) => match decode::build(
                     &self.binding.db,
                     self.binding.workspace.as_deref(),
                     &entry.name,
                     &entry.decode,
-                ),
-                None => Ok(Box::new(TextDecoder) as Box<dyn Decoder>),
-            };
-            match built {
-                Ok(decoder) => {
-                    decoders.insert(channel.index, decoder);
+                ) {
+                    Ok(decoder) => {
+                        decoders.insert(
+                            channel.index,
+                            ActiveDecoder {
+                                decoder,
+                                auto_plot: true,
+                                default_group: None,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        problems.push(format!("channel {}: {error}", channel.index));
+                    }
+                },
+                None if self.binding.rtt_auto.decode => {
+                    let signal_prefix = if channel.name.is_empty() {
+                        format!("ch{}", channel.index)
+                    } else {
+                        channel.name.clone()
+                    };
+                    let (decoder, label, problem) =
+                        decode::auto_decoder(&self.binding.db, &signal_prefix, channel.index);
+                    channel.decoder = label;
+                    if let Some(problem) = problem {
+                        problems.push(problem);
+                    }
+                    decoders.insert(
+                        channel.index,
+                        ActiveDecoder {
+                            decoder,
+                            auto_plot: self.binding.rtt_auto.timeline,
+                            default_group: Some(format!("rtt:{signal_prefix}")),
+                        },
+                    );
                 }
-                Err(error) => {
-                    problems.push(format!("channel {}: {error}", channel.index));
+                None => {
+                    decoders.insert(
+                        channel.index,
+                        ActiveDecoder {
+                            decoder: Box::new(TextDecoder),
+                            auto_plot: false,
+                            default_group: None,
+                        },
+                    );
                 }
             }
         }
@@ -556,8 +602,8 @@ impl Worker {
         let _ = self.call(|rtt| rtt.rtt_stop());
     }
 
-    fn serve(&self, channels: Vec<ChannelStatus>, config: &RttConfig, block: Option<u32>) {
-        let (mut decoders, problems) = self.build_decoders(&channels, config);
+    fn serve(&self, mut channels: Vec<ChannelStatus>, config: &RttConfig, block: Option<u32>) {
+        let (mut decoders, problems) = self.build_decoders(&mut channels, config);
         *self.shared.channels.lock().expect("channel lock") = channels;
         self.set_status("running", block, problems);
 
@@ -576,13 +622,15 @@ impl Worker {
             match receiver.recv_timeout(STOP_POLL) {
                 Ok(chunk) => {
                     let count = chunk.data.len() as u64;
-                    if let Some(decoder) = decoders.get_mut(&chunk.channel) {
+                    if let Some(active) = decoders.get_mut(&chunk.channel) {
                         let mut sink = ChannelSink {
                             shared: &self.shared,
                             tsdb: &self.tsdb,
                             channel: chunk.channel,
+                            auto_plot: active.auto_plot,
+                            default_group: active.default_group.as_deref(),
                         };
-                        decoder.feed(&chunk.data, chunk.t, &mut sink);
+                        active.decoder.feed(&chunk.data, chunk.t, &mut sink);
                     }
                     if count > 0 {
                         let mut channels = self.shared.channels.lock().expect("channel lock");
@@ -601,8 +649,8 @@ impl Worker {
                 last_stats = Instant::now();
                 let mut channels = self.shared.channels.lock().expect("channel lock");
                 for status in channels.iter_mut().filter(|c| c.direction == "up") {
-                    if let Some(decoder) = decoders.get(&status.index) {
-                        let stats = decoder.stats();
+                    if let Some(active) = decoders.get(&status.index) {
+                        let stats = active.decoder.stats();
                         status.frames = stats.frames;
                         status.lost = stats.lost;
                         status.resyncs = stats.resyncs;
@@ -635,5 +683,58 @@ mod tests {
         assert_eq!(next, TERMINAL_HISTORY as u64 + 2);
         terminal.push(&[4]);
         assert_eq!(terminal.read_since(next).0, [4]);
+    }
+
+    #[test]
+    fn channel_sink_respects_auto_plot_and_default_group() {
+        let tsdb = Arc::new(Tsdb::default());
+        let rtt = Rtt::new(tsdb.clone());
+        {
+            let mut sink = ChannelSink {
+                shared: &rtt.shared,
+                tsdb: &rtt.tsdb,
+                channel: 1,
+                auto_plot: false,
+                default_group: Some("rtt:log"),
+            };
+            sink.sample("log.temp", None, true, 100, 42.5);
+        }
+        let signals = rtt.signals();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].name, "log.temp");
+        assert_eq!(signals[0].value, Some(42.5));
+        assert_eq!(signals[0].series_id, None);
+        assert!(tsdb.list().is_empty());
+
+        let id = rtt.plot_signal("log.temp", None).unwrap();
+        assert_eq!(
+            tsdb.get(id).unwrap().meta().group.as_deref(),
+            Some("rtt:log")
+        );
+
+        {
+            let mut sink = ChannelSink {
+                shared: &rtt.shared,
+                tsdb: &rtt.tsdb,
+                channel: 2,
+                auto_plot: true,
+                default_group: Some("rtt:Frame"),
+            };
+            sink.sample("Frame.x", None, true, 200, 1.25);
+        }
+        let plotted = rtt.plotted();
+        assert_eq!(plotted.len(), 2);
+        let frame_id = rtt
+            .signals()
+            .into_iter()
+            .find(|s| s.name == "Frame.x")
+            .unwrap()
+            .series_id
+            .unwrap();
+        assert_eq!(
+            tsdb.get(frame_id).unwrap().meta().group.as_deref(),
+            Some("rtt:Frame")
+        );
+        assert_eq!(tsdb.get(frame_id).unwrap().latest(), Some((200, 1.25)));
     }
 }

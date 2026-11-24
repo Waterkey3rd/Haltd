@@ -21,9 +21,13 @@ export interface CanvasTheme {
   gridMinor: string;
   tickStroke: string;
   crosshair: string;
+  sampleCursor: string;
   cursorA: string;
   cursorB: string;
   cursorSpanFill: string;
+  hoverBoxBg: string;
+  hoverBoxBorder: string;
+  hoverBoxText: string;
   haltFill: string;
   haltStroke: string;
   faultColor: string;
@@ -229,9 +233,13 @@ export class ThemeManager {
         gridMinor: "rgba(0, 0, 0, 0.18)",
         tickStroke: "rgba(0, 0, 0, 0.55)",
         crosshair: "rgba(0, 0, 0, 0.75)",
+        sampleCursor: "#9a5b00",
         cursorA: "#004a99",
         cursorB: "#a80000",
         cursorSpanFill: "rgba(0, 74, 153, 0.12)",
+        hoverBoxBg: "rgba(255, 255, 255, 0.96)",
+        hoverBoxBorder: "#000000",
+        hoverBoxText: "#000000",
         haltFill: "rgba(180, 0, 0, 0.14)",
         haltStroke: "rgba(180, 0, 0, 0.65)",
         faultColor: "#b30000",
@@ -257,9 +265,13 @@ export class ThemeManager {
         gridMinor: "rgba(255, 255, 255, 0.18)",
         tickStroke: "rgba(255, 255, 255, 0.55)",
         crosshair: "rgba(255, 255, 255, 0.85)",
+        sampleCursor: "#facc15",
         cursorA: "#38bdf8",
         cursorB: "#fb7185",
         cursorSpanFill: "rgba(56, 189, 248, 0.14)",
+        hoverBoxBg: "rgba(0, 0, 0, 0.95)",
+        hoverBoxBorder: "#ffffff",
+        hoverBoxText: "#ffffff",
         haltFill: "rgba(255, 80, 80, 0.18)",
         haltStroke: "rgba(255, 100, 100, 0.75)",
         faultColor: "#ff5555",
@@ -281,13 +293,17 @@ export class ThemeManager {
         bg: css("--bg", "#f8f9fa"),
         plotBg: css("--plot-bg", "#ffffff"),
         axisStroke: css("--muted", "#57606a"),
-        gridMajor: "rgba(31, 35, 40, 0.12)",
+        gridMajor: "rgba(31, 35, 40, 0.14)",
         gridMinor: "rgba(31, 35, 40, 0.06)",
-        tickStroke: "rgba(31, 35, 40, 0.2)",
-        crosshair: "rgba(25, 113, 194, 0.55)",
+        tickStroke: "rgba(31, 35, 40, 0.25)",
+        crosshair: "rgba(25, 113, 194, 0.65)",
+        sampleCursor: "#d97706",
         cursorA: "#0969da",
         cursorB: "#cf222e",
         cursorSpanFill: "rgba(9, 105, 218, 0.08)",
+        hoverBoxBg: "rgba(255, 255, 255, 0.94)",
+        hoverBoxBorder: "rgba(31, 35, 40, 0.28)",
+        hoverBoxText: "#1f2328",
         haltFill: "rgba(207, 34, 46, 0.09)",
         haltStroke: "rgba(207, 34, 46, 0.4)",
         faultColor: "#cf222e",
@@ -310,11 +326,15 @@ export class ThemeManager {
       axisStroke: css("--muted", "#9aa0a6"),
       gridMajor: "rgba(255, 255, 255, 0.11)",
       gridMinor: "rgba(255, 255, 255, 0.05)",
-      tickStroke: "rgba(255, 255, 255, 0.16)",
+      tickStroke: "rgba(255, 255, 255, 0.18)",
       crosshair: "rgba(77, 171, 247, 0.65)",
+      sampleCursor: "#fcc419",
       cursorA: "#4dabf7",
       cursorB: "#ff8787",
       cursorSpanFill: "rgba(77, 171, 247, 0.08)",
+      hoverBoxBg: "rgba(24, 26, 31, 0.94)",
+      hoverBoxBorder: "rgba(255, 255, 255, 0.22)",
+      hoverBoxText: "#e6edf3",
       haltFill: "rgba(255, 100, 100, 0.12)",
       haltStroke: "rgba(255, 107, 107, 0.45)",
       faultColor: "#ff6b6b",
