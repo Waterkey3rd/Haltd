@@ -664,7 +664,7 @@ impl Worker {
 
 /// Where a default config lives inside a workspace.
 pub fn default_config_path(workspace: &std::path::Path) -> Option<PathBuf> {
-    let path = workspace.join(".jlinkd").join("rtt.yaml");
+    let path = workspace.join(".haltd").join("rtt.yaml");
     path.exists().then_some(path)
 }
 

@@ -31,7 +31,7 @@ export class LiveWatch implements vscode.TreeDataProvider<WatchInfo> {
 
   private stateFile(): string | undefined {
     const folder = vscode.workspace.workspaceFolders?.[0];
-    return folder && path.join(folder.uri.fsPath, ".jlinkd", "state.json");
+    return folder && path.join(folder.uri.fsPath, ".haltd", "state.json");
   }
 
   private load(): SavedWatch[] {

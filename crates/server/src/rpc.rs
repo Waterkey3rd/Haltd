@@ -73,7 +73,7 @@ fn series_ids(params: &Value) -> Result<Vec<u32>, (i64, String)> {
 
 fn default_output(extension: &str) -> Result<PathBuf, (i64, String)> {
     let directory = symbols::paths::cache_root()
-        .ok_or_else(|| server_error("no cache directory: set JLINKD_CACHE_DIR or give a path"))?
+        .ok_or_else(|| server_error("no cache directory: set HALTD_CACHE_DIR or give a path"))?
         .join("recordings");
     std::fs::create_dir_all(&directory).map_err(server_error)?;
     let stamp = std::time::SystemTime::now()
@@ -208,7 +208,7 @@ impl App {
         }
         let path = match params["path"].as_str() {
             Some(path) => PathBuf::from(path),
-            None => default_output("jlrec")?,
+            None => default_output("hlrec")?,
         };
         let recorder =
             Recorder::start(self.tsdb().clone(), Path::new(&path)).map_err(server_error)?;

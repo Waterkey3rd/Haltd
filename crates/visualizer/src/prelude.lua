@@ -62,7 +62,7 @@ end
 
 -- `resolving` means an expression is being turned into an address rather than a
 -- value being shown, so a rule should offer a child even if it holds nothing now.
-function __jlinkd_apply(type_name, handle, resolving)
+function __haltd_apply(type_name, handle, resolving)
   local value = wrap(handle)
   for _, rule in ipairs(rules) do
     local captures = { string.match(type_name, rule.match) }

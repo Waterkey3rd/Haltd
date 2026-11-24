@@ -1,5 +1,5 @@
 /**
- * Theme manager for jlinkd WebUI (Timeline & RTT).
+ * Theme manager for Haltd WebUI (Timeline & RTT).
  *
  * Automatically follows VS Code's active color theme (Dark, Light, High Contrast
  * Dark, High Contrast Light) and inherits VS Code CSS custom properties when
@@ -40,7 +40,7 @@ export interface CanvasTheme {
   palette: string[];
 }
 
-const STORAGE_KEY = "jlinkd.timeline.themePref";
+const STORAGE_KEY = "haltd.timeline.themePref";
 
 const DARK_PALETTE = [
   "#4dabf7", // Blue
@@ -397,7 +397,7 @@ export class ThemeManager {
     window.addEventListener("message", (event) => {
       const data = event.data;
       if (!data || typeof data !== "object") return;
-      if (data.type === "jlinkd:vscode-theme") {
+      if (data.type === "haltd:vscode-theme") {
         const kind = parseThemeKind(data.kind);
         if (kind) {
           this.vscodeKind = kind;
@@ -416,7 +416,7 @@ export class ThemeManager {
     if (window.parent && window.parent !== window) {
       const requestTheme = () => {
         try {
-          window.parent.postMessage({ type: "jlinkd:request-theme" }, "*");
+          window.parent.postMessage({ type: "haltd:request-theme" }, "*");
         } catch {
           // Ignore cross-origin frame errors
         }

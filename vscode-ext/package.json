@@ -1,9 +1,9 @@
 {
-  "name": "jlinkd",
-  "displayName": "jlinkd",
+  "name": "haltd",
+  "displayName": "Haltd",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "1.1.0",
-  "publisher": "jlinkd",
+  "version": "0.7.0",
+  "publisher": "haltd",
   "license": "MIT",
   "icon": "icon.png",
   "engines": {
@@ -14,10 +14,10 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onDebugResolve:jlinkd",
+    "onDebugResolve:haltd",
     "onLanguage:jsonc",
     "workspaceContains:.vscode/launch.json",
-    "onCommand:jlinkd.selectDevice"
+    "onCommand:haltd.selectDevice"
   ],
   "contributes": {
     "breakpoints": [
@@ -30,8 +30,8 @@
     ],
     "debuggers": [
       {
-        "type": "jlinkd",
-        "label": "J-Link (jlinkd)",
+        "type": "haltd",
+        "label": "J-Link (Haltd)",
         "languages": [
           "c",
           "cpp"
@@ -94,7 +94,7 @@
               },
               "project": {
                 "type": "string",
-                "default": "${workspaceFolder}/.jlinkd/project.yaml"
+                "default": "${workspaceFolder}/.haltd/project.yaml"
               },
               "svd": {
                 "type": "string",
@@ -113,7 +113,7 @@
               },
               "rtt": {
                 "type": "object",
-                "description": "RTT auto-decoding and Timeline options for channels not configured in .jlinkd/rtt.yaml.",
+                "description": "RTT auto-decoding and Timeline options for channels not configured in .haltd/rtt.yaml.",
                 "properties": {
                   "autoDecode": {
                     "type": "boolean",
@@ -185,7 +185,7 @@
               },
               "rtt": {
                 "type": "object",
-                "description": "RTT auto-decoding and Timeline options for channels not configured in .jlinkd/rtt.yaml.",
+                "description": "RTT auto-decoding and Timeline options for channels not configured in .haltd/rtt.yaml.",
                 "properties": {
                   "autoDecode": {
                     "type": "boolean",
@@ -204,7 +204,7 @@
         },
         "initialConfigurations": [
           {
-            "type": "jlinkd",
+            "type": "haltd",
             "request": "launch",
             "name": "Debug (J-Link)",
             "device": "STM32H723VG",
@@ -218,326 +218,326 @@
     ],
     "commands": [
       {
-        "command": "jlinkd.buildAndReload",
-        "title": "jlinkd: Build & Reload"
+        "command": "haltd.buildAndReload",
+        "title": "Haltd: Build & Reload"
       },
       {
-        "command": "jlinkd.addToWatch",
+        "command": "haltd.addToWatch",
         "title": "Add to Live Watch",
         "icon": "$(add)"
       },
       {
-        "command": "jlinkd.addToTimeline",
+        "command": "haltd.addToTimeline",
         "title": "Add to Timeline (HSS)"
       },
       {
-        "command": "jlinkd.removeWatch",
+        "command": "haltd.removeWatch",
         "title": "Remove",
         "icon": "$(close)"
       },
       {
-        "command": "jlinkd.setWatchRate",
+        "command": "haltd.setWatchRate",
         "title": "Set Refresh Rate (0-5 Hz)",
         "icon": "$(dashboard)"
       },
       {
-        "command": "jlinkd.writeWatch",
+        "command": "haltd.writeWatch",
         "title": "Set Value",
         "icon": "$(edit)"
       },
       {
-        "command": "jlinkd.openTimeline",
-        "title": "jlinkd: Open Timeline",
+        "command": "haltd.openTimeline",
+        "title": "Haltd: Open Timeline",
         "icon": "$(graph-line)"
       },
       {
-        "command": "jlinkd.openTimelineInBrowser",
-        "title": "jlinkd: Open Timeline in Browser"
+        "command": "haltd.openTimelineInBrowser",
+        "title": "Haltd: Open Timeline in Browser"
       },
       {
-        "command": "jlinkd.startRecording",
-        "title": "jlinkd: Start/Stop Recording"
+        "command": "haltd.startRecording",
+        "title": "Haltd: Start/Stop Recording"
       },
       {
-        "command": "jlinkd.showStats",
-        "title": "jlinkd: Show Statistics"
+        "command": "haltd.showStats",
+        "title": "Haltd: Show Statistics"
       },
       {
-        "command": "jlinkd.openRttTerminal",
-        "title": "jlinkd: Open RTT Terminal",
+        "command": "haltd.openRttTerminal",
+        "title": "Haltd: Open RTT Terminal",
         "icon": "$(terminal)"
       },
       {
-        "command": "jlinkd.openRttPanel",
-        "title": "jlinkd: Open RTT Signals"
+        "command": "haltd.openRttPanel",
+        "title": "Haltd: Open RTT Signals"
       },
       {
-        "command": "jlinkd.refreshPeripherals",
+        "command": "haltd.refreshPeripherals",
         "title": "Refresh",
         "icon": "$(refresh)"
       },
       {
-        "command": "jlinkd.readRegister",
+        "command": "haltd.readRegister",
         "title": "Read Register Now",
         "icon": "$(eye)"
       },
       {
-        "command": "jlinkd.writePeripheral",
+        "command": "haltd.writePeripheral",
         "title": "Set Value",
         "icon": "$(edit)"
       },
       {
-        "command": "jlinkd.refreshTasks",
+        "command": "haltd.refreshTasks",
         "title": "Refresh",
         "icon": "$(refresh)"
       },
       {
-        "command": "jlinkd.selectDevice",
-        "title": "jlinkd: Select Device"
+        "command": "haltd.selectDevice",
+        "title": "Haltd: Select Device"
       },
       {
-        "command": "jlinkd.addSelectionToWatch",
-        "title": "jlinkd: Add Selection to Live Watch"
+        "command": "haltd.addSelectionToWatch",
+        "title": "Haltd: Add Selection to Live Watch"
       },
       {
-        "command": "jlinkd.addSelectionToTimeline",
-        "title": "jlinkd: Add Selection to Timeline (HSS)"
+        "command": "haltd.addSelectionToTimeline",
+        "title": "Haltd: Add Selection to Timeline (HSS)"
       },
       {
-        "command": "jlinkd.removeSelectedWatch",
+        "command": "haltd.removeSelectedWatch",
         "title": "Remove Selected from Live Watch"
       },
       {
-        "command": "jlinkd.editSelectedWatch",
+        "command": "haltd.editSelectedWatch",
         "title": "Edit Selected Live Watch Value"
       },
       {
-        "command": "jlinkd.setSelectedWatchRate",
+        "command": "haltd.setSelectedWatchRate",
         "title": "Set Selected Live Watch Refresh Rate"
       },
       {
-        "command": "jlinkd.copySelectedWatch",
+        "command": "haltd.copySelectedWatch",
         "title": "Copy Selected Live Watch Value"
       }
     ],
     "keybindings": [
       {
-        "command": "jlinkd.buildAndReload",
+        "command": "haltd.buildAndReload",
         "key": "f6",
-        "when": "debugType == jlinkd"
+        "when": "debugType == haltd"
       },
       {
-        "command": "jlinkd.addSelectionToWatch",
+        "command": "haltd.addSelectionToWatch",
         "key": "ctrl+g",
         "mac": "cmd+g",
-        "when": "inDebugMode && debugType == 'jlinkd' && editorTextFocus"
+        "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
       },
       {
-        "command": "jlinkd.addSelectionToTimeline",
+        "command": "haltd.addSelectionToTimeline",
         "args": "editor",
         "key": "ctrl+h",
         "mac": "cmd+h",
-        "when": "inDebugMode && debugType == 'jlinkd' && editorTextFocus"
+        "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
       },
       {
-        "command": "jlinkd.addSelectionToTimeline",
+        "command": "haltd.addSelectionToTimeline",
         "args": "liveWatch",
         "key": "ctrl+h",
         "mac": "cmd+h",
-        "when": "inDebugMode && debugType == 'jlinkd' && focusedView == 'jlinkd.liveWatch'"
+        "when": "inDebugMode && debugType == 'haltd' && focusedView == 'haltd.liveWatch'"
       },
       {
-        "command": "jlinkd.removeSelectedWatch",
+        "command": "haltd.removeSelectedWatch",
         "key": "delete",
         "mac": "backspace",
-        "when": "focusedView == 'jlinkd.liveWatch'"
+        "when": "focusedView == 'haltd.liveWatch'"
       },
       {
-        "command": "jlinkd.editSelectedWatch",
+        "command": "haltd.editSelectedWatch",
         "key": "f2",
-        "when": "focusedView == 'jlinkd.liveWatch'"
+        "when": "focusedView == 'haltd.liveWatch'"
       },
       {
-        "command": "jlinkd.editSelectedWatch",
+        "command": "haltd.editSelectedWatch",
         "args": "enter",
         "key": "enter",
-        "when": "focusedView == 'jlinkd.liveWatch'"
+        "when": "focusedView == 'haltd.liveWatch'"
       },
       {
-        "command": "jlinkd.setSelectedWatchRate",
+        "command": "haltd.setSelectedWatchRate",
         "key": "ctrl+r",
         "mac": "cmd+r",
-        "when": "focusedView == 'jlinkd.liveWatch'"
+        "when": "focusedView == 'haltd.liveWatch'"
       },
       {
-        "command": "jlinkd.copySelectedWatch",
+        "command": "haltd.copySelectedWatch",
         "key": "ctrl+c",
         "mac": "cmd+c",
-        "when": "focusedView == 'jlinkd.liveWatch'"
+        "when": "focusedView == 'haltd.liveWatch'"
       },
       {
-        "command": "jlinkd.openTimeline",
+        "command": "haltd.openTimeline",
         "key": "ctrl+shift+t",
         "mac": "cmd+shift+t",
-        "when": "debugType == 'jlinkd'"
+        "when": "debugType == 'haltd'"
       }
     ],
     "configuration": {
-      "title": "jlinkd",
+      "title": "Haltd",
       "properties": {
-        "jlinkd.path": {
+        "haltd.path": {
           "type": "string",
-          "default": "jlinkd",
-          "description": "Path of the jlinkd executable."
+          "default": "haltd",
+          "description": "Path of the haltd executable."
         },
-        "jlinkd.replaceWatchView": {
+        "haltd.replaceWatchView": {
           "type": "boolean",
           "default": true,
-          "description": "Hide the built-in Watch view during jlinkd sessions, since Add to Watch goes to Live Watch instead."
+          "description": "Hide the built-in Watch view during Haltd sessions, since Add to Watch goes to Live Watch instead."
         }
       }
     },
     "views": {
       "debug": [
         {
-          "id": "jlinkd.liveWatch",
+          "id": "haltd.liveWatch",
           "name": "Live Watch",
           "visibility": "visible"
         },
         {
-          "id": "jlinkd.tasks",
+          "id": "haltd.tasks",
           "name": "FreeRTOS Tasks",
-          "when": "debugType == jlinkd"
+          "when": "debugType == haltd"
         },
         {
-          "id": "jlinkd.peripherals",
+          "id": "haltd.peripherals",
           "name": "Peripherals",
-          "when": "debugType == jlinkd"
+          "when": "debugType == haltd"
         }
       ]
     },
     "menus": {
       "editor/context": [
         {
-          "command": "jlinkd.addToTimeline",
-          "when": "inDebugMode && debugType == jlinkd",
+          "command": "haltd.addToTimeline",
+          "when": "inDebugMode && debugType == haltd",
           "group": "debug@11"
         }
       ],
       "debug/variables/context": [
         {
-          "command": "jlinkd.addToTimeline",
-          "when": "debugType == jlinkd",
-          "group": "z_jlinkd@2"
+          "command": "haltd.addToTimeline",
+          "when": "debugType == haltd",
+          "group": "z_haltd@2"
         }
       ],
       "view/title": [
         {
-          "command": "jlinkd.addToWatch",
-          "when": "view == jlinkd.liveWatch",
+          "command": "haltd.addToWatch",
+          "when": "view == haltd.liveWatch",
           "group": "navigation@1"
         },
         {
-          "command": "jlinkd.openTimeline",
-          "when": "view == jlinkd.liveWatch",
+          "command": "haltd.openTimeline",
+          "when": "view == haltd.liveWatch",
           "group": "navigation@2"
         },
         {
-          "command": "jlinkd.openRttTerminal",
-          "when": "view == jlinkd.liveWatch",
+          "command": "haltd.openRttTerminal",
+          "when": "view == haltd.liveWatch",
           "group": "navigation@3"
         },
         {
-          "command": "jlinkd.refreshPeripherals",
-          "when": "view == jlinkd.peripherals",
+          "command": "haltd.refreshPeripherals",
+          "when": "view == haltd.peripherals",
           "group": "navigation"
         },
         {
-          "command": "jlinkd.refreshTasks",
-          "when": "view == jlinkd.tasks",
+          "command": "haltd.refreshTasks",
+          "when": "view == haltd.tasks",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
-          "command": "jlinkd.setWatchRate",
-          "when": "view == jlinkd.liveWatch",
+          "command": "haltd.setWatchRate",
+          "when": "view == haltd.liveWatch",
           "group": "inline@0"
         },
         {
-          "command": "jlinkd.writeWatch",
-          "when": "view == jlinkd.liveWatch && viewItem == watchWritable",
+          "command": "haltd.writeWatch",
+          "when": "view == haltd.liveWatch && viewItem == watchWritable",
           "group": "inline@1"
         },
         {
-          "command": "jlinkd.removeWatch",
-          "when": "view == jlinkd.liveWatch && !listMultiSelection",
+          "command": "haltd.removeWatch",
+          "when": "view == haltd.liveWatch && !listMultiSelection",
           "group": "inline@2"
         },
         {
-          "command": "jlinkd.addToTimeline",
-          "when": "view == jlinkd.liveWatch",
-          "group": "1_jlinkd@1"
+          "command": "haltd.addToTimeline",
+          "when": "view == haltd.liveWatch",
+          "group": "1_haltd@1"
         },
         {
-          "command": "jlinkd.setWatchRate",
-          "when": "view == jlinkd.liveWatch",
-          "group": "1_jlinkd@2"
+          "command": "haltd.setWatchRate",
+          "when": "view == haltd.liveWatch",
+          "group": "1_haltd@2"
         },
         {
-          "command": "jlinkd.readRegister",
-          "when": "view == jlinkd.peripherals && viewItem =~ /sideEffects/",
+          "command": "haltd.readRegister",
+          "when": "view == haltd.peripherals && viewItem =~ /sideEffects/",
           "group": "inline"
         },
         {
-          "command": "jlinkd.writePeripheral",
-          "when": "view == jlinkd.peripherals && viewItem =~ /writable/",
+          "command": "haltd.writePeripheral",
+          "when": "view == haltd.peripherals && viewItem =~ /writable/",
           "group": "inline"
         }
       ],
       "commandPalette": [
         {
-          "command": "jlinkd.removeWatch",
+          "command": "haltd.removeWatch",
           "when": "false"
         },
         {
-          "command": "jlinkd.setWatchRate",
+          "command": "haltd.setWatchRate",
           "when": "false"
         },
         {
-          "command": "jlinkd.writeWatch",
+          "command": "haltd.writeWatch",
           "when": "false"
         },
         {
-          "command": "jlinkd.readRegister",
+          "command": "haltd.readRegister",
           "when": "false"
         },
         {
-          "command": "jlinkd.writePeripheral",
+          "command": "haltd.writePeripheral",
           "when": "false"
         },
         {
-          "command": "jlinkd.addSelectionToWatch",
+          "command": "haltd.addSelectionToWatch",
           "when": "false"
         },
         {
-          "command": "jlinkd.addSelectionToTimeline",
+          "command": "haltd.addSelectionToTimeline",
           "when": "false"
         },
         {
-          "command": "jlinkd.removeSelectedWatch",
+          "command": "haltd.removeSelectedWatch",
           "when": "false"
         },
         {
-          "command": "jlinkd.editSelectedWatch",
+          "command": "haltd.editSelectedWatch",
           "when": "false"
         },
         {
-          "command": "jlinkd.setSelectedWatchRate",
+          "command": "haltd.setSelectedWatchRate",
           "when": "false"
         },
         {
-          "command": "jlinkd.copySelectedWatch",
+          "command": "haltd.copySelectedWatch",
           "when": "false"
         }
       ]

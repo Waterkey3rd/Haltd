@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-const DEBUG_TYPE = "jlinkd";
+const DEBUG_TYPE = "haltd";
 
 function activeSession(): vscode.DebugSession | undefined {
   const session = vscode.debug.activeDebugSession;
@@ -81,7 +81,7 @@ export class PeripheralsView implements vscode.TreeDataProvider<PeripheralNode> 
   }
 
   private async loadRegisters(peripheral: string, force?: string): Promise<RegisterInfo[]> {
-    const reply = await fetchFor<{ registers: RawRegister[] }>("jlinkd/peripheralRead", { peripheral, force });
+    const reply = await fetchFor<{ registers: RawRegister[] }>("haltd/peripheralRead", { peripheral, force });
     return (reply?.registers ?? []).map((register) => ({
       ...register,
       kind: "register",
@@ -97,7 +97,7 @@ export class PeripheralsView implements vscode.TreeDataProvider<PeripheralNode> 
 
   async getChildren(node?: PeripheralNode): Promise<PeripheralNode[]> {
     if (!node) {
-      const reply = await fetchFor<{ peripherals: Omit<PeripheralInfo, "kind">[] }>("jlinkd/peripherals");
+      const reply = await fetchFor<{ peripherals: Omit<PeripheralInfo, "kind">[] }>("haltd/peripherals");
       return (reply?.peripherals ?? []).map((peripheral) => ({ ...peripheral, kind: "peripheral" }));
     }
     if (node.kind === "peripheral") {
@@ -163,7 +163,7 @@ export class PeripheralsView implements vscode.TreeDataProvider<PeripheralNode> 
     if (value === undefined) {
       return;
     }
-    await session.customRequest("jlinkd/peripheralWrite", {
+    await session.customRequest("haltd/peripheralWrite", {
       peripheral: node.peripheral,
       register: node.kind === "register" ? node.name : node.register,
       field: node.kind === "field" ? node.name : undefined,
@@ -212,7 +212,7 @@ export class TasksView implements vscode.TreeDataProvider<TaskNode> {
 
   async getChildren(node?: TaskNode): Promise<TaskNode[]> {
     if (!node) {
-      const reply = await fetchFor<{ tasks: Omit<TaskInfo, "kind">[] }>("jlinkd/rtosTasks");
+      const reply = await fetchFor<{ tasks: Omit<TaskInfo, "kind">[] }>("haltd/rtosTasks");
       return (reply?.tasks ?? []).map((task) => ({ ...task, kind: "task" }));
     }
     if (node.kind === "frame") {
@@ -260,7 +260,7 @@ interface FaultEvent {
 export async function showFault(fault: FaultEvent, output: vscode.OutputChannel): Promise<void> {
   const place = fault.file ? ` (${fault.file.split("/").pop()}:${fault.line})` : "";
   const message = `${fault.summary}${place}`;
-  const choice = await vscode.window.showErrorMessage(`jlinkd: ${message}`, "Details");
+  const choice = await vscode.window.showErrorMessage(`Haltd: ${message}`, "Details");
   if (choice === "Details") {
     output.clear();
     output.appendLine(JSON.stringify(fault, null, 2));

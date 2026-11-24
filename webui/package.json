@@ -1,7 +1,7 @@
 {
-  "name": "jlinkd-webui",
+  "name": "haltd-webui",
   "private": true,
-  "version": "1.1.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",

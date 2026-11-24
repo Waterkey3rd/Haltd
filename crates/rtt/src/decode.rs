@@ -556,7 +556,7 @@ fn struct_definition(db: &SymbolDb, type_name: &str) -> Option<TypeRef> {
     }
 }
 
-/// Pick an automatic decoder for an RTT up-channel omitted from `.jlinkd/rtt.yaml`.
+/// Pick an automatic decoder for an RTT up-channel omitted from `.haltd/rtt.yaml`.
 pub fn auto_decoder(
     db: &SymbolDb,
     channel_name: &str,
@@ -873,7 +873,7 @@ mod tests {
 
     fn script(name: &str, text: &str) -> std::path::PathBuf {
         let path =
-            std::env::temp_dir().join(format!("jlinkd-rtt-{}-{name}.lua", std::process::id()));
+            std::env::temp_dir().join(format!("haltd-rtt-{}-{name}.lua", std::process::id()));
         std::fs::write(&path, text).unwrap();
         path
     }
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn systemview_data_is_written_verbatim() {
-        let path = std::env::temp_dir().join(format!("jlinkd-rtt-{}.SVDat", std::process::id()));
+        let path = std::env::temp_dir().join(format!("haltd-rtt-{}.SVDat", std::process::id()));
         {
             let mut decoder = SystemViewDecoder::new(&path).unwrap();
             let mut sink = Collect::default();

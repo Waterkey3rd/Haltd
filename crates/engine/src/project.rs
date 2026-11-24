@@ -1,4 +1,4 @@
-//! `.jlinkd/project.yaml` (DESIGN §7.2), the parts the debug engine uses.
+//! `.haltd/project.yaml` (DESIGN §7.2), the parts the debug engine uses.
 
 use std::path::Path;
 

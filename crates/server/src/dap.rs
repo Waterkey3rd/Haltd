@@ -467,7 +467,7 @@ fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
         },
         elf: PathBuf::from(elf),
         project,
-        // A project file lives at <workspace>/.jlinkd/project.yaml.
+        // A project file lives at <workspace>/.haltd/project.yaml.
         workspace: arguments["project"]
             .as_str()
             .and_then(|path| std::path::Path::new(path).parent()?.parent())
@@ -577,7 +577,7 @@ impl Dap {
                 if report.imprecise {
                     self.client.console(IMPRECISE_NOTE);
                 }
-                self.client.event("jlinkd/fault", fault.clone());
+                self.client.event("haltd/fault", fault.clone());
                 self.fault = Some(fault);
                 self.fault_thread = Some(thread);
             }
@@ -592,7 +592,7 @@ impl Dap {
             return;
         };
         match session.note_cycles() {
-            Ok(Some(delta)) => self.client.event("jlinkd/cycles", cycles_json(&delta)),
+            Ok(Some(delta)) => self.client.event("haltd/cycles", cycles_json(&delta)),
             Ok(None) => {}
             Err(error) => tracing::debug!("cannot read the cycle counter: {error}"),
         }
@@ -634,7 +634,7 @@ impl Dap {
     fn rebind_sampler(&mut self) {
         if let Some(session) = &self.session {
             self.sampler.bind(binding_of(session));
-            self.client.event("jlinkd/bound", json!({}));
+            self.client.event("haltd/bound", json!({}));
         }
     }
 
@@ -710,12 +710,12 @@ impl Dap {
             "readMemory" => self.read_memory(arguments),
             "writeMemory" => self.write_memory(arguments),
             "setVariable" => self.set_variable(arguments),
-            "jlinkd/faultInfo" => self.fault_info(),
-            "jlinkd/rtosTasks" => self.rtos_tasks(),
-            "jlinkd/cycleCounter" => self.cycle_counter(),
-            "jlinkd/peripherals" => self.peripheral_list(),
-            "jlinkd/peripheralRead" => self.peripheral_read(arguments),
-            "jlinkd/peripheralWrite" => self.peripheral_write(arguments),
+            "haltd/faultInfo" => self.fault_info(),
+            "haltd/rtosTasks" => self.rtos_tasks(),
+            "haltd/cycleCounter" => self.cycle_counter(),
+            "haltd/peripherals" => self.peripheral_list(),
+            "haltd/peripheralRead" => self.peripheral_read(arguments),
+            "haltd/peripheralWrite" => self.peripheral_write(arguments),
             "threads" => self.threads(),
             "stackTrace" => self.stack_trace(arguments),
             "scopes" => self.scopes(arguments),
@@ -726,7 +726,7 @@ impl Dap {
             "stepIn" => return self.step(request, StepKind::Into),
             "stepOut" => return self.step(request, StepKind::Out),
             "pause" => self.pause(),
-            "restart" | "jlinkd/reload" => self.reload(arguments),
+            "restart" | "haltd/reload" => self.reload(arguments),
             // VS Code's Stop sends terminate and waits for the terminated event;
             // only then does it send disconnect.
             "terminate" => {
@@ -1759,7 +1759,7 @@ impl Dap {
                 json!({"reason": "changed", "breakpoint": self.describe_breakpoint(breakpoint)}),
             );
         }
-        self.client.event("jlinkd/reloaded", json!({}));
+        self.client.event("haltd/reloaded", json!({}));
         let mode = if self.run_to_main_on_reload {
             AfterConfiguration::RunToMain
         } else {

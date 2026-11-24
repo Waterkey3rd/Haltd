@@ -1,4 +1,4 @@
-//! `.jlinkd/rtt.yaml` (DESIGN §7.3).
+//! `.haltd/rtt.yaml` (DESIGN §7.3).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -136,12 +136,12 @@ channels:
     name: telemetry
     type: struct
     sync: 0xA55A
-    struct: jlinkd::TelemetryFrame
+    struct: haltd::TelemetryFrame
     timestamp: { field: cyccnt, clockHz: 540000000 }
     timeline:
       - jointPos[0..5]
       - { expr: loopUs, group: timing }
-  3: { name: motor, type: lua, script: .jlinkd/decode_motor.lua }
+  3: { name: motor, type: lua, script: .haltd/decode_motor.lua }
   4: { name: t, type: text-regex, pattern: 'a=(?P<a>\d+)' }
 "#,
         )

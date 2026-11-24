@@ -57,7 +57,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jlinkd-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("haltd-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -120,6 +120,6 @@ mod tests {
 
     #[test]
     fn missing_file_is_a_miss() {
-        assert!(load(Path::new("/nonexistent/jlinkd.idx")).is_none());
+        assert!(load(Path::new("/nonexistent/haltd.idx")).is_none());
     }
 }

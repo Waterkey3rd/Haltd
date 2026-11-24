@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! arm-none-eabi-nm -C --defined-only fw.elf | awk '$2 ~ /[bBdD]/ && NF==3 {print $3}' > names
-//! JLINKD_TEST_ELF=fw.elf JLINKD_TEST_NAMES=names \\
+//! HALTD_TEST_ELF=fw.elf HALTD_TEST_NAMES=names \\
 //!     cargo test --release -p symbols --test real_elf -- --ignored --nocapture
 //! ```
 
@@ -22,10 +22,10 @@ impl MemoryReader for ZeroMemory {
 }
 
 #[test]
-#[ignore = "needs JLINKD_TEST_ELF and JLINKD_TEST_NAMES"]
+#[ignore = "needs HALTD_TEST_ELF and HALTD_TEST_NAMES"]
 fn linker_data_symbols_resolve_and_render() {
-    let elf = std::env::var("JLINKD_TEST_ELF").expect("JLINKD_TEST_ELF");
-    let names = std::env::var("JLINKD_TEST_NAMES").expect("JLINKD_TEST_NAMES");
+    let elf = std::env::var("HALTD_TEST_ELF").expect("HALTD_TEST_ELF");
+    let names = std::env::var("HALTD_TEST_NAMES").expect("HALTD_TEST_NAMES");
     let names = std::fs::read_to_string(names).expect("names file");
     let db = SymbolDb::load(Path::new(&elf), &LoadOptions::default()).unwrap();
 

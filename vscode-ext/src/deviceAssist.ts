@@ -14,7 +14,7 @@ export interface DeviceEntry {
 interface ParsedDeviceConfig {
   name: string;
   objectStart: number;
-  typeIsJlinkd: boolean;
+  typeIsHaltd: boolean;
   deviceValue?: string;
   deviceValueRange?: vscode.Range;
   deviceQuoteRange?: vscode.Range;
@@ -71,7 +71,7 @@ function execDevicesCli(executable: string): Promise<DeviceEntry[]> {
         try {
           const parsed = JSON.parse(stdout) as unknown;
           if (!Array.isArray(parsed) || parsed.length === 0) {
-            reject(new Error("empty device list from jlinkd"));
+            reject(new Error("empty device list from haltd"));
             return;
           }
           resolve(parsed as DeviceEntry[]);
@@ -198,8 +198,8 @@ function tokenizeJsonc(source: string): JsoncToken[] {
   return tokens;
 }
 
-/** Find every object literal in launch.json that has `"type": "jlinkd"`. */
-function parseJlinkdConfigs(document: vscode.TextDocument): ParsedDeviceConfig[] {
+/** Find every object literal in launch.json that has `"type": "haltd"`. */
+function parseHaltdConfigs(document: vscode.TextDocument): ParsedDeviceConfig[] {
   const tokens = tokenizeJsonc(document.getText());
   const configs: ParsedDeviceConfig[] = [];
   const stack: Array<{
@@ -216,16 +216,16 @@ function parseJlinkdConfigs(document: vscode.TextDocument): ParsedDeviceConfig[]
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (tok.kind === "punct" && tok.text === "{") {
-      stack.push({ depth: stack.length + 1, start: tok.start, name: "jlinkd" });
+      stack.push({ depth: stack.length + 1, start: tok.start, name: "haltd" });
       continue;
     }
     if (tok.kind === "punct" && tok.text === "}") {
       const top = stack.pop();
-      if (top && top.typeValue === "jlinkd") {
+      if (top && top.typeValue === "haltd") {
         configs.push({
           name: top.name,
           objectStart: top.start,
-          typeIsJlinkd: true,
+          typeIsHaltd: true,
           deviceValue: top.deviceValue,
           deviceValueRange: top.deviceValueRange,
           deviceQuoteRange: top.deviceQuoteRange,
@@ -270,7 +270,7 @@ function parseJlinkdConfigs(document: vscode.TextDocument): ParsedDeviceConfig[]
   return configs;
 }
 
-/** Determine whether the cursor sits inside a `"device": "..."` value of a jlinkd config,
+/** Determine whether the cursor sits inside a `"device": "..."` value of a haltd config,
  *  tolerating incomplete JSON while typing. */
 function completionRangeAt(
   document: vscode.TextDocument,
@@ -287,7 +287,7 @@ function completionRangeAt(
   const afterMatch = after.match(/^([^"]*)"/);
   const valueEndCol = afterMatch ? position.character + afterMatch[1].length : position.character;
 
-  // Verify the enclosing object has `"type": "jlinkd"`.
+  // Verify the enclosing object has `"type": "haltd"`.
   const text = document.getText();
   const offset = document.offsetAt(position);
   let depth = 0;
@@ -322,7 +322,7 @@ function completionRangeAt(
     }
   }
   const block = text.slice(openBrace, closeBrace);
-  if (!/"type"\s*:\s*"jlinkd"/.test(block)) {
+  if (!/"type"\s*:\s*"haltd"/.test(block)) {
     return undefined;
   }
   return new vscode.Range(position.line, valueStartCol, position.line, valueEndCol);
@@ -350,7 +350,7 @@ export function registerDeviceAssist(
   getAdapterPath: () => string,
 ): void {
   const catalog = new DeviceCatalog(context.extensionPath, getAdapterPath);
-  const diagnostics = vscode.languages.createDiagnosticCollection("jlinkd");
+  const diagnostics = vscode.languages.createDiagnosticCollection("haltd");
 
   const validateDocument = async (document: vscode.TextDocument) => {
     if (!isLaunchJson(document)) {
@@ -361,7 +361,7 @@ export function registerDeviceAssist(
       diagnostics.delete(document.uri);
       return;
     }
-    const configs = parseJlinkdConfigs(document);
+    const configs = parseHaltdConfigs(document);
     const issues: vscode.Diagnostic[] = [];
     for (const cfg of configs) {
       if (!cfg.deviceQuoteRange) {
@@ -372,7 +372,7 @@ export function registerDeviceAssist(
         issues.push(
           new vscode.Diagnostic(
             cfg.deviceQuoteRange,
-            "jlinkd: device is empty",
+            "Haltd: device is empty",
             vscode.DiagnosticSeverity.Warning,
           ),
         );
@@ -387,7 +387,7 @@ export function registerDeviceAssist(
         issues.push(
           new vscode.Diagnostic(
             cfg.deviceQuoteRange,
-            `jlinkd: unknown J-Link device "${value}"`,
+            `Haltd: unknown J-Link device "${value}"`,
             vscode.DiagnosticSeverity.Warning,
           ),
         );
@@ -434,7 +434,7 @@ export function registerDeviceAssist(
     ),
     vscode.languages.registerHoverProvider(LAUNCH_SELECTOR, {
       async provideHover(document, position) {
-        const configs = parseJlinkdConfigs(document);
+        const configs = parseHaltdConfigs(document);
         for (const cfg of configs) {
           if (cfg.deviceQuoteRange?.contains(position) && cfg.deviceValue) {
             const entry = await catalog.lookup(cfg.deviceValue);
@@ -455,16 +455,16 @@ export function registerDeviceAssist(
         return undefined;
       },
     }),
-    vscode.commands.registerCommand("jlinkd.selectDevice", async () => {
+    vscode.commands.registerCommand("haltd.selectDevice", async () => {
       const targetDoc = await findLaunchDocument();
       if (!targetDoc) {
-        void vscode.window.showWarningMessage("jlinkd: no .vscode/launch.json found in workspace");
+        void vscode.window.showWarningMessage("Haltd: no .vscode/launch.json found in workspace");
         return;
       }
-      const configs = parseJlinkdConfigs(targetDoc);
+      const configs = parseHaltdConfigs(targetDoc);
       if (configs.length === 0) {
         void vscode.window.showWarningMessage(
-          'jlinkd: no configuration with "type": "jlinkd" found in launch.json',
+          'Haltd: no configuration with "type": "haltd" found in launch.json',
         );
         return;
       }
@@ -486,7 +486,7 @@ export function registerDeviceAssist(
 
       const devices = await catalog.list();
       if (devices.length === 0) {
-        void vscode.window.showErrorMessage("jlinkd: device list is unavailable");
+        void vscode.window.showErrorMessage("Haltd: device list is unavailable");
         return;
       }
       const ordered = [...devices].sort((a, b) => {
@@ -526,7 +526,7 @@ export function registerDeviceAssist(
           `\n${indent}"device": "${pickedDevice.entry.name}",`,
         );
       } else {
-        void vscode.window.showErrorMessage("jlinkd: cannot locate position to insert device");
+        void vscode.window.showErrorMessage("Haltd: cannot locate position to insert device");
         return;
       }
       await vscode.workspace.applyEdit(edit);

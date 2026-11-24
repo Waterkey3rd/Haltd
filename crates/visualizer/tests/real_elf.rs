@@ -1,5 +1,5 @@
 //! Rule coverage on a full firmware image, run on demand:
-//! `JLINKD_TEST_ELF=fw.elf cargo test --release -p visualizer --test real_elf -- --ignored --nocapture`
+//! `HALTD_TEST_ELF=fw.elf cargo test --release -p visualizer --test real_elf -- --ignored --nocapture`
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -80,9 +80,9 @@ fn visit(db: &SymbolDb, rules: &Visualizers, place: Place, depth: usize, tally: 
 }
 
 #[test]
-#[ignore = "needs JLINKD_TEST_ELF"]
+#[ignore = "needs HALTD_TEST_ELF"]
 fn rules_cover_the_firmware() {
-    let elf = std::env::var("JLINKD_TEST_ELF").expect("JLINKD_TEST_ELF");
+    let elf = std::env::var("HALTD_TEST_ELF").expect("HALTD_TEST_ELF");
     let db = SymbolDb::load(Path::new(&elf), &LoadOptions::default()).unwrap();
     let rules = Visualizers::with_builtin().unwrap();
     let mut tally = Tally::default();
@@ -101,13 +101,13 @@ fn rules_cover_the_firmware() {
 }
 
 /// Whether expressions resolve on a full image, run on demand with
-/// `JLINKD_TEST_ELF=fw.elf JLINKD_TEST_EXPR="a.b,c[1]"`. All-zero memory also
+/// `HALTD_TEST_ELF=fw.elf HALTD_TEST_EXPR="a.b,c[1]"`. All-zero memory also
 /// means every `std::optional` on the way is empty.
 #[test]
-#[ignore = "needs JLINKD_TEST_ELF and JLINKD_TEST_EXPR"]
+#[ignore = "needs HALTD_TEST_ELF and HALTD_TEST_EXPR"]
 fn expressions_resolve_on_an_image() {
-    let elf = std::env::var("JLINKD_TEST_ELF").expect("JLINKD_TEST_ELF");
-    let expressions = std::env::var("JLINKD_TEST_EXPR").expect("JLINKD_TEST_EXPR");
+    let elf = std::env::var("HALTD_TEST_ELF").expect("HALTD_TEST_ELF");
+    let expressions = std::env::var("HALTD_TEST_EXPR").expect("HALTD_TEST_EXPR");
     let db = SymbolDb::load(Path::new(&elf), &LoadOptions::default()).unwrap();
     let rules = Visualizers::with_builtin().unwrap();
     for text in expressions.split(',') {

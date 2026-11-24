@@ -9,9 +9,9 @@ export const Y_AXIS_SIZE = 64;
 export const DEFAULT_TRACK_HEIGHT = 160;
 export const MIN_TRACK_HEIGHT = 80;
 export const MAX_TRACK_HEIGHT = 600;
-export const EXPR_HISTORY_KEY = "jlinkd.timeline.exprHistory";
-export const LEGEND_WIDTH_KEY = "jlinkd.timeline.legendWidth";
-export const TRACK_HEIGHTS_KEY = "jlinkd.timeline.trackHeights";
+export const EXPR_HISTORY_KEY = "haltd.timeline.exprHistory";
+export const LEGEND_WIDTH_KEY = "haltd.timeline.legendWidth";
+export const TRACK_HEIGHTS_KEY = "haltd.timeline.trackHeights";
 
 export interface Halted {
   from: number;

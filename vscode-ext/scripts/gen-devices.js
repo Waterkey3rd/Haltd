@@ -9,12 +9,12 @@ const extRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(extRoot, "..");
 const outFile = path.join(extRoot, "resources", "devices-stm32.json");
 
-function findJlinkd() {
-  const idx = process.argv.indexOf("--jlinkd");
+function findHaltd() {
+  const idx = process.argv.indexOf("--haltd");
   if (idx !== -1 && process.argv[idx + 1]) {
     return process.argv[idx + 1];
   }
-  const exe = process.platform === "win32" ? "jlinkd.exe" : "jlinkd";
+  const exe = process.platform === "win32" ? "haltd.exe" : "haltd";
   const candidates = [
     path.join(repoRoot, "target", "release", exe),
     path.join(repoRoot, "target", "debug", exe),
@@ -24,8 +24,8 @@ function findJlinkd() {
   return candidates[0] ?? exe;
 }
 
-const jlinkd = findJlinkd();
-const raw = execFileSync(jlinkd, ["devices", "--json", "--filter", "STM32"], {
+const haltd = findHaltd();
+const raw = execFileSync(haltd, ["devices", "--json", "--filter", "STM32"], {
   encoding: "utf8",
   maxBuffer: 16 * 1024 * 1024,
 });

@@ -192,9 +192,9 @@ export function exportPngSnapshot(state: TimelineState): void {
 
   ctx.fillStyle = state.canvasTheme.axisStroke;
   ctx.font = `bold ${Math.round(13 * dpr)}px system-ui, sans-serif`;
-  const statusText = byId("connection")?.textContent ?? "jlinkd Timeline";
+  const statusText = byId("connection")?.textContent ?? "Haltd Timeline";
   const measureText = measureEl?.textContent ?? "";
-  ctx.fillText(`jlinkd Timeline — ${statusText}   ${measureText}`, pad, pad + Math.round(16 * dpr));
+  ctx.fillText(`Haltd Timeline — ${statusText}   ${measureText}`, pad, pad + Math.round(16 * dpr));
 
   let y = pad + headerH;
   for (const g of activeTracks) {
@@ -208,7 +208,7 @@ export function exportPngSnapshot(state: TimelineState): void {
   }
 
   const link = document.createElement("a");
-  link.download = `jlinkd-timeline-${Date.now()}.png`;
+  link.download = `haltd-timeline-${Date.now()}.png`;
   link.href = out.toDataURL("image/png");
   link.click();
   if (measureEl) measureEl.textContent = `Saved PNG snapshot (${link.download})`;

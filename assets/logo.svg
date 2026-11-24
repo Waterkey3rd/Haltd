@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 400" width="1060" height="400" role="img" aria-label="jlinkd">
-  <title>jlinkd</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1052 400" width="1052" height="400" role="img" aria-label="haltd">
+  <title>haltd</title>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#1B2540"/>
       <stop offset="1" stop-color="#090E1A"/>
     </linearGradient>
-    <linearGradient id="jg" gradientUnits="userSpaceOnUse" x1="0" y1="100" x2="0" y2="414">
+    <linearGradient id="pg" gradientUnits="userSpaceOnUse" x1="0" y1="96" x2="0" y2="416">
       <stop offset="0" stop-color="#FFFFFF"/>
       <stop offset="1" stop-color="#AEBBD3"/>
     </linearGradient>
@@ -13,46 +13,40 @@
 
   <style>
     .wm     { fill: none; stroke: #0F172A; stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
-    .wm-dot { fill: #0F172A; stroke: none; }
     .wm-acc { stroke: #06B6D4; }
     @media (prefers-color-scheme: dark) {
       .wm     { stroke: #F1F5F9; }
-      .wm-dot { fill: #F1F5F9; }
       .wm-acc { stroke: #22D3EE; }
     }
   </style>
 
-  <!-- 图标（由 512 画布缩放到 320） -->
+  <!-- 图标（由 512 画布缩放到 300） -->
   <g transform="translate(40 40) scale(0.625)">
     <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
     <rect x="16.5" y="16.5" width="479" height="479" rx="111.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
-    <path d="M212 126 V316 A72 72 0 0 1 140 388 H128"
-          fill="none" stroke="url(#jg)" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M268 196 H290 V150 H318 V196 H336 V150 H372 V196 H414"
-          fill="none" stroke="#22D3EE" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-    <g fill="none" stroke="#FF7A2F" stroke-width="14" stroke-linecap="round">
-      <path d="M268 262 H318 M336 262 H414"/>
-      <path d="M268 304 H296 M314 304 H372" stroke-opacity="0.85"/>
-      <path d="M268 346 H340 M358 346 H388" stroke-opacity="0.65"/>
+    <g fill="none" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M162 230 H198 V194 H230 V230 H262 V194 H294 V230 H350" stroke="#22D3EE"/>
+      <path d="M162 290 H190 C206 290 206 262 224 262 S258 318 276 318 S304 290 326 290 H350" stroke="#FF7A2F"/>
+    </g>
+    <g fill="none" stroke="url(#pg)" stroke-width="48" stroke-linecap="round">
+      <path d="M162 122 V390"/>
+      <path d="M350 122 V390"/>
     </g>
   </g>
 
-  <!-- 字标 "jlinkd"：全部为描边路径，不依赖任何字体 -->
-  <g transform="translate(0 -20)">
-    <!-- j -->
-    <path class="wm" d="M460 180 V316 A30 30 0 0 1 430 346 H424"/>
-    <circle class="wm-dot" cx="460" cy="122" r="14"/>
+  <!-- 字标 "haltd"：全部为描边路径，不依赖任何字体 -->
+  <g transform="translate(-20 0)">
+    <!-- h -->
+    <path class="wm" d="M450 115 V285 M450 232 A35 47 0 0 1 520 232 V285"/>
+    <!-- a -->
+    <circle class="wm" cx="632" cy="235" r="50"/>
+    <path class="wm" d="M682 185 V285"/>
     <!-- l -->
-    <path class="wm" d="M530 110 V280"/>
-    <!-- i -->
-    <path class="wm" d="M590 180 V280"/>
-    <circle class="wm-dot" cx="590" cy="122" r="14"/>
-    <!-- n -->
-    <path class="wm" d="M650 180 V280 M650 226 A35 46 0 0 1 720 226 V280"/>
-    <!-- k -->
-    <path class="wm" d="M780 110 V280 M848 182 L782 242 M808 218 L852 280"/>
+    <path class="wm" d="M744 115 V285"/>
+    <!-- t -->
+    <path class="wm" d="M826 135 V258 A27 27 0 0 0 853 285 H860 M800 185 H862"/>
     <!-- d（青色强调：daemon） -->
-    <circle class="wm wm-acc" cx="948" cy="230" r="50"/>
-    <path class="wm wm-acc" d="M998 110 V280"/>
+    <circle class="wm wm-acc" cx="970" cy="235" r="50"/>
+    <path class="wm wm-acc" d="M1020 115 V285"/>
   </g>
 </svg>

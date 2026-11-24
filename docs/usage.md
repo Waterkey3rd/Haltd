@@ -1,6 +1,6 @@
-# jlinkd 使用手册
+# Haltd 使用手册
 
-`jlinkd` 是面向 STM32（ARM Cortex-M）的 J-Link 调试后端、VS Code 扩展与命令行工具。除了常规的断点与单步，它还支持在目标不停机的情况下实时读写变量（Live Watch）、绘制高速波形（Timeline），以及结构化解码 RTT 数据。
+`Haltd` 是面向 STM32（ARM Cortex-M）的 J-Link 调试后端、VS Code 扩展与命令行工具。除了常规的断点与单步，它还支持在目标不停机的情况下实时读写变量（Live Watch）、绘制高速波形（Timeline），以及结构化解码 RTT 数据。
 
 ---
 
@@ -18,19 +18,19 @@
 
 ### 安装 VS Code 插件
 
-发布包中的 `.vsix` 已内置对应平台的 `jlinkd`（或 `jlinkd.exe`）可执行文件：
+发布包中的 `.vsix` 已内置对应平台的 `haltd`（或 `haltd.exe`）可执行文件：
 
 ```bash
 # Linux x64
-code --install-extension jlinkd-<版本>-linux-x64.vsix
+code --install-extension haltd-<版本>-linux-x64.vsix
 
 # Windows x64
-code --install-extension jlinkd-<版本>-win32-x64.vsix
+code --install-extension haltd-<版本>-win32-x64.vsix
 ```
 
 也可以在 VS Code 扩展面板右上角的 `...` 菜单中选择「从 VSIX 安装」。如果使用了 VS Code 配置文件（Profile），可在命令后加上 `--profile <名称>`。
 
-> 如需把 `jlinkd` 单独放到命令行使用，可将压缩包中的 `jlinkd` / `jlinkd.exe` 放到 `PATH` 中（扩展默认也会查找自身内置目录与 `~/.cargo/bin/jlinkd(.exe)`）。
+> 如需把 `haltd` 单独放到命令行使用，可将压缩包中的 `haltd` / `haltd.exe` 放到 `PATH` 中（扩展默认也会查找自身内置目录与 `~/.cargo/bin/haltd(.exe)`）。
 
 ---
 
@@ -44,8 +44,8 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
      "version": "0.2.0",
      "configurations": [
        {
-         "name": "J-Link (jlinkd)",
-         "type": "jlinkd",
+         "name": "J-Link (Haltd)",
+         "type": "haltd",
          "request": "launch",
          "device": "STM32H723VG",
          "interface": "SWD",
@@ -65,7 +65,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `device` | 是 | J-Link 器件名称，如 `STM32F103C8`、`STM32G474RE`、`STM32H723VG`（在 `launch.json` 中支持自动补全、悬停查看内核/Flash/RAM 与匹配 profile、未知型号 Warning 提示，也可运行命令 `jlinkd: Select Device` 快捷选择） |
+| `device` | 是 | J-Link 器件名称，如 `STM32F103C8`、`STM32G474RE`、`STM32H723VG`（在 `launch.json` 中支持自动补全、悬停查看内核/Flash/RAM 与匹配 profile、未知型号 Warning 提示，也可运行命令 `Haltd: Select Device` 快捷选择） |
 | `elf` | 是 | 带调试信息的 ELF 固件路径 |
 | `interface` | | `SWD`（默认）或 `JTAG` |
 | `speed` | | 接口时钟（kHz），默认 `4000`；也可写 `"auto"` |
@@ -74,7 +74,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 | `stopOnEntry` | | 启动后停在入口指令（优先级高于 `runToMain`） |
 | `preLaunchTask` | | 调试前运行的构建任务，需与 `tasks.json` 的 `label` 一致；`F6` 也使用它 |
 | `svd` | | CMSIS-SVD 文件路径，用于 Peripherals 视图（缺省时尝试从已安装的 Ozone 目录匹配） |
-| `project` | | 项目配置文件路径，默认 `${workspaceFolder}/.jlinkd/project.yaml`，没有也可以 |
+| `project` | | 项目配置文件路径，默认 `${workspaceFolder}/.haltd/project.yaml`，没有也可以 |
 | `dll` | | 显式指定 `libjlinkarm.so` 或 `JLink_x64.dll` 的路径（多版本共存或绿色版时使用） |
 | `serial` | | 连接多台探针时指定序列号（数字或字符串） |
 | `rtt` | | RTT 自动解析选项：`{ "autoDecode": true, "autoTimeline": true }`（均默认 `true`），可控制未在 `rtt.yaml` 配置的通道是否自动按 ELF 结构体/文本解码及自动加入 Timeline |
@@ -112,7 +112,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 - 条件写错（如符号不存在）时会停下并给出原因，避免静默漏停。
 - 条件断点由主机端判断，每次命中都会短暂停一下再恢复（单次约数毫秒），请勿放在高频中断里，高频场景建议使用 Timeline 或数据断点。
 - 在行内单步经过日志点时不会输出日志。
-- **硬件断点用完时**会自动改用 Flash 断点（需要探针具备 FlashBP 许可）；若不想写 Flash，可在 `.jlinkd/project.yaml` 中关闭。
+- **硬件断点用完时**会自动改用 Flash 断点（需要探针具备 FlashBP 许可）；若不想写 Flash，可在 `.haltd/project.yaml` 中关闭。
 
 **数据断点（Watchpoint）**：在 Variables 里右键变量选择「Break on Value Change」，支持读、写、读写触发并可附带条件。注意监视长度必须是 2 的幂且按自身地址对齐。
 
@@ -128,14 +128,14 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 
 ### Live Watch
 
-位于调试侧栏。在源码或 Variables 中右键「Add to Live Watch」，或点击视图标题栏 `+` 添加表达式。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `jlinkd.replaceWatchView: false` 关闭）。
+位于调试侧栏。在源码或 Variables 中右键「Add to Live Watch」，或点击视图标题栏 `+` 添加表达式。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `haltd.replaceWatchView: false` 关闭）。
 
 - 刷新率支持 `0–5 Hz` 每行独立设置（`0` 表示仅在目标暂停时刷新）。
 - 结构体、数组与指针可逐层展开，支持多选，展开后的成员可直接加入 Timeline。
-- 支持直接修改目标内存值，并将表达式列表保存到 `.jlinkd/state.json`。
+- 支持直接修改目标内存值，并将表达式列表保存到 `.haltd/state.json`。
 - 指针表达式只在添加或 Reload 时解析一次地址，运行期间指针自身变化不会自动重新寻址。
 
-**Live Watch 与调试快捷操作**（仅在 `jlinkd` 调试会话期间生效，可在 VS Code Keyboard Shortcuts 中自定义）：
+**Live Watch 与调试快捷操作**（仅在 `haltd` 调试会话期间生效，可在 VS Code Keyboard Shortcuts 中自定义）：
 
 | 快捷键 | 作用域 | 效果 |
 |---|---|---|
@@ -151,7 +151,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 
 ### Timeline
 
-采用参考 SEGGER Ozone Timeline / Data Graph 的多轨道同步示波器布局：每条轨道左侧为独立图例与控制栏（含来源标识 `HSS` / `POLL` / `RTT` 与数值读数），右侧为波形画布，底部共用同一条时间轴与可拖拽游标手柄（`S` / `A` / `B`）。点击状态栏 Timeline 按钮、按 `Ctrl+Shift+T` 或执行 `jlinkd: Open Timeline` 打开，也可通过 <http://127.0.0.1:47110/timeline> 在浏览器访问。
+采用参考 SEGGER Ozone Timeline / Data Graph 的多轨道同步示波器布局：每条轨道左侧为独立图例与控制栏（含来源标识 `HSS` / `POLL` / `RTT` 与数值读数），右侧为波形画布，底部共用同一条时间轴与可拖拽游标手柄（`S` / `A` / `B`）。点击状态栏 Timeline 按钮、按 `Ctrl+Shift+T` 或执行 `Haltd: Open Timeline` 打开，也可通过 <http://127.0.0.1:47110/timeline> 在浏览器访问。
 
 **添加信号与采样率**：
 - 在源码或 Live Watch 按 `Ctrl+H`（或右键「Add to Timeline (HSS)」）、在顶部输入表达式回车，或将左下角 `RTT` 抽屉中的解码信号直接拖拽到任意轨道或空白区新建轨道；结构体与数组会自动展开（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
@@ -202,24 +202,24 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 - 顶部概览条显示全部历史与暂停/异常事件，点击或拖动可快速跳转。
 - 工具栏可直接对目标执行运行（`▶`）、暂停（`❚❚`）、复位（`⟲`）与 `Fit`。
 - 支持 `Grouped`（按轨道分组）/ `Split`（每路独立轨道）切换、`Bands`（Min/Max 包络）、状态栏 `Events` 事件跳转、导出可见窗口 CSV、保存 PNG 截图、深色/浅色/高对比主题切换（`Auto` 自动跟随 VS Code）。
-- 支持录制 `.jlrec` 文件（`Record` 按钮或命令 `jlinkd: Start/Stop Recording`）；当前网页端暂不支持直接回放 `.jlrec`。
+- 支持录制 `.hlrec` 文件（`Record` 按钮或命令 `Haltd: Start/Stop Recording`）；当前网页端暂不支持直接回放 `.hlrec`。
 
 ### 状态与统计
 
-状态栏实时显示连接状态、HSS 实际采样率与丢点计数，点击（或执行 `jlinkd: Show Statistics`）可查看详细统计信息。
+状态栏实时显示连接状态、HSS 实际采样率与丢点计数，点击（或执行 `Haltd: Show Statistics`）可查看详细统计信息。
 
 ---
 
 ## 5. RTT 终端与结构化解码
 
-只要在 ELF 中包含 `_SEGGER_RTT` 符号或提供 `.jlinkd/rtt.yaml`，即可启用 RTT；未检测到 `_SEGGER_RTT` 且未配置 `rtt.yaml` 时不会主动扫描 RAM，以免抢占 SWD 带宽影响 HSS。
+只要在 ELF 中包含 `_SEGGER_RTT` 符号或提供 `.haltd/rtt.yaml`，即可启用 RTT；未检测到 `_SEGGER_RTT` 且未配置 `rtt.yaml` 时不会主动扫描 RAM，以免抢占 SWD 带宽影响 HSS。
 
 - 状态栏 `RTT` 按钮可打开通道 0 终端并支持下行输入。
-- 命令 `jlinkd: Open RTT Signals` 可打开网页端 RTT 终端与解码信号列表（`http://127.0.0.1:47110/rtt`）。
+- 命令 `Haltd: Open RTT Signals` 可打开网页端 RTT 终端与解码信号列表（`http://127.0.0.1:47110/rtt`）。
 
 ### 零配置自动解码（`rtt.autoDecode` / `rtt.autoTimeline`）
 
-未写在 `.jlinkd/rtt.yaml` 中的上行通道默认按以下规则自动解码（`rtt.yaml` 中显式配置的通道始终优先级最高）：
+未写在 `.haltd/rtt.yaml` 中的上行通道默认按以下规则自动解码（`rtt.yaml` 中显式配置的通道始终优先级最高）：
 
 1. **按 ELF 结构体自动解码（`auto-struct`）**：当固件调用 `SEGGER_RTT_ConfigUpBuffer` 设置的通道名形如 `Type`、`struct:Type` 或 `Type@0xA55A`（支持 `ns::Type` 与 `typedef struct`），且 ELF 中存在该结构体/类/联合体定义时，自动按 DWARF 布局解码各数值字段为 `<通道名>.<字段>` 信号：
    - 带 `@0x<十六进制>` 后缀（如 `TelemetryFrame@0xA55A`）时使用同步字对齐与丢帧重同步（配合结构体里的 `sync` / `seq` 字段）。
@@ -228,7 +228,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 2. **文本键值自动提取（`auto-text`）**：其余上行通道保留完整文本终端输出，同时按行自动提取 `name=value` 或 `name: value` 形式的数值（忽略 `0x...` 十六进制与 `1.2.3` 版本号），生成 `<通道名>.<name>` 信号；每通道最多自动追踪 32 个去重信号名。
 3. **自动加入 Timeline**：自动解码出的信号默认归入 `rtt:<通道名>` 轨道；当 `autoTimeline` 为 `true`（默认）时自动绘制到 Timeline；设为 `false` 时仅在 RTT 信号列表更新数值，可手动点击或拖拽加入 Timeline。
 
-可在 `launch.json` 中按配置项开关（也可写在 `.jlinkd/project.yaml`）：
+可在 `launch.json` 中按配置项开关（也可写在 `.haltd/project.yaml`）：
 
 ```jsonc
 "rtt": {
@@ -237,7 +237,7 @@ code --install-extension jlinkd-<版本>-win32-x64.vsix
 }
 ```
 
-### 手动配置 `.jlinkd/rtt.yaml` 示例：
+### 手动配置 `.haltd/rtt.yaml` 示例：
 
 ```yaml
 controlBlock: auto                 # auto 取 ELF 中 _SEGGER_RTT 地址，也可写具体十六进制地址
@@ -264,7 +264,7 @@ channels:
   3:
     name: motor
     type: lua
-    script: .jlinkd/decode_motor.lua
+    script: .haltd/decode_motor.lua
   4:
     name: metrics
     type: text-regex
@@ -283,9 +283,9 @@ channels:
 
 ---
 
-## 7. 项目配置（`.jlinkd/project.yaml`）
+## 7. 项目配置（`.haltd/project.yaml`）
 
-在工程根目录放置 `.jlinkd/project.yaml`（全部字段可选）：
+在工程根目录放置 `.haltd/project.yaml`（全部字段可选）：
 
 ```yaml
 target:
@@ -303,9 +303,9 @@ sampling:
 
 svd: path/to/device.svd                # 相对工程目录
 visualizers:                           # 用 Lua 自定义 C++ 模板类型的显示方式
-  - .jlinkd/visualizers.lua
+  - .haltd/visualizers.lua
 rtt:
-  config: .jlinkd/rtt.yaml
+  config: .haltd/rtt.yaml
   autoDecode: true
   autoTimeline: true
 ```
@@ -314,40 +314,40 @@ rtt:
 
 ## 8. 命令行（CLI）
 
-`jlinkd` 二进制可脱离 VS Code 独立使用。未指定 `--device` 时默认值为 `STM32H723VG`（可通过 `--device` 或 `JLINKD_DEVICE` 覆盖）：
+`haltd` 二进制可脱离 VS Code 独立使用。未指定 `--device` 时默认值为 `STM32H723VG`（可通过 `--device` 或 `HALTD_DEVICE` 覆盖）：
 
 ```bash
-jlinkd info --device STM32G474RE                          # 查看探针与目标状态（--no-target 仅查探针）
-jlinkd flash firmware.elf --device STM32G474RE            # 增量烧录（--no-run 烧录后保持暂停）
-jlinkd read uwTick --elf firmware.elf --device STM32G474RE # 不暂停读取变量或表达式
-jlinkd read 0x20000000 --count 16 --device STM32G474RE    # 读取内存
-jlinkd tasks --elf firmware.elf --backtrace --device STM32G474RE # 查看 FreeRTOS 任务与调用栈
-jlinkd symbols firmware.elf --lookup main                 # 离线查看 ELF 符号与缓存耗时（无需连接探针）
-jlinkd devices --filter STM32H7 --json                    # 查询 J-Link 支持器件列表、内核与 Flash/RAM 大小（仅需 J-Link 库，无需连接探针）
+haltd info --device STM32G474RE                          # 查看探针与目标状态（--no-target 仅查探针）
+haltd flash firmware.elf --device STM32G474RE            # 增量烧录（--no-run 烧录后保持暂停）
+haltd read uwTick --elf firmware.elf --device STM32G474RE # 不暂停读取变量或表达式
+haltd read 0x20000000 --count 16 --device STM32G474RE    # 读取内存
+haltd tasks --elf firmware.elf --backtrace --device STM32G474RE # 查看 FreeRTOS 任务与调用栈
+haltd symbols firmware.elf --lookup main                 # 离线查看 ELF 符号与缓存耗时（无需连接探针）
+haltd devices --filter STM32H7 --json                    # 查询 J-Link 支持器件列表、内核与 Flash/RAM 大小（仅需 J-Link 库，无需连接探针）
 ```
 
-常用全局选项：`--interface <swd|jtag>`、`--speed <khz>`、`--serial <sn>`、`--dll <path>`、`--log <filter>`，完整参数请执行 `jlinkd --help`。
+常用全局选项：`--interface <swd|jtag>`、`--speed <khz>`、`--serial <sn>`、`--dll <path>`、`--log <filter>`，完整参数请执行 `haltd --help`。
 
 ---
 
 ## 9. 缓存位置、环境变量与后台进程
 
-`jlinkd` 写入的符号索引缓存（`index/`）、后台日志（`serve.log`）以及默认录制目录（`recordings/`）存放在统一缓存目录下：
+`haltd` 写入的符号索引缓存（`index/`）、后台日志（`serve.log`）以及默认录制目录（`recordings/`）存放在统一缓存目录下：
 
-- **Linux**：`$XDG_CACHE_HOME/jlinkd` 或 `~/.cache/jlinkd`
-- **Windows**：系统「文档」目录下的 `jlinkd` 文件夹
-- **自定义目录**：设置环境变量 `JLINKD_CACHE_DIR` 即可覆盖上述默认位置
+- **Linux**：`$XDG_CACHE_HOME/haltd` 或 `~/.cache/haltd`
+- **Windows**：系统「文档」目录下的 `haltd` 文件夹
+- **自定义目录**：设置环境变量 `HALTD_CACHE_DIR` 即可覆盖上述默认位置
 
 常用环境变量：
 
 | 环境变量 | 作用 |
 |---|---|
-| `JLINKD_CACHE_DIR` | 自定义缓存、日志与录制文件目录 |
-| `JLINKD_DLL` | 指定 `libjlinkarm.so` 或 `JLink_x64.dll` 路径 |
-| `JLINKD_DEVICE` | 命令行默认器件名 |
-| `JLINKD_LOG` | 命令行日志过滤级别（如 `info`、`jlink=trace`；后台 `serve.log` 固定为 `info`） |
+| `HALTD_CACHE_DIR` | 自定义缓存、日志与录制文件目录 |
+| `HALTD_DLL` | 指定 `libjlinkarm.so` 或 `JLink_x64.dll` 路径 |
+| `HALTD_DEVICE` | 命令行默认器件名 |
+| `HALTD_LOG` | 命令行日志过滤级别（如 `info`、`jlink=trace`；后台 `serve.log` 固定为 `info`） |
 
-> 调试时会拉起一个后台 `jlinkd` 服务进程持有探针（监听本机 `127.0.0.1:47110` 和 `127.0.0.1:47111`），调试结束且无网页连接约 30 秒后自动退出。同一时间只允许一个调试会话控制目标；升级插件或修改环境变量后，请等待旧后台进程退出或重载 VS Code 窗口再重新调试。
+> 调试时会拉起一个后台 `haltd` 服务进程持有探针（监听本机 `127.0.0.1:47110` 和 `127.0.0.1:47111`），调试结束且无网页连接约 30 秒后自动退出。同一时间只允许一个调试会话控制目标；升级插件或修改环境变量后，请等待旧后台进程退出或重载 VS Code 窗口再重新调试。
 
 ---
 
@@ -357,13 +357,13 @@ jlinkd devices --filter STM32H7 --json                    # 查询 J-Link 支持
 
 | 现象 | 处理建议 |
 |---|---|
-| 提示找不到 J-Link 库 | 确认已安装 SEGGER J-Link 驱动；绿色版或自定义路径请在 `launch.json` 设置 `dll` 或传 `--dll` / `JLINKD_DLL` |
-| 连不上目标板 | 先运行 `jlinkd info --device <器件>` 排查；检查 SWD 接线与供电，或适当降低 `speed` |
+| 提示找不到 J-Link 库 | 确认已安装 SEGGER J-Link 驱动；绿色版或自定义路径请在 `launch.json` 设置 `dll` 或传 `--dll` / `HALTD_DLL` |
+| 连不上目标板 | 先运行 `haltd info --device <器件>` 排查；检查 SWD 接线与供电，或适当降低 `speed` |
 | 断点显示灰色未绑定 | 确认 ELF 是当前源码编译且带 `-g`，或该行在优化后没有生成对应机器指令 |
 | 提示另一个调试会话正在控制目标 | 关闭其他 VS Code 窗口中的调试会话 |
 | Timeline 没有波形数据 | 确认 `Sample` 采样率不是 `Off`、目标处于运行态，且变量为全局或静态变量 |
 | 信号提示放不下 HSS | HSS 带宽与块数受探针硬件上限限制，可减少信号、降低采样率，或改用 `poll` |
-| RTT 没有输出 | 确认已配置 `.jlinkd/rtt.yaml`、固件启用了 RTT，且 ELF 中存在 `_SEGGER_RTT` |
+| RTT 没有输出 | 确认已配置 `.haltd/rtt.yaml`、固件启用了 RTT，且 ELF 中存在 `_SEGGER_RTT` |
 | Windows 烧录路径报错 | Windows 下 J-Link DLL 只接受系统当前代码页（`CP_ACP`）路径，避免路径包含当前代码页无法表示的字符 |
 | 修改环境或升级插件未生效 | 彻底重启 VS Code 窗口，并等待约 30 秒让旧后台进程空闲退出 |
 | 其他异常定位 | 查看缓存目录下的 `serve.log` 与 VS Code 调试控制台输出 |
@@ -373,4 +373,17 @@ jlinkd devices --filter STM32H7 --json                    # 查询 J-Link 支持
 - **实测范围**：已在 **STM32F103C8**、**STM32G4 系列**、**STM32H723** + J-Link V9 下完成实际调试与验证；**STM32H74x/H75x** 配置已内置（参考 `RM0433`），但受限于手头硬件，尚未完成充分实机验证。其他 STM32 型号也能连接，但可能缺少内置 `DBGMCU` / 外设冻结配置。
 - 芯片读保护解锁或 J-Link 固件升级时是否会弹出阻塞对话框尚未验证（后台模式下建议保持探针固件正常）。
 - 如果使用「Run to main」但固件在进入 `main` 前就死循环，需要手动点暂停或停止来中断等待。
-- `.jlrec` 录制文件暂时不能在网页界面中回放。
+- `.hlrec` 录制文件暂时不能在网页界面中回放。
+
+---
+
+## 11. 从 jlinkd 迁移
+
+项目自 `0.7.0` 起由 `jlinkd` 更名为 `Haltd`，涉及以下配置与环境变更：
+
+1. **工程配置目录**：将工程根目录下的 `.jlinkd/` 重命名为 `.haltd/`（包含 `project.yaml`、`rtt.yaml`、`state.json` 及自定义的 Lua 脚本路径）。
+2. **`launch.json`**：将配置中的 `"type": "jlinkd"` 改为 `"type": "haltd"`，如自定义了 `project` 字段或用户设置 `jlinkd.*`，一并改为 `.haltd/...` 与 `haltd.*`。
+3. **环境变量**：`JLINKD_CACHE_DIR` / `JLINKD_DLL` / `JLINKD_DEVICE` / `JLINKD_LOG` 统一更名为 `HALTD_CACHE_DIR` / `HALTD_DLL` / `HALTD_DEVICE` / `HALTD_LOG`。
+4. **VS Code 扩展**：扩展标识已变更为 `haltd.haltd`（与旧的 `jlinkd.jlinkd` 不同）。升级前请先在 VS Code 中卸载旧的 `jlinkd` 扩展，再安装新的 `haltd` `.vsix`。
+5. **缓存目录**：默认缓存目录已变更为 `~/.cache/haltd`（Linux）或「文档」目录下的 `haltd`（Windows）。旧的 `jlinkd` 缓存目录可直接删除，符号索引会按需自动重建。
+6. **录制文件兼容**：新录制的波形文件扩展名为 `.hlrec`，旧版录制的 `.jlrec` 文件仍可由 `Haltd` 正常读取。

@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="jlinkd" width="460" />
+  <img src="assets/logo.svg" alt="haltd" width="460" />
 </p>
 
 <p align="center">
   <strong>中文</strong> | <a href="README.en.md">English</a>
 </p>
 
-# jlinkd
+# Haltd
 
 面向 STM32（ARM Cortex-M）的 J-Link 调试后端、VS Code 插件与命令行工具，采用「常驻后台进程 + DAP + WebSocket 数据通道」架构。
 
@@ -46,9 +46,9 @@
 - **FreeRTOS 感知**：直接从 DWARF 信息读取 TCB 与任务链表布局（支持 CM3 / CM4F），无需硬编码偏移，可查看任务状态、优先级、剩余栈高水位及各任务独立调用栈。
 - **不停机变量与波形采样**：
   - **Live Watch**：通过 AHB-AP 不停机实时读写全局变量、结构体与位段（0~5 Hz 可调），支持 Ozone 风格快捷键（`Ctrl+G` 加入 Live Watch、`Ctrl+H` 加入 Timeline 等）。
-  - **Timeline（HSS / 轮询 / RTT）**：最高 1 kHz 高速采样（超出探针 HSS 带宽预算的信号自动降级为轮询），采用仿 Ozone Timeline / Data Graph 的多轨道同步示波器 UI，同时承载 HSS 与 RTT 波形、鼠标缩放/游标、拖拽分组、深浅色主题、`.jlrec` 录制与 CSV/PNG 导出。
+  - **Timeline（HSS / 轮询 / RTT）**：最高 1 kHz 高速采样（超出探针 HSS 带宽预算的信号自动降级为轮询），采用仿 Ozone Timeline / Data Graph 的多轨道同步示波器 UI，同时承载 HSS 与 RTT 波形、鼠标缩放/游标、拖拽分组、深浅色主题、`.hlrec` 录制与 CSV/PNG 导出。
 - **RTT 终端与结构化解码**：除文本终端、正则、`rtt.yaml`、Lua 与 SystemView 外，支持按通道名自动匹配 ELF 结构体与文本 `key=value` 数值并自动加入 Timeline（可在 `launch.json` 配置）。
-- **VS Code 芯片选型辅助**：在 `launch.json` 中为 `device` 提供 J-Link 器件自动补全、内核/Flash/RAM 与内置 profile 悬停提示、未知器件警告及 `jlinkd: Select Device` 命令。
+- **VS Code 芯片选型辅助**：在 `launch.json` 中为 `device` 提供 J-Link 器件自动补全、内核/Flash/RAM 与内置 profile 悬停提示、未知器件警告及 `Haltd: Select Device` 命令。
 - **CMSIS-SVD 外设寄存器视图**：支持自动屏蔽带读副作用的寄存器（如 `DR` / `RDR` / `RXDR`），防止打开视图就把串口/SPI 数据读丢，并支持按位段读改写。
 - **C++ 类型美化（Visualizer）**：内置支持 `units`、`Eigen::Matrix` / `Quaternion`、`std::array` / `std::tuple` / `std::optional` / `std::variant` / `std::span` / `std::string_view` 等类型，支持通过 Lua 自定义项目规则。
 
@@ -59,12 +59,12 @@
 ### 方式一：直接使用发布包（推荐）
 
 从 Release 获取对应平台的包：
-- **Linux x64**：`jlinkd-<版本>-linux-x64.vsix` + `jlinkd` 二进制
-- **Windows x64**：`jlinkd-<版本>-win32-x64.vsix` + `jlinkd.exe` 二进制
+- **Linux x64**：`haltd-<版本>-linux-x64.vsix` + `haltd` 二进制
+- **Windows x64**：`haltd-<版本>-win32-x64.vsix` + `haltd.exe` 二进制
 
 前置只需安装对应系统的 **SEGGER J-Link 驱动** 与 **VS Code（≥ 1.90）**，在 VS Code 中安装 `.vsix`（插件已内置后端可执行文件），无需本机装 Rust 或 Node.js。
 
-详细配置、快捷键、`launch.json` 与 `.jlinkd/*.yaml` 说明见 **[使用手册](docs/usage.md)**。
+详细配置、快捷键、`launch.json` 与 `.haltd/*.yaml` 说明见 **[使用手册](docs/usage.md)**。
 
 ### 方式二：从源码构建
 
@@ -76,8 +76,8 @@
 # 1. 先构建 Web UI（server 会在编译期把 webui/dist 内嵌进二进制）
 cd webui && npm ci && npm run build && cd ..
 
-# 2. 构建并安装 jlinkd 到 ~/.cargo/bin
-cargo install --path bins/jlinkd --locked
+# 2. 构建并安装 haltd 到 ~/.cargo/bin
+cargo install --path bins/haltd --locked
 
 # 3. 构建 VS Code 扩展（可选）
 cd vscode-ext && npm ci && npm run build && cd ..

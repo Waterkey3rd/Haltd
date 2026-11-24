@@ -260,7 +260,7 @@ fn project_rules_override_builtin_ones() {
 }
 
 fn write_rule(name: &str, text: &str) -> String {
-    let path = std::env::temp_dir().join(format!("jlinkd-{}-{name}.lua", std::process::id()));
+    let path = std::env::temp_dir().join(format!("haltd-{}-{name}.lua", std::process::id()));
     std::fs::write(&path, text).unwrap();
     path.display().to_string()
 }

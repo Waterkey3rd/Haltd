@@ -4,9 +4,9 @@
 use std::fs;
 use std::path::Path;
 
-const STUB: &str = "<!doctype html><title>jlinkd</title>\
+const STUB: &str = "<!doctype html><title>haltd</title>\
 <p>The web UI was not built. Run <code>npm install &amp;&amp; npm run build</code> in <code>webui/</code> \
-and rebuild jlinkd.</p>";
+and rebuild haltd.</p>";
 
 fn main() {
     let dist = Path::new("../../webui/dist");

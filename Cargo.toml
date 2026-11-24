@@ -12,15 +12,15 @@ members = [
     "crates/sampler",
     "crates/rtt",
     "crates/svd",
-    "bins/jlinkd",
+    "bins/haltd",
     "bins/jlbench",
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 probe-api = { path = "crates/probe-api" }

@@ -20,7 +20,7 @@ const BREAKPOINT_TIMEOUT: Duration = Duration::from_secs(3);
 #[command(version, about)]
 struct Cli {
     /// Log filter, e.g. "info" or "jlink=trace".
-    #[arg(long, global = true, default_value = "warn", env = "JLINKD_LOG")]
+    #[arg(long, global = true, default_value = "warn", env = "HALTD_LOG")]
     log: String,
     #[command(subcommand)]
     command: Command,
@@ -114,7 +114,7 @@ enum Command {
         #[arg(long)]
         json: bool,
         /// Path of the J-Link library (libjlinkarm.so or JLink_x64.dll).
-        #[arg(long, env = "JLINKD_DLL")]
+        #[arg(long, env = "HALTD_DLL")]
         dll: Option<PathBuf>,
     },
 }
@@ -127,7 +127,7 @@ enum InterfaceArg {
 
 #[derive(Args)]
 struct Connection {
-    #[arg(long, default_value = "STM32H723VG", env = "JLINKD_DEVICE")]
+    #[arg(long, default_value = "STM32H723VG", env = "HALTD_DEVICE")]
     device: String,
     #[arg(long, value_enum, default_value_t = InterfaceArg::Swd)]
     interface: InterfaceArg,
@@ -138,7 +138,7 @@ struct Connection {
     #[arg(long)]
     serial: Option<u32>,
     /// Path of the J-Link library (libjlinkarm.so or JLink_x64.dll).
-    #[arg(long, env = "JLINKD_DLL")]
+    #[arg(long, env = "HALTD_DLL")]
     dll: Option<PathBuf>,
 }
 
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn defaults_are_swd_at_4_mhz() {
-        let cli = Cli::parse_from(["jlinkd", "info"]);
+        let cli = Cli::parse_from(["haltd", "info"]);
         let Command::Info { connection, .. } = cli.command else {
             panic!("expected info");
         };

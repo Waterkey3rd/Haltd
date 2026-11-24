@@ -107,7 +107,7 @@ export class DataClient extends EventEmitter {
 
   call<T>(method: string, params: object = {}): Promise<T> {
     if (!this.connected) {
-      return Promise.reject(new Error("the jlinkd backend is not connected"));
+      return Promise.reject(new Error("the haltd backend is not connected"));
     }
     const id = this.nextId++;
     this.socket!.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));

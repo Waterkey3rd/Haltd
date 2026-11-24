@@ -1,4 +1,4 @@
-//! `jlinkd dap`: connects an editor's stdio to the daemon, starting it if
+//! `haltd dap`: connects an editor's stdio to the daemon, starting it if
 //! needed. Messages pass through unchanged.
 
 use std::fs::{self, File};

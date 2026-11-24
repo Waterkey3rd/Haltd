@@ -311,7 +311,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("jlinkd-tsdb-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!("haltd-tsdb-{}-{name}", std::process::id()))
     }
 
     #[test]

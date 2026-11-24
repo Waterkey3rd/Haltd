@@ -1,25 +1,25 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="jlinkd" width="460" />
+  <img src="assets/logo.svg" alt="haltd" width="460" />
 </p>
 
 <p align="center">
   <a href="README.md">中文</a> | <strong>English</strong>
 </p>
 
-# jlinkd
+# Haltd
 
 A J-Link debug backend, VS Code extension, and CLI tool for STM32 (ARM Cortex-M), built around a resident daemon + DAP + WebSocket data-channel architecture.
 
 ## Overview
 
-`jlinkd` is developed as an **open-source alternative to Ozone**. Using a resident daemon + DAP + WebSocket architecture, it brings fast symbol caching, `-O2` stepping, HardFault decoding, FreeRTOS awareness, 1 kHz live waveform plotting, and structured RTT decoding directly into VS Code and CLI workflows:
+`Haltd` is developed as an **open-source alternative to Ozone**. Using a resident daemon + DAP + WebSocket architecture, it brings fast symbol caching, `-O2` stepping, HardFault decoding, FreeRTOS awareness, 1 kHz live waveform plotting, and structured RTT decoding directly into VS Code and CLI workflows:
 
 - **Smooth `-O2` debugging**: handles optimized code stepping, inline virtual stack frames, and `<optimized out>` reporting cleanly.
 - **Non-intrusive live observation**: view and modify Live Watch variables, plot 1 kHz HSS / polled waveforms in Timeline, and stream decoded RTT logs without halting the MCU—alongside regular breakpoints, HardFault diagnosis, and FreeRTOS task inspection.
 - **Fast ELF loading & Build & Reload**: parallel DWARF indexing with on-disk `blake3` caching keeps large-ELF startup sub-second, and `F6` flashes only changed sectors before rebinding breakpoints and watches.
 - **Consistent Linux & Windows workflow**: lightweight, open-source, and scriptable across both platforms.
 
-Core daily debugging workflows are ready to serve as a primary debug environment, and `jlinkd` also complements Ozone nicely (including reusing SVD files from an existing Ozone installation). Shared in the spirit of open-source exchange (not commercial software). Due to limited hardware on hand, not every MCU or probe variant could be tested—issue reports, real-hardware test results, and PRs adding device profiles (`devices/*.yaml`) are warmly welcome.
+Core daily debugging workflows are ready to serve as a primary debug environment, and `Haltd` also complements Ozone nicely (including reusing SVD files from an existing Ozone installation). Shared in the spirit of open-source exchange (not commercial software). Due to limited hardware on hand, not every MCU or probe variant could be tested—issue reports, real-hardware test results, and PRs adding device profiles (`devices/*.yaml`) are warmly welcome.
 
 ---
 
@@ -46,9 +46,9 @@ Core daily debugging workflows are ready to serve as a primary debug environment
 - **FreeRTOS Awareness**: reads TCB and task list layouts directly from DWARF (CM3 / CM4F) with no hardcoded offsets; displays task states, priorities, stack high-water marks, and per-task call stacks.
 - **Live Watch & Timeline**:
   - **Live Watch**: read and write global/static variables, structs, and bitfields at 0–5 Hz via AHB-AP without halting the CPU, with Ozone-style shortcuts (`Ctrl+G` add to Live Watch, `Ctrl+H` add to Timeline, etc.).
-  - **Timeline (HSS / Polling / RTT)**: up to 1 kHz HSS sampling (overflow falls back to polling) rendered in an Ozone Timeline / Data Graph-inspired multi-track oscilloscope UI unifying HSS and RTT signals, with hover value boxes, sample/delta cursors, drag-and-drop track grouping, dark/light themes, `.jlrec` recording, and CSV/PNG export.
-- **RTT Terminal & Structured Decoding**: besides ANSI text, regex, `.jlinkd/rtt.yaml`, Lua, and SystemView, supports zero-config auto-decoding from ELF struct types and `key=value` text with automatic Timeline plotting (configurable in `launch.json`).
-- **VS Code Device Selection Assist**: provides J-Link device completion, core/Flash/RAM + built-in profile hover info, unknown-device warnings in `launch.json`, and `jlinkd: Select Device`.
+  - **Timeline (HSS / Polling / RTT)**: up to 1 kHz HSS sampling (overflow falls back to polling) rendered in an Ozone Timeline / Data Graph-inspired multi-track oscilloscope UI unifying HSS and RTT signals, with hover value boxes, sample/delta cursors, drag-and-drop track grouping, dark/light themes, `.hlrec` recording, and CSV/PNG export.
+- **RTT Terminal & Structured Decoding**: besides ANSI text, regex, `.haltd/rtt.yaml`, Lua, and SystemView, supports zero-config auto-decoding from ELF struct types and `key=value` text with automatic Timeline plotting (configurable in `launch.json`).
+- **VS Code Device Selection Assist**: provides J-Link device completion, core/Flash/RAM + built-in profile hover info, unknown-device warnings in `launch.json`, and `Haltd: Select Device`.
 - **CMSIS-SVD Peripherals View**: protects registers with read side-effects (such as `DR` / `RDR` / `RXDR`) from automatic reads, with field-level read-modify-write editing.
 - **C++ Type Visualizers**: built-in Lua rules for `units`, `Eigen::Matrix` / `Quaternion`, `std::array` / `std::tuple` / `std::optional` / `std::variant` / `std::span` / `std::string_view`, plus custom project rules.
 
@@ -59,12 +59,12 @@ Core daily debugging workflows are ready to serve as a primary debug environment
 ### Option 1: Prebuilt Releases (Recommended)
 
 Download the archive for your OS from Releases:
-- **Linux x64**: `jlinkd-<version>-linux-x64.vsix` + `jlinkd` binary
-- **Windows x64**: `jlinkd-<version>-win32-x64.vsix` + `jlinkd.exe` binary
+- **Linux x64**: `haltd-<version>-linux-x64.vsix` + `haltd` binary
+- **Windows x64**: `haltd-<version>-win32-x64.vsix` + `haltd.exe` binary
 
 You only need the **SEGGER J-Link Software** driver and **VS Code (≥ 1.90)** installed. Each `.vsix` bundles the backend binary—no Rust, Node.js, or VC++ runtime required on the target machine.
 
-See the **[User Guide (zh-CN)](docs/usage.md)** for `launch.json`, shortcuts, `.jlinkd/project.yaml`, `.jlinkd/rtt.yaml`, and CLI usage.
+See the **[User Guide (zh-CN)](docs/usage.md)** for `launch.json`, shortcuts, `.haltd/project.yaml`, `.haltd/rtt.yaml`, and CLI usage.
 
 ### Option 2: Build from Source
 
@@ -76,8 +76,8 @@ Requirements: Rust toolchain (`rust-version = 1.85`), Node.js / npm (for `webui/
 # 1. Build the embedded Web UI first (server embeds webui/dist at compile time)
 cd webui && npm ci && npm run build && cd ..
 
-# 2. Build and install jlinkd into ~/.cargo/bin
-cargo install --path bins/jlinkd --locked
+# 2. Build and install haltd into ~/.cargo/bin
+cargo install --path bins/haltd --locked
 
 # 3. Build the VS Code extension (optional)
 cd vscode-ext && npm ci && npm run build && cd ..
@@ -96,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File scripts\release-windows.ps1
 
 - **[User Guide (zh-CN)](docs/usage.md)**: installation, VS Code debug configuration, Live Watch / Timeline, RTT decoding, FreeRTOS / SVD, CLI commands, and troubleshooting (Linux & Windows).
 - **[J-Link Notes & Measured Behaviors (zh-CN)](docs/jlink-notes.md)**: measured J-Link quirks (SWD clock dividers, HSS budget throttling, `JLINKARM_SetWP` clearing `DEMCR`, RTT reset state, Windows `CP_ACP` paths) and `jlbench` benchmarking instructions.
-- **[License](LICENSE)**: MIT License for `jlinkd`; at runtime it dynamically loads the user-installed SEGGER J-Link library (`libjlinkarm.so` / `JLink_x64.dll`), whose use remains subject to SEGGER's own license terms.
+- **[License](LICENSE)**: MIT License for Haltd; at runtime it dynamically loads the user-installed SEGGER J-Link library (`libjlinkarm.so` / `JLink_x64.dll`), whose use remains subject to SEGGER's own license terms.
 
 ---
 

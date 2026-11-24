@@ -13,7 +13,7 @@ import {
 import { registerDeviceAssist } from "./deviceAssist";
 import { LiveWatch } from "./liveWatch";
 
-const DEBUG_TYPE = "jlinkd";
+const DEBUG_TYPE = "haltd";
 const STATUS_MS = 1000;
 const RATES = [
   { label: "Off", description: "refresh only when the target stops", rateHz: 0 },
@@ -32,16 +32,16 @@ const RTT_URL = `http://127.0.0.1:${BACKEND_PORT}/rtt`;
 /** The configured path, then the copy packaged with the extension, then
  *  ~/.cargo/bin, which VS Code started from a desktop launcher often lacks on PATH. */
 export function adapterPath(extensionPath: string): string {
-  const configured = vscode.workspace.getConfiguration("jlinkd").get<string>("path", "jlinkd");
-  if (configured !== "jlinkd") {
+  const configured = vscode.workspace.getConfiguration("haltd").get<string>("path", "haltd");
+  if (configured !== "haltd") {
     return configured;
   }
-  const executable = process.platform === "win32" ? "jlinkd.exe" : "jlinkd";
+  const executable = process.platform === "win32" ? "haltd.exe" : "haltd";
   const candidates = [path.join(extensionPath, "bin", executable), path.join(os.homedir(), ".cargo", "bin", executable)];
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? configured;
 }
 
-/** `jlinkd dap` starts the background process itself when needed. */
+/** `haltd dap` starts the background process itself when needed. */
 class AdapterFactory implements vscode.DebugAdapterDescriptorFactory {
   constructor(private readonly extensionPath: string) {}
 
@@ -69,7 +69,7 @@ class StatusBar implements vscode.Disposable {
   private readonly timer: NodeJS.Timeout;
 
   constructor(private readonly client: DataClient) {
-    this.item.command = "jlinkd.showStats";
+    this.item.command = "haltd.showStats";
     this.timer = setInterval(() => void this.refresh(), STATUS_MS);
   }
 
@@ -130,7 +130,7 @@ async function runBuildTask(name: string | undefined): Promise<boolean> {
   const tasks = await vscode.tasks.fetchTasks();
   const task = tasks.find((candidate) => candidate.name === name);
   if (!task) {
-    void vscode.window.showErrorMessage(`jlinkd: build task "${name}" was not found`);
+    void vscode.window.showErrorMessage(`Haltd: build task "${name}" was not found`);
     return false;
   }
   const execution = await vscode.tasks.executeTask(task);
@@ -147,20 +147,20 @@ async function runBuildTask(name: string | undefined): Promise<boolean> {
 async function buildAndReload(status: StatusBar): Promise<void> {
   const session = vscode.debug.activeDebugSession;
   if (!session || session.type !== DEBUG_TYPE) {
-    void vscode.window.showWarningMessage("jlinkd: no active debug session");
+    void vscode.window.showWarningMessage("Haltd: no active debug session");
     return;
   }
   status.busy("Building");
   if (!(await runBuildTask(session.configuration.preLaunchTask))) {
     status.connected(session);
-    void vscode.window.showErrorMessage("jlinkd: build failed; the target was not changed");
+    void vscode.window.showErrorMessage("Haltd: build failed; the target was not changed");
     return;
   }
   status.busy("Reloading");
   try {
-    await session.customRequest("jlinkd/reload", { elf: session.configuration.elf });
+    await session.customRequest("haltd/reload", { elf: session.configuration.elf });
   } catch (error) {
-    void vscode.window.showErrorMessage(`jlinkd: reload failed: ${String(error)}`);
+    void vscode.window.showErrorMessage(`Haltd: reload failed: ${String(error)}`);
   } finally {
     status.connected(session);
   }
@@ -192,7 +192,7 @@ async function chooseExpression(context?: VariableContext): Promise<string | und
 }
 
 function report(error: unknown): void {
-  void vscode.window.showErrorMessage(`jlinkd: ${error instanceof Error ? error.message : String(error)}`);
+  void vscode.window.showErrorMessage(`Haltd: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 interface AddedSeries {
@@ -214,13 +214,13 @@ async function addToTimelineByHss(client: DataClient, expression: string, timeli
   }
   if (failed.length > 0) {
     void vscode.window.showWarningMessage(
-      `jlinkd: ${failed.length} of ${series.length} values did not fit in HSS and were not added`,
+      `Haltd: ${failed.length} of ${series.length} values did not fit in HSS and were not added`,
     );
   }
   await timeline.show();
 }
 
-/** While a jlinkd session runs, the built-in Add to Watch commands feed Live
+/** While a Haltd session runs, the built-in Add to Watch commands feed Live
  *  Watch instead. A later command registration takes precedence over the
  *  built-in one, and disposing it restores the original for other debuggers. */
 class WatchTakeover implements vscode.Disposable {
@@ -243,7 +243,7 @@ class WatchTakeover implements vscode.Disposable {
 }
 
 function replacesWatchView(): boolean {
-  return vscode.workspace.getConfiguration("jlinkd").get<boolean>("replaceWatchView", true);
+  return vscode.workspace.getConfiguration("haltd").get<boolean>("replaceWatchView", true);
 }
 
 /** Hides the built-in Watch view. Only works while the Run and Debug view is
@@ -287,7 +287,7 @@ class BackendPanel {
     const initialKind = themeKindName(vscode.window.activeColorTheme.kind);
     const baseHref = external.toString(true);
     const iframeSrc = `${baseHref}${baseHref.includes("?") ? "&" : "?"}theme=${initialKind}`;
-    this.panel = vscode.window.createWebviewPanel(`jlinkd.${this.title}`, this.title, vscode.ViewColumn.Beside, {
+    this.panel = vscode.window.createWebviewPanel(`haltd.${this.title}`, this.title, vscode.ViewColumn.Beside, {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
@@ -343,7 +343,7 @@ class BackendPanel {
             if (val) vars[name] = val;
           }
           frame.contentWindow.postMessage({
-            type: "jlinkd:vscode-theme",
+            type: "haltd:vscode-theme",
             kind: detectKind(overrideKind),
             themeName: document.body.dataset.vscodeThemeName || "",
             vars
@@ -352,9 +352,9 @@ class BackendPanel {
         frame.addEventListener("load", () => sendTheme());
         window.addEventListener("message", (event) => {
           if (!event.data || typeof event.data !== "object") return;
-          if (event.data.type === "jlinkd:request-theme") {
+          if (event.data.type === "haltd:request-theme") {
             sendTheme();
-          } else if (event.data.type === "jlinkd:host-theme") {
+          } else if (event.data.type === "haltd:host-theme") {
             sendTheme(event.data.kind);
           }
         });
@@ -370,7 +370,7 @@ class BackendPanel {
 </html>`;
     this.themeSub = vscode.window.onDidChangeActiveColorTheme((theme) => {
       void this.panel?.webview.postMessage({
-        type: "jlinkd:host-theme",
+        type: "haltd:host-theme",
         kind: themeKindName(theme.kind),
       });
     });
@@ -441,7 +441,7 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
     configuration: vscode.DebugConfiguration,
   ): vscode.DebugConfiguration {
     if (!configuration.project && folder) {
-      configuration.project = path.join(folder.uri.fsPath, ".jlinkd", "project.yaml");
+      configuration.project = path.join(folder.uri.fsPath, ".haltd", "project.yaml");
     }
     return configuration;
   }
@@ -457,13 +457,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const rttTerminal = new RttTerminal(client);
   const timelineButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
   timelineButton.text = "$(graph-line) Timeline";
-  timelineButton.tooltip = "Open the jlinkd Timeline";
-  timelineButton.command = "jlinkd.openTimeline";
+  timelineButton.tooltip = "Open the Haltd Timeline";
+  timelineButton.command = "haltd.openTimeline";
   const rttButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 48);
   rttButton.text = "$(terminal) RTT";
   rttButton.tooltip = "Open the RTT terminal";
-  rttButton.command = "jlinkd.openRttTerminal";
-  const tree = vscode.window.createTreeView("jlinkd.liveWatch", {
+  rttButton.command = "haltd.openRttTerminal";
+  const tree = vscode.window.createTreeView("haltd.liveWatch", {
     treeDataProvider: liveWatch,
     canSelectMany: true,
   });
@@ -482,7 +482,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
   const takeover = new WatchTakeover((item) => addFromDebugger(item).catch(report));
-  const output = vscode.window.createOutputChannel("jlinkd");
+  const output = vscode.window.createOutputChannel("Haltd");
 
   const syncWatches = () => {
     if (client.connected) {
@@ -498,8 +498,8 @@ export function activate(context: vscode.ExtensionContext): void {
     rttButton,
     takeover,
     cyclesItem,
-    vscode.window.registerTreeDataProvider("jlinkd.peripherals", peripherals),
-    vscode.window.registerTreeDataProvider("jlinkd.tasks", tasks),
+    vscode.window.registerTreeDataProvider("haltd.peripherals", peripherals),
+    vscode.window.registerTreeDataProvider("haltd.tasks", tasks),
     vscode.debug.onDidChangeActiveStackItem(() => {
       if (hidePending && vscode.debug.activeStackItem) {
         hidePending = false;
@@ -539,38 +539,38 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.debug.onDidReceiveDebugSessionCustomEvent((event) => {
-      if (event.event === "jlinkd/bound" || event.event === "jlinkd/reloaded") {
+      if (event.event === "haltd/bound" || event.event === "haltd/reloaded") {
         syncWatches();
-      } else if (event.event === "jlinkd/fault") {
+      } else if (event.event === "haltd/fault") {
         void showFault(event.body, output);
-      } else if (event.event === "jlinkd/cycles") {
+      } else if (event.event === "haltd/cycles") {
         cyclesItem.text = describeCycles(event.body);
         cyclesItem.show();
       }
     }),
-    vscode.commands.registerCommand("jlinkd.buildAndReload", () => buildAndReload(status)),
-    vscode.commands.registerCommand("jlinkd.refreshPeripherals", () => peripherals.refresh()),
-    vscode.commands.registerCommand("jlinkd.refreshTasks", () => tasks.refresh()),
-    vscode.commands.registerCommand("jlinkd.readRegister", (node: PeripheralNode) => {
+    vscode.commands.registerCommand("haltd.buildAndReload", () => buildAndReload(status)),
+    vscode.commands.registerCommand("haltd.refreshPeripherals", () => peripherals.refresh()),
+    vscode.commands.registerCommand("haltd.refreshTasks", () => tasks.refresh()),
+    vscode.commands.registerCommand("haltd.readRegister", (node: PeripheralNode) => {
       if (node.kind === "register") {
         peripherals.readRegister(node).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.writePeripheral", (node: PeripheralNode) => {
+    vscode.commands.registerCommand("haltd.writePeripheral", (node: PeripheralNode) => {
       if (node.kind !== "peripheral") {
         peripherals.write(node).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.addToWatch", async (item?: VariableContext) => {
+    vscode.commands.registerCommand("haltd.addToWatch", async (item?: VariableContext) => {
       const expression = await chooseExpression(item);
       if (expression) {
         await liveWatch.add(expression).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.addSelectionToWatch", () =>
+    vscode.commands.registerCommand("haltd.addSelectionToWatch", () =>
       addFromDebugger().catch(report),
     ),
-    vscode.commands.registerCommand("jlinkd.addToTimeline", async (item?: VariableContext | WatchInfo) => {
+    vscode.commands.registerCommand("haltd.addToTimeline", async (item?: VariableContext | WatchInfo) => {
       if (item && "expr" in item && !item.plottable) {
         report(new Error(`${item.name} cannot be plotted by itself`));
         return;
@@ -581,7 +581,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await addToTimelineByHss(client, expression, timeline).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.addSelectionToTimeline", async (source?: string) => {
+    vscode.commands.registerCommand("haltd.addSelectionToTimeline", async (source?: string) => {
       if (source === "liveWatch" || (source !== "editor" && !vscode.window.activeTextEditor && tree.selection.length > 0)) {
         const selected = tree.selection;
         if (selected.length === 0) {
@@ -595,7 +595,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         if (skipped.length > 0) {
           void vscode.window.showWarningMessage(
-            `jlinkd: ${skipped.length} selected item(s) cannot be plotted directly`,
+            `Haltd: ${skipped.length} selected item(s) cannot be plotted directly`,
           );
         }
         for (const item of plottable) {
@@ -608,7 +608,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await addToTimelineByHss(client, expression, timeline).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.removeSelectedWatch", async () => {
+    vscode.commands.registerCommand("haltd.removeSelectedWatch", async () => {
       const selected = tree.selection;
       if (selected.length === 0) {
         return;
@@ -619,7 +619,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await liveWatch.remove(item).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.editSelectedWatch", async (trigger?: string) => {
+    vscode.commands.registerCommand("haltd.editSelectedWatch", async (trigger?: string) => {
       if (tree.selection.length !== 1) {
         return;
       }
@@ -638,7 +638,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await liveWatch.write(item, value).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.setSelectedWatchRate", async () => {
+    vscode.commands.registerCommand("haltd.setSelectedWatchRate", async () => {
       const selected = tree.selection;
       if (selected.length === 0) {
         return;
@@ -654,7 +654,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await liveWatch.setRate(item, choice.rateHz).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.copySelectedWatch", async () => {
+    vscode.commands.registerCommand("haltd.copySelectedWatch", async () => {
       const selected = tree.selection;
       if (selected.length === 0) {
         return;
@@ -662,42 +662,42 @@ export function activate(context: vscode.ExtensionContext): void {
       const text = selected.map((item) => `${item.expr} = ${item.value}`).join("\n");
       await vscode.env.clipboard.writeText(text);
     }),
-    vscode.commands.registerCommand("jlinkd.removeWatch", (item: WatchInfo) =>
+    vscode.commands.registerCommand("haltd.removeWatch", (item: WatchInfo) =>
       liveWatch.remove(item).catch(report),
     ),
-    vscode.commands.registerCommand("jlinkd.setWatchRate", async (item: WatchInfo) => {
+    vscode.commands.registerCommand("haltd.setWatchRate", async (item: WatchInfo) => {
       const choice = await vscode.window.showQuickPick(RATES, { placeHolder: `Refresh rate for ${item.name}` });
       if (choice) {
         await liveWatch.setRate(item, choice.rateHz).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.writeWatch", async (item: WatchInfo) => {
+    vscode.commands.registerCommand("haltd.writeWatch", async (item: WatchInfo) => {
       const value = await vscode.window.showInputBox({ prompt: `New value for ${item.name}`, value: item.value });
       if (value !== undefined) {
         await liveWatch.write(item, value).catch(report);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.openTimeline", () => timeline.show().catch(report)),
-    vscode.commands.registerCommand("jlinkd.openRttTerminal", () => rttTerminal.show()),
-    vscode.commands.registerCommand("jlinkd.openRttPanel", () => rttPanel.show().catch(report)),
-    vscode.commands.registerCommand("jlinkd.openTimelineInBrowser", () =>
+    vscode.commands.registerCommand("haltd.openTimeline", () => timeline.show().catch(report)),
+    vscode.commands.registerCommand("haltd.openRttTerminal", () => rttTerminal.show()),
+    vscode.commands.registerCommand("haltd.openRttPanel", () => rttPanel.show().catch(report)),
+    vscode.commands.registerCommand("haltd.openTimelineInBrowser", () =>
       vscode.env.openExternal(vscode.Uri.parse(BACKEND_URL)),
     ),
-    vscode.commands.registerCommand("jlinkd.startRecording", async () => {
+    vscode.commands.registerCommand("haltd.startRecording", async () => {
       try {
         if (recording) {
           const result = await client.call<{ path: string; samples: number }>("record.stop");
-          void vscode.window.showInformationMessage(`jlinkd: saved ${result.samples} samples to ${result.path}`);
+          void vscode.window.showInformationMessage(`Haltd: saved ${result.samples} samples to ${result.path}`);
         } else {
           await client.call("record.start");
-          void vscode.window.showInformationMessage("jlinkd: recording; run this command again to stop");
+          void vscode.window.showInformationMessage("Haltd: recording; run this command again to stop");
         }
         recording = !recording;
       } catch (error) {
         report(error);
       }
     }),
-    vscode.commands.registerCommand("jlinkd.showStats", async () => {
+    vscode.commands.registerCommand("haltd.showStats", async () => {
       try {
         output.clear();
         output.appendLine(JSON.stringify(await client.call("session.stats"), null, 2));

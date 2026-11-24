@@ -324,7 +324,7 @@ impl Visualizers {
             )?;
             lua.globals().set("__host", host)?;
 
-            let apply: Function = lua.globals().get("__jlinkd_apply")?;
+            let apply: Function = lua.globals().get("__haltd_apply")?;
             let (summary, children): (Option<String>, Option<Table>) = match apply
                 .call::<mlua::MultiValue>((type_name, 0usize, resolving))?
                 .into_vec()

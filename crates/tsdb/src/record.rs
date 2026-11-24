@@ -1,4 +1,4 @@
-//! `.jlrec` recordings: a tagged stream of series metadata, sample blocks and
+//! `.hlrec` recordings: a tagged stream of series metadata, sample blocks and
 //! events, appended by a background thread so samplers never touch the disk.
 
 use std::collections::BTreeMap;
@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use crate::{Event, SeriesMeta, Tsdb};
 
-const MAGIC: &[u8; 8] = b"JLREC\x001\n";
+const MAGIC: &[u8; 8] = b"HLREC\x001\n";
+/// Accepted when reading recordings written before the rename to Haltd.
+const LEGACY_MAGIC: &[u8; 8] = b"JLREC\x001\n";
 const TAG_SERIES: u8 = 1;
 const TAG_SAMPLES: u8 = 2;
 const TAG_EVENT: u8 = 3;
@@ -178,8 +180,8 @@ pub fn read_recording(path: &Path) -> io::Result<Recording> {
     let mut input = BufReader::new(File::open(path)?);
     let mut magic = [0u8; 8];
     input.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(io::Error::other("not a jlinkd recording"));
+    if &magic != MAGIC && &magic != LEGACY_MAGIC {
+        return Err(io::Error::other("not a haltd recording"));
     }
     let mut recording = Recording::default();
     loop {
@@ -224,7 +226,7 @@ mod tests {
     use serde_json::json;
 
     fn scratch(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("jlinkd-rec-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!("haltd-rec-{}-{name}", std::process::id()))
     }
 
     #[test]
@@ -232,7 +234,7 @@ mod tests {
         let tsdb = Arc::new(Tsdb::default());
         let a = tsdb.create_series("a".to_owned(), None, None);
         a.push(1, 100.0);
-        let path = scratch("during.jlrec");
+        let path = scratch("during.hlrec");
         let recorder = Recorder::start(tsdb.clone(), &path).unwrap();
         a.push(2, 2.0);
         let b = tsdb.create_series("b".to_owned(), None, None);
@@ -253,7 +255,7 @@ mod tests {
 
     #[test]
     fn other_files_are_rejected() {
-        let path = scratch("bad.jlrec");
+        let path = scratch("bad.hlrec");
         std::fs::write(&path, b"not this format").unwrap();
         assert!(read_recording(&path).is_err());
     }
@@ -262,12 +264,30 @@ mod tests {
     fn a_tail_cut_inside_a_frame_is_an_error() {
         let tsdb = Arc::new(Tsdb::default());
         let a = tsdb.create_series("a".to_owned(), None, None);
-        let path = scratch("cut.jlrec");
+        let path = scratch("cut.hlrec");
         let recorder = Recorder::start(tsdb.clone(), &path).unwrap();
         a.push(1, 1.0);
         recorder.stop().unwrap();
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
         assert!(read_recording(&path).is_err());
+    }
+
+    #[test]
+    fn legacy_jlrec_recordings_still_load() {
+        let tsdb = Arc::new(Tsdb::default());
+        let a = tsdb.create_series("a".to_owned(), None, None);
+        let path = scratch("legacy.jlrec");
+        let recorder = Recorder::start(tsdb.clone(), &path).unwrap();
+        a.push(1, 4.5);
+        recorder.stop().unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..MAGIC.len()], MAGIC);
+        bytes[..LEGACY_MAGIC.len()].copy_from_slice(LEGACY_MAGIC);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let recording = read_recording(&path).unwrap();
+        assert_eq!(recording.samples[&a.id()], [(1, 4.5)]);
     }
 }

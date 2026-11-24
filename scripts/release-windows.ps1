@@ -26,20 +26,20 @@ Invoke-Step "vscode-ext" "npm.cmd" @("run", "build")
 
 # A static C runtime, so the target machine needs no Visual C++ redistributable.
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
-Invoke-Step "." "cargo" @("build", "--profile", "dist", "-p", "jlinkd", "--locked")
+Invoke-Step "." "cargo" @("build", "--profile", "dist", "-p", "haltd", "--locked")
 Remove-Item Env:RUSTFLAGS
 
 $version = (Get-Content "vscode-ext\package.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
-$name = "jlinkd-$version-windows-x64"
+$name = "haltd-$version-windows-x64"
 $output = Join-Path $root "release\$name"
 if (Test-Path "release") { Remove-Item "release" -Recurse -Force -Confirm:$false }
 New-Item -ItemType Directory -Force $output | Out-Null
 New-Item -ItemType Directory -Force "vscode-ext\bin" | Out-Null
-Copy-Item "target\dist\jlinkd.exe" "vscode-ext\bin\jlinkd.exe"
-Copy-Item "target\dist\jlinkd.exe" "$output\jlinkd.exe"
+Copy-Item "target\dist\haltd.exe" "vscode-ext\bin\haltd.exe"
+Copy-Item "target\dist\haltd.exe" "$output\haltd.exe"
 Copy-Item "docs\usage.md" "$output\README.md"
 
-$vsix = "$output\jlinkd-$version-win32-x64.vsix"
+$vsix = "$output\haltd-$version-win32-x64.vsix"
 Invoke-Step "vscode-ext" "npx.cmd" @("--yes", "@vscode/vsce@3", "package", "--target", "win32-x64",
     "--no-dependencies", "--allow-missing-repository", "--skip-license", "--out", $vsix)
 

@@ -13,20 +13,20 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Root of everything jlinkd writes by itself: index cache, logs, recordings.
-/// `$JLINKD_CACHE_DIR`, or else the platform default.
+/// Root of everything haltd writes by itself: index cache, logs, recordings.
+/// `$HALTD_CACHE_DIR`, or else the platform default.
 pub fn cache_root() -> Option<PathBuf> {
-    env_path("JLINKD_CACHE_DIR").or_else(default_root)
+    env_path("HALTD_CACHE_DIR").or_else(default_root)
 }
 
 #[cfg(not(windows))]
 fn default_root() -> Option<PathBuf> {
     env_path("XDG_CACHE_HOME")
-        .map(|base| base.join("jlinkd"))
-        .or_else(|| env_path("HOME").map(|home| home.join(".cache").join("jlinkd")))
+        .map(|base| base.join("haltd"))
+        .or_else(|| env_path("HOME").map(|home| home.join(".cache").join("haltd")))
 }
 
-/// `jlinkd` in the user's Documents folder, wherever that has been moved to.
+/// `haltd` in the user's Documents folder, wherever that has been moved to.
 #[cfg(windows)]
 fn default_root() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
@@ -45,7 +45,7 @@ fn default_root() -> Option<PathBuf> {
         CoTaskMemFree(raw.cast());
         path
     };
-    Some(PathBuf::from(documents?).join("jlinkd"))
+    Some(PathBuf::from(documents?).join("haltd"))
 }
 
 /// Canonical spelling: `/` separators and a lower-case drive letter.
@@ -115,7 +115,7 @@ mod tests {
     fn default_cache_root_is_inside_documents() {
         let root = default_root().unwrap();
         assert!(root.is_absolute(), "{root:?}");
-        assert!(root.ends_with("jlinkd"), "{root:?}");
+        assert!(root.ends_with("haltd"), "{root:?}");
     }
 
     #[test]
