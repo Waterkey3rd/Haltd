@@ -3,7 +3,7 @@
   "displayName": "Haltd",
   "description": "STM32 debugging through a long-running J-Link backend",
   "version": "0.7.0",
-  "publisher": "haltd",
+  "publisher": "WaterKeyqwq",
   "license": "MIT",
   "icon": "icon.png",
   "engines": {
