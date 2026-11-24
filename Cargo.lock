@@ -381,7 +381,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "engine"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "probe-api",
  "probe-jlink",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "haltd"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -629,7 +629,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jlbench"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "probe-api"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "probe-jlink"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libloading",
  "probe-api",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "probe-mock"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "probe-api",
  "serde",
@@ -1024,7 +1024,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rtt"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "mlua",
  "probe-api",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "sampler"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "engine",
  "probe-api",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "base64",
@@ -1305,14 +1305,14 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "svd"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "roxmltree",
 ]
 
 [[package]]
 name = "symbols"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bincode",
  "blake3",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1583,7 +1583,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visualizer"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "mlua",
  "probe-api",
