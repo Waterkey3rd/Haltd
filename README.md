@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File scripts\release-windows.ps1
 
 ## 文档索引
 
+- **[架构设计文档](docs/DESIGN.md)**：总体架构、核心模块设计（符号索引、`-O2` 单步、HSS 调度与时钟同步、RTT 解码、TSDB）、DAP / WebSocket 协议与配置文件规范。
 - **[使用手册](docs/usage.md)**：安装、VS Code 调试配置、Live Watch / Timeline、RTT 解码、FreeRTOS / SVD、CLI 命令与常见问题（覆盖 Linux 与 Windows）。
 - **[J-Link 实测特性与注意事项](docs/jlink-notes.md)**：开发过程中实测出来的 J-Link 行为与坑（SWD 分频、HSS 超预算降频、`JLINKARM_SetWP` 清空 `DEMCR`、RTT 复位残留、Windows 代码页等），以及 `jlbench` 实测方法。
 - **[开源许可证](LICENSE)**：项目本身采用 MIT License；运行时通过动态加载调用用户本机安装的 SEGGER J-Link 驱动库（`libjlinkarm.so` / `JLink_x64.dll`），使用 J-Link 驱动需遵守 SEGGER 对应的许可协议。

@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File scripts\release-windows.ps1
 
 ## Documentation
 
+- **[Architecture & Design (zh-CN)](docs/DESIGN.md)**: overall architecture, core modules (symbol indexing, `-O2` stepping, HSS planning & clock sync, RTT decoding, TSDB), DAP / WebSocket protocols, and configuration specs.
 - **[User Guide (zh-CN)](docs/usage.md)**: installation, VS Code debug configuration, Live Watch / Timeline, RTT decoding, FreeRTOS / SVD, CLI commands, and troubleshooting (Linux & Windows).
 - **[J-Link Notes & Measured Behaviors (zh-CN)](docs/jlink-notes.md)**: measured J-Link quirks (SWD clock dividers, HSS budget throttling, `JLINKARM_SetWP` clearing `DEMCR`, RTT reset state, Windows `CP_ACP` paths) and `jlbench` benchmarking instructions.
 - **[License](LICENSE)**: MIT License for Haltd; at runtime it dynamically loads the user-installed SEGGER J-Link library (`libjlinkarm.so` / `JLink_x64.dll`), whose use remains subject to SEGGER's own license terms.

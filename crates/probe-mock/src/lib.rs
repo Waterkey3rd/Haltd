@@ -1,5 +1,5 @@
 //! Simulated probe for CI: a memory image with scripted run control, plus
-//! recording and replay of real probe sessions (DESIGN §14).
+//! recording and replay of real probe sessions (DESIGN §13).
 
 mod record;
 

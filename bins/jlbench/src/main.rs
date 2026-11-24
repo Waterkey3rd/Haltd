@@ -1,4 +1,4 @@
-//! Measures what a J-Link and target can actually do (DESIGN §13, M0).
+//! Measures what a J-Link and target can actually do (DESIGN §11).
 //!
 //! Read-only and sampling tests always run. Anything that stops the core or
 //! writes flash needs an explicit flag, since the target may be driving

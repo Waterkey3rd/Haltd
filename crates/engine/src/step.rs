@@ -320,7 +320,7 @@ impl Session {
 
     /// The kind of temporary breakpoint to escape with after `steps`, if any.
     /// FPB is preferred; flash is reserved for genuinely long-running lines
-    /// (DESIGN §5.5.3, §15).
+    /// (DESIGN §5.5.2, §5.5.3).
     fn escape_kind(&self, targets: usize, steps: u32) -> Option<BpKind> {
         if targets <= self.free_comparators() {
             Some(BpKind::Hw)
