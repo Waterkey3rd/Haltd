@@ -89,6 +89,18 @@ export interface TimelineState {
   lastQuery: number;
   lastColumns: { result: QueryResult; xs: number[] } | null;
   recording: boolean;
+  recordingStartedAt: number | null;
+  recordingSamples: number;
+  recordingDropped: number;
+  lastRecording: {
+    path: string;
+    startedAt: number | null;
+    endedAt: number | null;
+    samples: number;
+    dropped: number;
+  } | null;
+  activePresetName: string | null;
+  savedPresetSnapshot: string | null;
   exprHistory: string[];
   /** Currently dragged signal or RTT signal name. */
   dragging:
@@ -186,6 +198,12 @@ export function createInitialState(canvasTheme: CanvasTheme): TimelineState {
     lastQuery: 0,
     lastColumns: null,
     recording: false,
+    recordingStartedAt: null,
+    recordingSamples: 0,
+    recordingDropped: 0,
+    lastRecording: null,
+    activePresetName: null,
+    savedPresetSnapshot: null,
     exprHistory: loadExprHistory(),
     dragging: null,
   };

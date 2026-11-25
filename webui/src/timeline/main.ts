@@ -21,10 +21,12 @@ import {
   attachSharedAxisInteractions,
   updateCursorInspector,
 } from "./cursors";
+import { ExportUiController } from "./exportCsv";
 import { isInputElement, resolveShortcut } from "./keymap";
 import { renderRttSignalsDrawer, updateLegendReadouts, type LegendCallbacks } from "./legend";
 import { fitTimeRange, FOLLOW_LAG_S, spanSeconds, stepDivision } from "./math";
 import { attachOverviewScrubber, drawOverview } from "./overview";
+import { PresetController } from "./presets";
 import {
   addPin,
   clearAllPins,
@@ -37,7 +39,6 @@ import {
   type RttSignalInfo,
 } from "./state";
 import {
-  exportVisibleCsv,
   setConnectionStatus,
   showRate,
   stopFollowing,
@@ -66,6 +67,14 @@ const NS = 1e9;
 const themeManager = new ThemeManager();
 const state = createInitialState(themeManager.getCanvasTheme());
 const client = new Client();
+
+let exportUi: ExportUiController | null = null;
+let presetController: PresetController | null = null;
+
+function setMeasureText(text: string): void {
+  const m = document.getElementById("measure");
+  if (m) m.textContent = text;
+}
 
 async function loadSeries(): Promise<void> {
   const reply = await client.call<{ series: SeriesInfo[] }>("timeline.list");
@@ -267,7 +276,7 @@ const contextMenuActions: ContextMenuActions = {
   toggleHideSignal: (item) => toggleSignalHide(item),
   toggleSoloSignal: (item) => toggleSignalSolo(item),
   removeSignal: (item) => void removeSignal(item),
-  exportVisibleCsv: () => void exportVisibleCsv(client, state),
+  exportVisibleCsv: () => exportUi?.openPopover(),
 };
 
 const legendCallbacks: LegendCallbacks = {
@@ -305,6 +314,7 @@ const legendCallbacks: LegendCallbacks = {
     }
     syncTrackYControls(state, track);
     if (state.lastColumns) drawQueryResult(state, state.lastColumns.result);
+    presetController?.syncDirtyIndicator();
   },
   onManualYRange: (trackName, min, max) => {
     const track = state.tracks.find((t) => t.name === trackName);
@@ -314,6 +324,7 @@ const legendCallbacks: LegendCallbacks = {
     cfg.min = min;
     cfg.max = max;
     applyTrackYScale(state, track);
+    presetController?.syncDirtyIndicator();
   },
   onToggleCollapse: (trackName) => {
     const cfg = getGroupYScale(state, trackName);
@@ -383,6 +394,8 @@ function rebuild(): void {
   state.canvasTheme = themeManager.getCanvasTheme();
   rebuildTracks(state, legendCallbacks, interactionCallbacks);
   updateSuggestions(state);
+  presetController?.syncDirtyIndicator();
+  presetController?.renderEmptyQuickLaunch();
 }
 
 function applyEvent(event: TimelineEvent): void {
@@ -414,6 +427,14 @@ interface StatsReply {
   poll?: { cycles: number; errors: number };
 }
 
+interface RecordingInfoReply {
+  active: boolean;
+  path: string;
+  startedNs: number;
+  samples: number;
+  dropped: number;
+}
+
 async function refreshStatus(): Promise<void> {
   try {
     const status = await client.call<{
@@ -422,6 +443,8 @@ async function refreshStatus(): Promise<void> {
       device?: string;
       speedKhz?: number;
       recording?: string | null;
+      recordingInfo?: RecordingInfoReply | null;
+      lastRecordingPath?: string | null;
     }>("session.status");
     const estimate = nowSeconds(state);
     const reported = status.nowNs / NS;
@@ -429,8 +452,40 @@ async function refreshStatus(): Promise<void> {
       state.serverNow = reported;
       state.serverNowAt = performance.now();
     }
-    if (typeof status.recording === "string") {
+    if (status.recordingInfo?.active) {
+      state.recordingStartedAt = status.recordingInfo.startedNs / NS;
+      state.recordingSamples = status.recordingInfo.samples;
+      state.recordingDropped = status.recordingInfo.dropped;
       syncRecordButton(state, true);
+    } else if (typeof status.recording === "string") {
+      syncRecordButton(state, true);
+    } else if (state.recording) {
+      // Stopped externally (e.g. VS Code command palette).
+      const endedAt = nowSeconds(state);
+      const path = status.lastRecordingPath ?? "";
+      if (path) {
+        state.lastRecording = {
+          path,
+          startedAt: state.recordingStartedAt,
+          endedAt,
+          samples: state.recordingSamples,
+          dropped: state.recordingDropped,
+        };
+        exportUi?.showRecordingBanner();
+      }
+      state.recordingStartedAt = null;
+      syncRecordButton(state, false);
+    } else {
+      syncRecordButton(state, false);
+      if (status.lastRecordingPath && !state.lastRecording) {
+        state.lastRecording = {
+          path: status.lastRecordingPath,
+          startedAt: null,
+          endedAt: null,
+          samples: 0,
+          dropped: 0,
+        };
+      }
     }
     const stats = await client.call<StatsReply>("session.stats");
     if (status.connected) {
@@ -470,6 +525,7 @@ async function startSession(): Promise<void> {
   reply.events.forEach(applyEvent);
   await refreshStatus();
   showRate(await client.call<RateReply>("timeline.rate"));
+  await presetController?.refreshFromServer();
   await loadSeries();
 }
 
@@ -541,6 +597,19 @@ themeManager.onChange((newCanvasTheme) => {
   rebuild();
 });
 
+exportUi = new ExportUiController(state, {
+  zoomToRange,
+  setMeasureText,
+});
+
+presetController = new PresetController(client, state, {
+  loadSeries,
+  refresh,
+  rebuild,
+  showRateReply: showRate,
+  setMeasureText,
+});
+
 wireToolbar(client, state, themeManager, {
   loadSeries,
   refresh,
@@ -549,6 +618,9 @@ wireToolbar(client, state, themeManager, {
   resizeAll: () => resizeAllTracks(state),
   clearCursors,
   zoomToRange,
+  onOpenExport: () => exportUi?.openPopover(),
+  onRateChanged: () => presetController?.syncDirtyIndicator(),
+  onRecordingStopped: () => exportUi?.showRecordingBanner(),
 });
 
 initContextMenuDismiss();
@@ -665,8 +737,14 @@ window.addEventListener("keydown", (event) => {
     case "clearCursors": {
       const help = document.getElementById("help-modal");
       const events = document.getElementById("events-popover");
+      const presetPop = document.getElementById("preset-popover");
+      const exportPop = document.getElementById("export-popover");
       if (help && !help.hidden) {
         help.hidden = true;
+      } else if (presetPop && !presetPop.hidden) {
+        presetController?.closePopover();
+      } else if (exportPop && !exportPop.hidden) {
+        exportUi?.closePopover();
       } else if (events && !events.hidden) {
         events.hidden = true;
       } else {
@@ -707,6 +785,9 @@ syncDivisionControls(state);
 updateSuggestions(state);
 client.connect();
 setInterval(() => void refreshStatus(), STATUS_MS);
+setInterval(() => {
+  if (state.recording) syncRecordButton(state, true);
+}, 500);
 setInterval(() => {
   if (client) {
     void client

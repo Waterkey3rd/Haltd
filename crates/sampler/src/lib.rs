@@ -69,7 +69,7 @@ impl Default for SamplingConfig {
     fn default() -> Self {
         Self {
             hss_period_us: 1000,
-            watch_rate_hz: 10,
+            watch_rate_hz: 5,
         }
     }
 }
@@ -135,9 +135,20 @@ pub struct SeriesStatus {
     pub series_id: u32,
     pub name: String,
     pub root: String,
+    pub mode: Mode,
     pub actual_mode: &'static str,
     pub rate_hz: f64,
     pub error: Option<String>,
+}
+
+/// Signal definition used for batch preset application.
+#[derive(Clone, Debug)]
+pub struct BatchSignal {
+    pub expr: String,
+    pub mode: Mode,
+    pub group: Option<String>,
+    pub color: Option<String>,
+    pub priority: i32,
 }
 
 struct SeriesDef {
@@ -167,6 +178,7 @@ struct Counters {
 #[derive(Default)]
 struct State {
     bound: Option<Arc<Bound>>,
+    last_workspace: Option<PathBuf>,
     defs: Vec<SeriesDef>,
     next_order: u64,
     hss_task: Option<PeriodicId>,
@@ -364,6 +376,9 @@ impl Sampler {
         });
         let mut state = self.state.lock().expect("sampler lock");
         self.stop_tasks(&mut state);
+        if let Some(workspace) = &bound.binding.workspace {
+            state.last_workspace = Some(workspace.clone());
+        }
         let handle = bound.binding.handle.clone();
         state.hss_caps = handle
             .call_blocking(Priority::P0, |probe: &mut dyn Probe| {
@@ -635,11 +650,28 @@ impl Sampler {
             .collect()
     }
 
+    pub fn workspace(&self) -> Option<PathBuf> {
+        let state = self.state.lock().expect("sampler lock");
+        state
+            .bound
+            .as_ref()
+            .and_then(|bound| bound.binding.workspace.clone())
+            .or_else(|| state.last_workspace.clone())
+    }
+
+    pub fn complete_globals(&self, query: &str, limit: usize) -> Vec<symbols::GlobalCompletion> {
+        let Some(bound) = self.bound() else {
+            return Vec::new();
+        };
+        bound.binding.db.complete_globals(query, limit)
+    }
+
     fn status(state: &State, def: &SeriesDef) -> SeriesStatus {
         SeriesStatus {
             series_id: def.series.id(),
             name: def.series.meta().name,
             root: def.root.clone(),
+            mode: def.mode,
             actual_mode: def.actual,
             rate_hz: match def.actual {
                 "hss" => state.planned_rates.0,
@@ -748,6 +780,122 @@ impl Sampler {
         Ok(())
     }
 
+    /// Remove every sampled expression in one pass with a single HSS replan.
+    pub fn timeline_clear(self: &Arc<Self>) {
+        let mut state = self.state.lock().expect("sampler lock");
+        for def in state.defs.drain(..) {
+            self.tsdb.remove_series(def.series.id());
+        }
+        self.replan(&mut state);
+    }
+
+    /// Apply a batch of Timeline signals (replacing or appending) and replan once.
+    /// Individual unresolved expressions stay visible with an error instead of
+    /// aborting the whole preset.
+    pub fn timeline_apply_batch(
+        self: &Arc<Self>,
+        replace: bool,
+        rate_hz: Option<u32>,
+        items: &[BatchSignal],
+    ) -> Result<Vec<SeriesStatus>, String> {
+        let mut state = self.state.lock().expect("sampler lock");
+        if let Some(hz) = rate_hz {
+            let max = state.hss_caps.map_or(1000, |caps| caps.max_freq_hz);
+            if hz != 0 && !(MIN_RATE_HZ..=max).contains(&hz) {
+                return Err(format!(
+                    "the rate must be off, or {MIN_RATE_HZ} to {max} Hz"
+                ));
+            }
+            state.chosen_rate = Some(hz);
+        }
+        if replace {
+            for def in state.defs.drain(..) {
+                self.tsdb.remove_series(def.series.id());
+            }
+        }
+        let bound = state.bound.clone();
+        let mut memory = bound
+            .as_ref()
+            .map(|b| HaltedMemory::with_priority(b.binding.handle.clone(), Priority::P3));
+        let mut created = Vec::new();
+        for item in items {
+            let resolved = match (&bound, memory.as_mut()) {
+                (Some(b), Some(mem)) => {
+                    let rules = b.rules.lock().expect("rules lock");
+                    resolve_leaves(&b.binding.db, rules.as_ref(), &item.expr, mem)
+                }
+                _ => Err("no target is connected".to_owned()),
+            };
+            match resolved {
+                Ok(leaves) => {
+                    for leaf in leaves {
+                        if state
+                            .defs
+                            .iter()
+                            .any(|d| d.root == item.expr && d.leaf_name == leaf.name)
+                        {
+                            continue;
+                        }
+                        let series = self.tsdb.create_series(
+                            leaf.name.clone(),
+                            item.group.clone(),
+                            item.color.clone(),
+                        );
+                        created.push(series.id());
+                        let order = state.next_order;
+                        state.next_order += 1;
+                        state.defs.push(SeriesDef {
+                            series,
+                            root: item.expr.clone(),
+                            leaf_name: leaf.name.clone(),
+                            mode: item.mode,
+                            priority: item.priority,
+                            order,
+                            resolved: Some(leaf),
+                            actual: "none",
+                            error: None,
+                        });
+                    }
+                }
+                Err(error) => {
+                    if state
+                        .defs
+                        .iter()
+                        .any(|d| d.root == item.expr && d.leaf_name == item.expr)
+                    {
+                        continue;
+                    }
+                    let series = self.tsdb.create_series(
+                        item.expr.clone(),
+                        item.group.clone(),
+                        item.color.clone(),
+                    );
+                    created.push(series.id());
+                    let order = state.next_order;
+                    state.next_order += 1;
+                    state.defs.push(SeriesDef {
+                        series,
+                        root: item.expr.clone(),
+                        leaf_name: item.expr.clone(),
+                        mode: item.mode,
+                        priority: item.priority,
+                        order,
+                        resolved: None,
+                        actual: "none",
+                        error: Some(error),
+                    });
+                }
+            }
+        }
+        self.replan(&mut state);
+        Ok(state
+            .defs
+            .iter()
+            .filter(|d| created.contains(&d.series.id()))
+            .map(|def| Self::status(&state, def))
+            .collect())
+    }
+
     pub fn timeline_list(&self) -> Vec<SeriesStatus> {
         let state = self.state.lock().expect("sampler lock");
         state
@@ -829,7 +977,8 @@ impl Sampler {
         scalar: Scalar,
         text: &str,
     ) -> Result<(), String> {
-        engine::session::write_scalar(&bound.binding.handle, place, scalar, text)
+        let encoded = bound.binding.db.encode_place_value(&place, text)?;
+        engine::session::write_scalar_bits(&bound.binding.handle, place, scalar, encoded)
     }
 
     pub fn note_event(&self, kind: EventKind, detail: serde_json::Value) {
@@ -842,5 +991,38 @@ impl Sampler {
     /// The target has stopped, however briefly: show watches at their new values.
     pub fn note_stopped(&self) {
         self.watches.refresh_on_stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_batch_handles_disconnected_signals_and_clear() {
+        let tsdb = Arc::new(Tsdb::default());
+        let sampler = Sampler::new(tsdb.clone());
+        let added = sampler
+            .timeline_apply_batch(
+                true,
+                Some(200),
+                &[BatchSignal {
+                    expr: "g_val".to_owned(),
+                    mode: Mode::Hss,
+                    group: Some("Motor".to_owned()),
+                    color: Some("#4dabf7".to_owned()),
+                    priority: 0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].mode, Mode::Hss);
+        assert_eq!(added[0].actual_mode, "none");
+        assert!(added[0].error.is_some());
+        assert_eq!(sampler.rate().rate_hz, 200);
+
+        sampler.timeline_clear();
+        assert!(sampler.timeline_list().is_empty());
+        assert!(tsdb.list().is_empty());
     }
 }

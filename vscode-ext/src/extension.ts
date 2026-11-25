@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
-import { BACKEND_PORT, DataClient, type WatchInfo } from "./dataClient";
+import { BACKEND_PORT, DataClient } from "./dataClient";
 import {
   describeCycles,
   PeripheralsView,
@@ -12,18 +12,10 @@ import {
 } from "./debugViews";
 import { registerDeviceAssist } from "./deviceAssist";
 import { DiagnosticsManager } from "./errors";
-import { LiveWatch } from "./liveWatch";
+import { LiveWatchController } from "./liveWatch";
 
 const DEBUG_TYPE = "haltd";
 const STATUS_MS = 1000;
-const RATES = [
-  { label: "Off", description: "refresh only when the target stops", rateHz: 0 },
-  { label: "1 Hz", rateHz: 1 },
-  { label: "2 Hz", rateHz: 2 },
-  { label: "3 Hz", rateHz: 3 },
-  { label: "4 Hz", rateHz: 4 },
-  { label: "5 Hz", rateHz: 5 },
-];
 const RTT_TERMINAL_CHANNEL = 0;
 const BUILT_IN_WATCH_VIEW = "workbench.debug.watchExpressionsView";
 const BUILT_IN_ADD_TO_WATCH = ["debug.addToWatchExpressions", "editor.debug.action.selectionToWatch"];
@@ -85,10 +77,6 @@ class StatusBar implements vscode.Disposable {
     this.busyText = text;
     this.item.text = `$(sync~spin) ${text}`;
     this.item.show();
-  }
-
-  idle(): void {
-    this.busyText = undefined;
   }
 
   hide(): void {
@@ -276,15 +264,105 @@ function themeKindName(kind: vscode.ColorThemeKind): string {
   }
 }
 
-/** A page served by the backend, shown inside the editor. */
+interface SaveExportRequest {
+  type: "haltd:save-export";
+  requestId: number;
+  kind: "csv" | "hlrec" | "png";
+  defaultFilename: string;
+  params?: Record<string, unknown>;
+  dataUrl?: string;
+}
+
+/** A page served by the backend, shown inside the editor with native save-dialog bridge. */
 class BackendPanel {
   private panel: vscode.WebviewPanel | undefined;
   private themeSub: vscode.Disposable | undefined;
+  private lastSaveDir: string | undefined;
 
   constructor(
     private readonly title: string,
     private readonly url: string,
+    private readonly client?: DataClient,
+    private readonly onError?: (error: unknown, context: string) => void,
   ) {}
+
+  private defaultSaveUri(filename: string): vscode.Uri {
+    const baseDir = this.lastSaveDir ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+    return vscode.Uri.file(path.join(baseDir, filename));
+  }
+
+  private async handleSaveExport(req: SaveExportRequest): Promise<void> {
+    const reply = (ok: boolean, message?: string, savedPath?: string) => {
+      void this.panel?.webview.postMessage({
+        type: "haltd:save-export-result",
+        requestId: req.requestId,
+        ok,
+        message,
+        path: savedPath,
+      });
+    };
+
+    const filters: Record<string, string[]> =
+      req.kind === "csv"
+        ? { "CSV Files": ["csv"] }
+        : req.kind === "hlrec"
+          ? { "Haltd Recording": ["hlrec"] }
+          : { "PNG Image": ["png"] };
+
+    try {
+      const targetUri = await vscode.window.showSaveDialog({
+        defaultUri: this.defaultSaveUri(req.defaultFilename),
+        filters,
+        saveLabel: `Save ${req.kind.toUpperCase()}`,
+      });
+      if (!targetUri) {
+        reply(false, "cancelled");
+        return;
+      }
+      this.lastSaveDir = path.dirname(targetUri.fsPath);
+
+      let summary = `Saved ${path.basename(targetUri.fsPath)}`;
+      if (req.kind === "png") {
+        const encoded = req.dataUrl?.split(",")[1];
+        if (!encoded) {
+          throw new Error("missing PNG image data");
+        }
+        fs.writeFileSync(targetUri.fsPath, Buffer.from(encoded, "base64"));
+      } else if (req.kind === "hlrec") {
+        if (!this.client) {
+          throw new Error("data client unavailable");
+        }
+        await this.client.call("record.saveHlrec", {
+          ...(req.params ?? {}),
+          path: targetUri.fsPath,
+        });
+      } else {
+        if (!this.client) {
+          throw new Error("data client unavailable");
+        }
+        const res = await this.client.call<{ path: string; rows: number }>("record.export", {
+          format: "csv",
+          ...(req.params ?? {}),
+          path: targetUri.fsPath,
+        });
+        summary = `Exported ${res.rows} rows to ${path.basename(targetUri.fsPath)}`;
+      }
+
+      reply(true, summary, targetUri.fsPath);
+      const actionButtons = req.kind === "csv" ? ["Open File", "Reveal in Folder"] : ["Reveal in Folder"];
+      const choice = await vscode.window.showInformationMessage(`Haltd: ${summary}`, ...actionButtons);
+      if (choice === "Open File") {
+        const doc = await vscode.workspace.openTextDocument(targetUri);
+        await vscode.window.showTextDocument(doc, { preview: false });
+      } else if (choice === "Reveal in Folder") {
+        await vscode.commands.executeCommand("revealFileInOS", targetUri);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      reply(false, msg);
+      this.onError?.(error, `Export ${req.kind.toUpperCase()}`);
+    }
+  }
 
   async show(): Promise<void> {
     if (this.panel) {
@@ -310,6 +388,7 @@ class BackendPanel {
     <iframe id="frame" src="${iframeSrc}"></iframe>
     <script>
       (() => {
+        const vscodeApi = acquireVsCodeApi();
         const frame = document.getElementById("frame");
         const VARS = [
           "--vscode-editor-background",
@@ -365,6 +444,10 @@ class BackendPanel {
             sendTheme();
           } else if (event.data.type === "haltd:host-theme") {
             sendTheme(event.data.kind);
+          } else if (event.data.type === "haltd:save-export") {
+            vscodeApi.postMessage(event.data);
+          } else if (event.data.type === "haltd:save-export-result") {
+            frame?.contentWindow?.postMessage(event.data, "*");
           }
         });
         const observer = new MutationObserver(() => sendTheme());
@@ -377,6 +460,11 @@ class BackendPanel {
     </script>
   </body>
 </html>`;
+    this.panel.webview.onDidReceiveMessage((msg: unknown) => {
+      if (msg && typeof msg === "object" && (msg as SaveExportRequest).type === "haltd:save-export") {
+        void this.handleSaveExport(msg as SaveExportRequest);
+      }
+    });
     this.themeSub = vscode.window.onDidChangeActiveColorTheme((theme) => {
       void this.panel?.webview.postMessage({
         type: "haltd:host-theme",
@@ -480,6 +568,18 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
   }
 }
 
+interface PresetSummary {
+  name: string;
+  rateHz?: number | null;
+  signals: Array<{
+    kind: string;
+    expr: string;
+    mode: string;
+    group?: string | null;
+    color?: string | null;
+  }>;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const client = new DataClient();
   const diagnostics = new DiagnosticsManager(context, () => adapterPath(context.extensionPath), client);
@@ -489,9 +589,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   registerDeviceAssist(context, () => adapterPath(context.extensionPath), report);
   const status = new StatusBar(client);
-  const liveWatch = new LiveWatch(client);
-  const timeline = new BackendPanel("Timeline", BACKEND_URL);
-  const rttPanel = new BackendPanel("RTT", RTT_URL);
+  const timeline = new BackendPanel("Timeline", BACKEND_URL, client, report);
+  const rttPanel = new BackendPanel("RTT", RTT_URL, client, report);
+  const liveWatch = new LiveWatchController(context.extensionUri, client, {
+    onAddToTimeline: (expr) => addToTimelineByHss(client, expr, timeline),
+    onError: report,
+  });
   const rttTerminal = new RttTerminal(client, report);
   const timelineButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
   timelineButton.text = "$(graph-line) Timeline";
@@ -501,22 +604,18 @@ export function activate(context: vscode.ExtensionContext): void {
   rttButton.text = "$(terminal) RTT";
   rttButton.tooltip = "Open the RTT terminal";
   rttButton.command = "haltd.openRttTerminal";
-  const tree = vscode.window.createTreeView("haltd.liveWatch", {
-    treeDataProvider: liveWatch,
-    canSelectMany: true,
-  });
   const peripherals = new PeripheralsView();
   const tasks = new TasksView();
   const cyclesItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 47);
   cyclesItem.tooltip = "Cycles the core ran between the last two stops";
   let recording = false;
   let hidePending = false;
+
   const addFromDebugger = async (item?: VariableContext) => {
     const expression = await chooseExpression(item);
     if (expression) {
       client.start();
-      const added = await liveWatch.add(expression);
-      await tree.reveal(added, { select: true, focus: false });
+      await liveWatch.add(expression, true);
     }
   };
   const takeover = new WatchTakeover((item) => addFromDebugger(item).catch((e) => report(e, "Add to Watch")));
@@ -532,16 +631,41 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   client.on("close", (info) => {
     diagnostics.recordWsClose(info);
+    liveWatch.setRunState("disconnected");
   });
+
+  const runStateTracker: vscode.DebugAdapterTrackerFactory = {
+    createDebugAdapterTracker: () => ({
+      onWillReceiveMessage: (message: unknown) => {
+        const msg = message as { type?: string; command?: string };
+        if (msg?.type === "request" && (msg.command === "continue" || msg.command === "next" || msg.command === "stepIn" || msg.command === "stepOut")) {
+          liveWatch.setRunState("running");
+        }
+      },
+      onDidSendMessage: (message: unknown) => {
+        const msg = message as { type?: string; event?: string };
+        if (msg?.type === "event") {
+          if (msg.event === "stopped") {
+            liveWatch.setRunState("halted");
+          } else if (msg.event === "continued") {
+            liveWatch.setRunState("running");
+          }
+        }
+      },
+    }),
+  };
 
   context.subscriptions.push(
     diagnostics,
     status,
-    tree,
+    liveWatch,
     timelineButton,
     rttButton,
     takeover,
     cyclesItem,
+    vscode.window.registerWebviewViewProvider("haltd.liveWatch", liveWatch, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.window.registerTreeDataProvider("haltd.peripherals", peripherals),
     vscode.window.registerTreeDataProvider("haltd.tasks", tasks),
     vscode.debug.onDidChangeActiveStackItem(() => {
@@ -556,7 +680,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider(diagnostics)),
     vscode.debug.registerDebugAdapterTrackerFactory(DEBUG_TYPE, diagnostics.createTrackerFactory()),
-    tree.onDidCollapseElement((event) => liveWatch.collapse(event.element).catch((e) => report(e, "Live Watch"))),
+    vscode.debug.registerDebugAdapterTrackerFactory(DEBUG_TYPE, runStateTracker),
     vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new AdapterFactory(context.extensionPath)),
     vscode.debug.onDidStartDebugSession((session) => {
       if (session.type === DEBUG_TYPE) {
@@ -565,6 +689,7 @@ export function activate(context: vscode.ExtensionContext): void {
         rttButton.show();
         client.start();
         takeover.start();
+        liveWatch.setRunState("running");
         hidePending = true;
         hideBuiltInWatch();
       }
@@ -578,6 +703,7 @@ export function activate(context: vscode.ExtensionContext): void {
         cyclesItem.hide();
         peripherals.clear();
         tasks.refresh();
+        liveWatch.setRunState("disconnected");
         // A connection left open would keep the idle backend from exiting.
         client.stop();
       }
@@ -606,119 +732,79 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand("haltd.addToWatch", async (item?: VariableContext) => {
-      const expression = await chooseExpression(item);
-      if (expression) {
-        await liveWatch.add(expression).catch((e) => report(e, "Add to Watch"));
+      const fromVariables = item?.variable?.evaluateName ?? item?.variable?.name;
+      if (fromVariables) {
+        client.start();
+        await liveWatch.add(fromVariables, true).catch((e) => report(e, "Add to Watch"));
+        return;
       }
+      const editor = vscode.window.activeTextEditor;
+      if (editor && editor.document === vscode.window.activeTextEditor?.document && vscode.debug.activeDebugSession?.type === DEBUG_TYPE) {
+        const selected = editor.document.getText(editor.selection).trim();
+        const word = !selected ? editor.document.getWordRangeAtPosition(editor.selection.active) : undefined;
+        const expr = selected || (word ? editor.document.getText(word) : undefined);
+        if (expr && item) {
+          client.start();
+          await liveWatch.add(expr, true).catch((e) => report(e, "Add to Watch"));
+          return;
+        }
+      }
+      await liveWatch.focusInputOrReveal().catch((e) => report(e, "Add to Watch"));
     }),
     vscode.commands.registerCommand("haltd.addSelectionToWatch", () =>
       addFromDebugger().catch((e) => report(e, "Add Selection to Watch")),
     ),
-    vscode.commands.registerCommand("haltd.addToTimeline", async (item?: VariableContext | WatchInfo) => {
-      if (item && "expr" in item && !item.plottable) {
-        report(new Error(`${item.name} cannot be plotted by itself`), "Add to Timeline");
-        return;
-      }
-      const fromWatch = item && "expr" in item ? item.expr : undefined;
-      const expression = fromWatch ?? (await chooseExpression(item as VariableContext | undefined));
+    vscode.commands.registerCommand("haltd.popOutLiveWatch", () =>
+      liveWatch.popOut().catch((e) => report(e, "Pop Out Live Watch")),
+    ),
+    vscode.commands.registerCommand("haltd.dockLiveWatchToPanel", () =>
+      liveWatch.dockToPanel().catch((e) => report(e, "Dock Live Watch")),
+    ),
+    vscode.commands.registerCommand("haltd.configureWatchColumns", () =>
+      liveWatch.configureColumnsPicker().catch((e) => report(e, "Configure Live Watch Columns")),
+    ),
+    vscode.commands.registerCommand("haltd.addToTimeline", async (item?: VariableContext) => {
+      const expression = await chooseExpression(item);
       if (expression) {
         await addToTimelineByHss(client, expression, timeline).catch((e) => report(e, "Add to Timeline"));
       }
     }),
-    vscode.commands.registerCommand("haltd.addSelectionToTimeline", async (source?: string) => {
-      if (source === "liveWatch" || (source !== "editor" && !vscode.window.activeTextEditor && tree.selection.length > 0)) {
-        const selected = tree.selection;
-        if (selected.length === 0) {
-          return;
-        }
-        const plottable = selected.filter((item) => item.plottable);
-        const skipped = selected.filter((item) => !item.plottable);
-        if (plottable.length === 0) {
-          report(new Error(`${skipped[0].name} cannot be plotted by itself`), "Add Selection to Timeline");
-          return;
-        }
-        if (skipped.length > 0) {
-          void vscode.window.showWarningMessage(
-            `Haltd: ${skipped.length} selected item(s) cannot be plotted directly`,
-          );
-        }
-        for (const item of plottable) {
-          await addToTimelineByHss(client, item.expr, timeline).catch((e) => report(e, "Add Selection to Timeline"));
-        }
-        return;
-      }
+    vscode.commands.registerCommand("haltd.addSelectionToTimeline", async () => {
       const expression = await chooseExpression();
       if (expression) {
         await addToTimelineByHss(client, expression, timeline).catch((e) => report(e, "Add Selection to Timeline"));
       }
     }),
-    vscode.commands.registerCommand("haltd.removeSelectedWatch", async () => {
-      const selected = tree.selection;
-      if (selected.length === 0) {
-        return;
-      }
-      const ids = new Set(selected.map((item) => item.id));
-      const top = selected.filter((item) => item.parent === null || !ids.has(item.parent));
-      for (const item of top) {
-        await liveWatch.remove(item).catch((e) => report(e, "Remove Watch"));
-      }
-    }),
-    vscode.commands.registerCommand("haltd.editSelectedWatch", async (trigger?: string) => {
-      if (tree.selection.length !== 1) {
-        return;
-      }
-      const item = tree.selection[0];
-      if (!item.writable) {
-        if (trigger === "enter" && item.expandable) {
-          await vscode.commands.executeCommand("list.toggleExpand");
+    vscode.commands.registerCommand("haltd.loadTimelinePreset", async () => {
+      try {
+        const reply = await client.call<{ presets: PresetSummary[] }>("timeline.presets.list");
+        const presets = reply.presets ?? [];
+        if (presets.length === 0) {
+          void vscode.window.showInformationMessage("Haltd: no saved Timeline presets in this workspace yet");
+          return;
         }
-        return;
-      }
-      const value = await vscode.window.showInputBox({
-        prompt: `New value for ${item.name}`,
-        value: item.value,
-      });
-      if (value !== undefined) {
-        await liveWatch.write(item, value).catch((e) => report(e, "Write Watch"));
-      }
-    }),
-    vscode.commands.registerCommand("haltd.setSelectedWatchRate", async () => {
-      const selected = tree.selection;
-      if (selected.length === 0) {
-        return;
-      }
-      const label = selected.length === 1 ? selected[0].name : `${selected.length} items`;
-      const choice = await vscode.window.showQuickPick(RATES, {
-        placeHolder: `Refresh rate for ${label}`,
-      });
-      if (!choice) {
-        return;
-      }
-      for (const item of selected) {
-        await liveWatch.setRate(item, choice.rateHz).catch((e) => report(e, "Set Watch Rate"));
-      }
-    }),
-    vscode.commands.registerCommand("haltd.copySelectedWatch", async () => {
-      const selected = tree.selection;
-      if (selected.length === 0) {
-        return;
-      }
-      const text = selected.map((item) => `${item.expr} = ${item.value}`).join("\n");
-      await vscode.env.clipboard.writeText(text);
-    }),
-    vscode.commands.registerCommand("haltd.removeWatch", (item: WatchInfo) =>
-      liveWatch.remove(item).catch((e) => report(e, "Remove Watch")),
-    ),
-    vscode.commands.registerCommand("haltd.setWatchRate", async (item: WatchInfo) => {
-      const choice = await vscode.window.showQuickPick(RATES, { placeHolder: `Refresh rate for ${item.name}` });
-      if (choice) {
-        await liveWatch.setRate(item, choice.rateHz).catch((e) => report(e, "Set Watch Rate"));
-      }
-    }),
-    vscode.commands.registerCommand("haltd.writeWatch", async (item: WatchInfo) => {
-      const value = await vscode.window.showInputBox({ prompt: `New value for ${item.name}`, value: item.value });
-      if (value !== undefined) {
-        await liveWatch.write(item, value).catch((e) => report(e, "Write Watch"));
+        const picked = await vscode.window.showQuickPick(
+          presets.map((p) => ({
+            label: p.name,
+            description: `${p.signals.length} signals${p.rateHz ? ` · ${p.rateHz} Hz` : ""}`,
+            preset: p,
+          })),
+          { placeHolder: "Select Timeline preset to load" },
+        );
+        if (!picked) {
+          return;
+        }
+        await client.call("timeline.applyBatch", {
+          replace: true,
+          ...(picked.preset.rateHz !== undefined && picked.preset.rateHz !== null
+            ? { rateHz: picked.preset.rateHz }
+            : {}),
+          signals: picked.preset.signals,
+        });
+        await client.call("timeline.presets.setActive", { name: picked.preset.name });
+        await timeline.show();
+      } catch (error) {
+        report(error, "Load Timeline Preset");
       }
     }),
     vscode.commands.registerCommand("haltd.openTimeline", () => timeline.show().catch((e) => report(e, "Open Timeline"))),
@@ -731,12 +817,44 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         if (recording) {
           const result = await client.call<{ path: string; samples: number }>("record.stop");
-          void vscode.window.showInformationMessage(`Haltd: saved ${result.samples} samples to ${result.path}`);
+          recording = false;
+          const choice = await vscode.window.showInformationMessage(
+            `Haltd: recorded ${result.samples} samples`,
+            "Export CSV...",
+            "Reveal in Folder",
+          );
+          if (choice === "Export CSV...") {
+            const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+            const dest = await vscode.window.showSaveDialog({
+              defaultUri: vscode.Uri.file(path.join(folder, `haltd-recording-${Date.now()}.csv`)),
+              filters: { "CSV Files": ["csv"] },
+            });
+            if (dest) {
+              const exported = await client.call<{ path: string; rows: number }>("record.export", {
+                format: "csv",
+                fromRecording: true,
+                hlrecPath: result.path,
+                zoh: true,
+                relativeTime: true,
+                path: dest.fsPath,
+              });
+              const openChoice = await vscode.window.showInformationMessage(
+                `Haltd: exported ${exported.rows} rows to ${path.basename(dest.fsPath)}`,
+                "Open File",
+              );
+              if (openChoice === "Open File") {
+                const doc = await vscode.workspace.openTextDocument(dest);
+                await vscode.window.showTextDocument(doc, { preview: false });
+              }
+            }
+          } else if (choice === "Reveal in Folder") {
+            await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(result.path));
+          }
         } else {
           await client.call("record.start");
+          recording = true;
           void vscode.window.showInformationMessage("Haltd: recording; run this command again to stop");
         }
-        recording = !recording;
       } catch (error) {
         report(error, "Recording");
       }

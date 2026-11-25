@@ -1,6 +1,7 @@
 import type { Client, TimelineEvent } from "../client";
 import type { ThemeManager, ThemePreference } from "../theme";
 import { eventKindInfo } from "./cursors";
+import { defaultExportFilename, saveExportViaHostOrBrowser } from "./exportCsv";
 import { KEYBOARD_HELP, MOUSE_HELP } from "./keymap";
 import { FOLLOW_LAG_S, formatSeconds, spanSeconds, stepDivision } from "./math";
 import {
@@ -23,6 +24,14 @@ export interface ToolbarCallbacks {
   resizeAll: () => void;
   clearCursors: () => void;
   zoomToRange: (a: number, b: number) => void;
+  onOpenExport?: () => void;
+  onRateChanged?: () => void;
+  onRecordingStopped?: (info: {
+    path: string;
+    startedNs?: number;
+    samples: number;
+    dropped?: number;
+  }) => void;
 }
 
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
@@ -65,12 +74,45 @@ export function showRate(rate: RateReply): void {
   select.classList.toggle("off", rate.rateHz === 0);
 }
 
+export function formatRecordLabel(elapsedSec: number, samples: number): string {
+  const total = Math.max(0, Math.floor(elapsedSec));
+  const mm = String(Math.floor(total / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  const pts =
+    samples >= 1000 ? `${(samples / 1000).toFixed(1)}k` : String(Math.max(0, samples));
+  return samples > 0 ? `Rec ${mm}:${ss} · ${pts}` : `Rec ${mm}:${ss}`;
+}
+
 export function syncRecordButton(state: TimelineState, active: boolean): void {
   state.recording = active;
   const button = byId<HTMLButtonElement>("record");
   if (!button) return;
-  button.textContent = active ? "● Stop Rec" : "Record";
-  button.classList.toggle("active", active);
+  if (!active) {
+    if (button.classList.contains("active") || button.textContent !== "Record") {
+      button.classList.remove("active");
+      button.textContent = "Record";
+    }
+    return;
+  }
+  const elapsed =
+    state.recordingStartedAt !== null
+      ? Math.max(0, nowSeconds(state) - state.recordingStartedAt)
+      : 0;
+  const text = formatRecordLabel(elapsed, state.recordingSamples);
+  if (!button.classList.contains("active")) {
+    const dot = document.createElement("span");
+    dot.className = "rec-dot-pulse";
+    const lbl = document.createElement("span");
+    lbl.className = "rec-btn-text";
+    lbl.textContent = text;
+    button.replaceChildren(dot, lbl);
+    button.classList.add("active");
+  } else {
+    const lbl = button.querySelector(".rec-btn-text");
+    if (lbl && lbl.textContent !== text) {
+      lbl.textContent = text;
+    }
+  }
 }
 
 export function setConnectionStatus(
@@ -207,11 +249,23 @@ export function exportPngSnapshot(state: TimelineState): void {
     y += g.plot.ctx.canvas.height + Math.round(8 * dpr);
   }
 
-  const link = document.createElement("a");
-  link.download = `haltd-timeline-${Date.now()}.png`;
-  link.href = out.toDataURL("image/png");
-  link.click();
-  if (measureEl) measureEl.textContent = `Saved PNG snapshot (${link.download})`;
+  const filename = defaultExportFilename(state.activePresetName, "png");
+  const dataUrl = out.toDataURL("image/png");
+  if (measureEl) measureEl.textContent = `Saving PNG snapshot (${filename})…`;
+  void saveExportViaHostOrBrowser({
+    kind: "png",
+    defaultFilename: filename,
+    dataUrl,
+  }).then((res) => {
+    if (!measureEl) return;
+    if (res.cancelled) {
+      measureEl.textContent = "PNG snapshot cancelled.";
+    } else if (res.ok) {
+      measureEl.textContent = res.message ?? `Saved PNG snapshot (${filename})`;
+    } else {
+      measureEl.textContent = `PNG snapshot failed: ${res.message ?? "unknown error"}`;
+    }
+  });
 }
 
 export function renderHelpModal(): void {
@@ -262,8 +316,48 @@ export function wireToolbar(
     });
   }
 
-  // Add signal form
-  byId<HTMLSelectElement>("mode")?.addEventListener("change", () => updateSuggestions(state));
+  // Add signal form + ELF symbol autocomplete
+  let acTimer: number | undefined;
+  const exprInput = byId<HTMLInputElement>("expr");
+  const modeSelect = byId<HTMLSelectElement>("mode");
+  modeSelect?.addEventListener("change", () => updateSuggestions(state));
+  exprInput?.addEventListener("input", () => {
+    if (acTimer !== undefined) window.clearTimeout(acTimer);
+    const query = exprInput.value.trim();
+    const mode = modeSelect?.value ?? "auto";
+    if (mode === "rtt" || query.length < 2) {
+      updateSuggestions(state);
+      return;
+    }
+    acTimer = window.setTimeout(() => {
+      void client
+        .call<{ items: Array<{ name: string; type: string; address: string }> }>(
+          "symbols.complete",
+          { query, limit: 40 },
+        )
+        .then((reply) => {
+          const exprList = byId<HTMLDataListElement>("expr-suggestions");
+          if (!exprList || (modeSelect?.value ?? "auto") === "rtt") return;
+          const seen = new Set<string>();
+          const options: HTMLOptionElement[] = [];
+          for (const item of reply.items ?? []) {
+            if (!seen.has(item.name)) {
+              seen.add(item.name);
+              const opt = new Option(`${item.name} — ${item.type}`, item.name);
+              options.push(opt);
+            }
+          }
+          for (const hist of state.exprHistory) {
+            if (!seen.has(hist) && hist.toLowerCase().includes(query.toLowerCase())) {
+              seen.add(hist);
+              options.push(new Option(hist, hist));
+            }
+          }
+          exprList.replaceChildren(...options);
+        })
+        .catch(() => updateSuggestions(state));
+    }, 120);
+  });
   byId<HTMLFormElement>("add")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = byId<HTMLInputElement>("expr");
@@ -306,6 +400,7 @@ export function wireToolbar(
     try {
       showRate(await client.call<RateReply>("timeline.setRate", { rateHz }));
       await callbacks.loadSeries();
+      callbacks.onRateChanged?.();
     } catch (error) {
       if (measureEl) measureEl.textContent = String(error);
       showRate(await client.call<RateReply>("timeline.rate"));
@@ -391,18 +486,41 @@ export function wireToolbar(
     const measureEl = byId("measure");
     try {
       if (state.recording) {
-        const result = await client.call<{ path: string; samples: number }>("record.stop");
+        const result = await client.call<{
+          path: string;
+          startedNs?: number;
+          samples: number;
+          dropped?: number;
+        }>("record.stop");
+        state.lastRecording = {
+          path: result.path,
+          startedAt: typeof result.startedNs === "number" ? result.startedNs / 1e9 : state.recordingStartedAt,
+          endedAt: nowSeconds(state),
+          samples: result.samples,
+          dropped: result.dropped ?? 0,
+        };
+        state.recordingStartedAt = null;
         if (measureEl) measureEl.textContent = `Saved ${result.samples} samples to ${result.path}`;
         syncRecordButton(state, false);
+        callbacks.onRecordingStopped?.(result);
       } else {
         await client.call("record.start");
+        state.recordingStartedAt = nowSeconds(state);
+        state.recordingSamples = 0;
+        state.recordingDropped = 0;
         syncRecordButton(state, true);
       }
     } catch (error) {
       if (measureEl) measureEl.textContent = String(error);
     }
   });
-  byId("export")?.addEventListener("click", () => void exportVisibleCsv(client, state));
+  byId("export")?.addEventListener("click", () => {
+    if (callbacks.onOpenExport) {
+      callbacks.onOpenExport();
+    } else {
+      void exportVisibleCsv(client, state);
+    }
+  });
   byId("snapshot")?.addEventListener("click", () => exportPngSnapshot(state));
 
   // Filter & batch visibility
@@ -423,9 +541,7 @@ export function wireToolbar(
   byId("btn-clear-all")?.addEventListener("click", async () => {
     state.soloSeriesId = null;
     state.hidden.clear();
-    await Promise.all(
-      state.series.map((s) => client.call("timeline.remove", { seriesId: s.seriesId })),
-    );
+    await client.call("timeline.clear");
     await callbacks.loadSeries();
   });
 

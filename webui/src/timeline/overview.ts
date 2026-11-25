@@ -28,6 +28,30 @@ export function drawOverview(state: TimelineState): void {
   const totalSpan = Math.max(1, now - start);
   const toX = (t: number) => ((t - start) / totalSpan) * w;
 
+  if (state.recording && state.recordingStartedAt !== null) {
+    const rx0 = Math.max(0, toX(state.recordingStartedAt));
+    const rx1 = Math.min(w, toX(now));
+    if (rx1 > rx0) {
+      ctx.fillStyle = "rgba(255, 85, 85, 0.22)";
+      ctx.fillRect(rx0, 0, rx1 - rx0, h);
+      ctx.fillStyle = "#ff6b6b";
+      ctx.fillRect(rx0, 0, rx1 - rx0, Math.max(1.5, dpr * 1.5));
+    }
+  } else if (
+    state.lastRecording &&
+    state.lastRecording.startedAt !== null &&
+    state.lastRecording.endedAt !== null
+  ) {
+    const rx0 = Math.max(0, toX(state.lastRecording.startedAt));
+    const rx1 = Math.min(w, toX(state.lastRecording.endedAt));
+    if (rx1 > rx0) {
+      ctx.fillStyle = "rgba(255, 85, 85, 0.14)";
+      ctx.fillRect(rx0, 0, rx1 - rx0, h);
+      ctx.fillStyle = "rgba(255, 107, 107, 0.7)";
+      ctx.fillRect(rx0, 0, rx1 - rx0, Math.max(1.5, dpr * 1.5));
+    }
+  }
+
   ctx.fillStyle = theme.haltFill;
   for (const halt of state.halts) {
     const x0 = Math.max(0, toX(halt.from));

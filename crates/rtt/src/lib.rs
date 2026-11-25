@@ -254,6 +254,17 @@ impl Rtt {
         false
     }
 
+    /// Stop plotting every RTT signal currently shown on the Timeline.
+    pub fn clear_plotted(&self) {
+        let mut signals = self.shared.signals.lock().expect("signal lock");
+        for signal in signals.values_mut() {
+            if let Some(series) = signal.series.take() {
+                self.tsdb.remove_series(series.id());
+            }
+            signal.removed = true;
+        }
+    }
+
     /// Series currently fed by RTT, as `(id, name)`.
     pub fn plotted(&self) -> Vec<(u32, String)> {
         self.shared

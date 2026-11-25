@@ -208,7 +208,11 @@ export function showContextMenu(
   }
 
   addDivider();
-  addItem("Export Visible CSV…", "", () => actions.exportVisibleCsv());
+  const csvLabel =
+    state.cursorA !== null && state.cursorB !== null
+      ? "Export Cursor A..B to CSV…"
+      : "Export CSV…";
+  addItem(csvLabel, "", () => actions.exportVisibleCsv());
 
   document.body.append(menu);
   activeMenu = menu;

@@ -17,11 +17,19 @@ export interface WatchInfo {
   value: string;
   error: string | null;
   plottable: boolean;
+  address: string | null;
+  bitRange: string | null;
+  size: number | null;
+  rawHex: string | null;
+  scalarKind: "bool" | "float" | "signed" | "unsigned" | "enum" | "pointer" | null;
 }
 
 export interface WatchValue {
   id: number;
   value: string;
+  rawHex: string | null;
+  address: string | null;
+  error: string | null;
 }
 
 export interface HaltdDiagnostic {

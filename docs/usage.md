@@ -128,23 +128,26 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 
 ### Live Watch
 
-位于调试侧栏。在源码或 Variables 中右键「Add to Live Watch」，或点击视图标题栏 `+` 添加表达式。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `haltd.replaceWatchView: false` 关闭）。
+默认停靠于底部 **Panel**（`Haltd Live Watch` 面板，提供宽幅多列视野），可点击视图右上角 **Pop out** 按钮弹出到编辑区独立标签页（与源码左右分栏或拖到副屏，两个视图实时同步，可随时点 **Dock** 切回面板）。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `haltd.replaceWatchView: false` 关闭）。
 
-- 刷新率支持 `0–5 Hz` 每行独立设置（`0` 表示仅在目标暂停时刷新）。
-- 结构体、数组与指针可逐层展开，支持多选，展开后的成员可直接加入 Timeline。
-- 支持直接修改目标内存值，并将表达式列表保存到 `.haltd/state.json`。
-- 指针表达式只在添加或 Reload 时解析一次地址，运行期间指针自身变化不会自动重新寻址。
+- **多列树形表**：分列展示 `Expression`（变量名）、`Value`（当前值）、`Hex / Format`（原始十六进制与格式切换徽标）、`Type`、`Address`（含位段信息）与 `Rate`（刷新率）。可通过表头右键菜单或设置项 `haltd.liveWatch.columns` 自定义开关列、拖拽表头分隔线调宽。
+- **值变动新鲜度着色**：运行态数值跳变时立即亮红高亮并随时间平滑冷却（默认 `2500 ms`，可通过 `haltd.liveWatch.freshnessDurationMs` 配置；设为 `0` 关闭）；断点停机或单步后，本轮发生变化的变量保持醒目红字直至下次继续运行或单步。悬停单元格可查看「上次值 → 当前值」变化。
+- **底部快速输入与 ELF 自动补全**：底部常驻 `+ Add expression…` 输入行，输入 2 个字符起自动联想 ELF 全局/静态符号、类型与地址；支持 `0–20 Hz` 独立调频（默认 `5 Hz`，`0` 表示仅停机时刷新）。
+- **按行显示格式与原位写回**：可在行内直接切换标量显示格式（`Default` / `Dec` / `Uint` / `Hex` / `Bin` / `Float` / `Char`）；双击可写标量按行原位修改，支持 `0x`、`0b`、`_` 分隔符、字符字面量 `'A'` 与 C/C++ 枚举常量名（如 `STATE_RUN`），列表与扩展状态自动保存到 `.haltd/state.json`。
+- **动态指针与算术表达式**：运行期间自动重解析 `*ptr`、`ptr->field`、`arr[idx]` 等动态寻址表达式（当指针或下标变化时自动追踪新地址，指针初始化前显示友好提示并在非 NULL 后自动恢复）；支持 `g_adc * 3.3 / 4096.0`、`(reg >> 4) & 1`、`&g_motor` 等只读求值表达式。
+- **观测到断点闭环**：在 Live Watch 右键变量可直接下发 DWT 硬件数据观察点（Break on Write / Break on Access）或在内置 Hex/Memory 视图打开对应地址，也可按 `Ctrl+G` 直接送入 1 kHz Timeline。
 
-**Live Watch 与调试快捷操作**（仅在 `haltd` 调试会话期间生效，可在 VS Code Keyboard Shortcuts 中自定义）：
+**Live Watch 与调试快捷操作**（全局快捷键仅在 `haltd` 调试会话期间生效；表内快捷键在 Live Watch 聚焦时生效）：
 
 | 快捷键 | 作用域 | 效果 |
 |---|---|---|
 | `Ctrl+G`（macOS `Cmd+G`） | 源码编辑器 / Live Watch | 将选中变量加入 Timeline（HSS）（调试结束后恢复原生「转到行」） |
 | `Ctrl+H`（macOS `Cmd+H`） | 源码编辑器 | 将选中表达式或光标所在变量加入 Live Watch |
-| `Del`（macOS `Backspace`） | Live Watch 视图 | 删除选中监视项 |
-| `F2` / `Enter` | Live Watch 视图 | 编辑可写标量值（结构体按 `Enter` 展开/折叠） |
-| `Ctrl+R`（macOS `Cmd+R`） | Live Watch 视图 | 设置选中项刷新率（0–5 Hz） |
+| `Del` / `Backspace` | Live Watch 视图 | 删除选中监视项 |
+| `F2` | Live Watch 视图 | 原位编辑可写标量值（`Enter` 展开/折叠结构体，或在表达式列编辑） |
+| `Ctrl+R`（macOS `Cmd+R`） | Live Watch 视图 | 调整选中项刷新率（0–20 Hz） |
 | `Ctrl+C`（macOS `Cmd+C`） | Live Watch 视图 | 复制选中项为 `expr = value` |
+| `Ctrl+F`（macOS `Cmd+F`） | Live Watch 视图 | 过滤 Live Watch 行 |
 | `Ctrl+Shift+T`（macOS `Cmd+Shift+T`） | 调试会话内 | 打开 Timeline 面板 |
 
 > 注：受限于 VS Code 扩展 API，原生 Variables 视图无法通过快捷键读取当前焦点行，Variables 视图仍通过右键菜单加入 Live Watch 或 Timeline。
@@ -153,8 +156,9 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 
 采用参考 SEGGER Ozone Timeline / Data Graph 的多轨道同步示波器布局：每条轨道左侧为独立图例与控制栏（含来源标识 `HSS` / `POLL` / `RTT` 与数值读数），右侧为波形画布，底部共用同一条时间轴与可拖拽游标手柄（`S` / `A` / `B`）。点击状态栏 Timeline 按钮、按 `Ctrl+Shift+T` 或执行 `Haltd: Open Timeline` 打开，也可通过 <http://127.0.0.1:47110/timeline> 在浏览器访问。
 
-**添加信号与采样率**：
-- 在源码或 Live Watch 按 `Ctrl+G`（或右键「Add to Timeline (HSS)」）、在顶部输入表达式回车，或将左下角 `RTT` 抽屉中的解码信号直接拖拽到任意轨道或空白区新建轨道；结构体与数组会自动展开（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
+**添加信号与工作区预设（Presets）**：
+- 在源码或 Live Watch 按 `Ctrl+G`（或右键「Add to Timeline (HSS)」）、在顶部输入表达式回车（支持 2 字符以上 ELF 全局符号实时补全），或将左下角 `RTT` 抽屉中的解码信号直接拖拽到任意轨道或空白区新建轨道；结构体与数组会自动展开（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
+- **工作区预设复用**：通过工具栏 **Presets** 下拉框与保存按钮（或在空画布快捷入口及 VS Code 命令 `Haltd: Load Timeline Preset`）将当前信号列表、采样率、分组轨道、颜色、Y 轴锁定范围、折叠/隐藏状态保存到工作区 `.haltd/timeline-presets.json`。支持点击**覆盖加载（Replace）**或点击预设旁的 `+` **追加（Append）**叠加多组信号。
 - **选好信号后，需在工具栏 `Sample` 下拉框选择采样率（`20 Hz` ~ `1 kHz`）才会开始采集 HSS/Poll**；选 `Off` 时暂停采样（RTT 自动解码信号在固件输出时即会到达）。
 
 | 采样模式 | 说明 |
@@ -176,7 +180,7 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 | `Ctrl` + 左键拖动 | 框选时间区间放大 |
 | 单击 / 双击轨道或时间轴 | 在该位置放置临时采样游标 `S`（虚线，图例与波形交点显示当前值，悬停时显示 `Δt`） |
 | 拖动游标线或底部手柄 | 移动采样游标 `S`、测量游标 `A` / `B` 或固定标签 `M1`, `M2`… |
-| 右键菜单 | Zoom to Fit、Y 自动缩放、放置 `A`/`B`/`S`、添加/删除/清除标签（含 `S`）、清除游标、改色、移动到其他轨道/新建轨道、隐藏/独显、删除信号、导出可见 CSV |
+| 右键菜单 | Zoom to Fit、Y 自动缩放、放置 `A`/`B`/`S`、添加/删除/清除标签（含 `S`）、清除游标、改色、移动到其他轨道/新建轨道、隐藏/独显、删除信号、打开 Export CSV 弹窗（已设 `A`/`B` 时提示导出 `Cursor A..B`） |
 | 拖动图例信号 / RTT 信号 | 拖到其他轨道改变分组，拖到空白区域新建轨道 |
 | 拖动轨道底边框 | 调整该轨道高度（自动记忆）；拖动图例右边界可调整图例栏宽度 |
 
@@ -198,11 +202,11 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 | `Y` | 恢复当前选中轨道的 Y 轴自动缩放 |
 | `/` / `?` | 聚焦表达式输入框 / 显示快捷键与鼠标帮助 |
 
-**其他面板功能**：
-- 顶部概览条显示全部历史与暂停/异常事件，点击或拖动可快速跳转。
-- 工具栏可直接对目标执行运行（`▶`）、暂停（`❚❚`）、复位（`⟲`）与 `Fit`。
-- 支持 `Grouped`（按轨道分组）/ `Split`（每路独立轨道）切换、`Bands`（Min/Max 包络）、状态栏 `Events` 事件跳转、导出可见窗口 CSV、保存 PNG 截图、深色/浅色/高对比主题切换（`Auto` 自动跟随 VS Code）。
-- 支持录制 `.hlrec` 文件（`Record` 按钮或命令 `Haltd: Start/Stop Recording`）；当前网页端暂不支持直接回放 `.hlrec`。
+**录制与 CSV / PNG 导出**：
+- 顶部概览条显示全部历史、暂停/异常事件与录制区间高亮条，点击或拖动可快速跳转。
+- 工具栏可直接对目标执行运行（`▶`）、暂停（`❚❚`）、复位（`⟲`）与 `Fit`，切换 `Grouped` / `Split`、`Bands`、事件跳转以及深色/浅色/高对比主题（`Auto` 自动跟随 VS Code）。
+- **录制 `.hlrec`**：点击 `Record` 按钮（或命令 `Haltd: Start/Stop Recording`）实时显示 `Rec MM:SS · <点数>`；停止录制后顶部出现操作横幅，可一键缩放至录制区间、保存 `.hlrec` 文件，或**直接将 `.hlrec` 无损导出为 CSV**（即使信号已移出环形缓冲区）。
+- **智能 CSV 导出**：点击 `Export CSV` 打开导出弹窗：若已放置测量游标 `A` 和 `B` 自动优先选中 **Cursor A..B** 区间（否则可选可见窗口、全部缓存或最近 `.hlrec`）；支持仅导出可见信号、**Zero-Order Hold（零阶保持对齐，方便多速率信号在 Excel/Python 中直接成表）** 与 `Sparse` 稀疏模式、相对时间 `0.000 s` 起点，以及语义化默认文件名。在 VS Code 面板中点击保存会弹出原生「另存为」对话框并支持一键打开文件；在外部浏览器打开则直接下载。PNG 截图同样支持原生另存为与直接下载。
 
 ### 状态与统计
 
@@ -374,7 +378,7 @@ haltd devices --filter STM32H7 --json                    # 查询 J-Link 支持�
 - **实测范围**：已在 **STM32F103C8**、**STM32G4 系列**、**STM32H723** + J-Link V9 下完成实际调试与验证；**STM32H74x/H75x** 配置已内置（参考 `RM0433`），但受限于手头硬件，尚未完成充分实机验证。其他 STM32 型号也能连接，但可能缺少内置 `DBGMCU` / 外设冻结配置。
 - 芯片读保护解锁或 J-Link 固件升级时是否会弹出阻塞对话框尚未验证（后台模式下建议保持探针固件正常）。
 - 如果使用「Run to main」但固件在进入 `main` 前就死循环，需要手动点暂停或停止来中断等待。
-- `.hlrec` 录制文件暂时不能在网页界面中回放。
+- `.hlrec` 录制文件暂时不能在网页界面中直接导入回放（但可在停止录制后于 Timeline 横幅/Export 弹窗中一键无损导出为 CSV）。
 
 ---
 

@@ -184,6 +184,8 @@ pub struct Dap {
     fault_thread: Option<i64>,
     last_tasks: Vec<Value>,
     rtos_thread_view: RtosThreadView,
+    dap_data_breakpoints: Vec<DataRequest>,
+    custom_watchpoints: Vec<DataRequest>,
 }
 
 /// What the sampler needs to know about a connected target.
@@ -567,6 +569,8 @@ impl Dap {
             fault_thread: None,
             last_tasks: Vec::new(),
             rtos_thread_view: RtosThreadView::default(),
+            dap_data_breakpoints: Vec::new(),
+            custom_watchpoints: Vec::new(),
         };
         if let Some(session) = &mut dap.session {
             session.set_cancel_token(dap.cancel.clone());
@@ -773,6 +777,7 @@ impl Dap {
             "haltd/peripherals" => self.peripheral_list(),
             "haltd/peripheralRead" => self.peripheral_read(arguments),
             "haltd/peripheralWrite" => self.peripheral_write(arguments),
+            "haltd/watchpoint" => self.custom_watchpoint(arguments),
             "threads" => self.threads(),
             "stackTrace" => self.stack_trace(arguments),
             "scopes" => self.scopes(arguments),
@@ -1089,6 +1094,105 @@ impl Dap {
         }))
     }
 
+    fn merged_data_requests(&self) -> Vec<DataRequest> {
+        let mut merged = self.dap_data_breakpoints.clone();
+        for wp in &self.custom_watchpoints {
+            if !merged
+                .iter()
+                .any(|d| d.addr == wp.addr && d.size == wp.size && d.access == wp.access)
+            {
+                merged.push(wp.clone());
+            }
+        }
+        merged
+    }
+
+    fn watchpoint_list_json(&self) -> Value {
+        let items: Vec<Value> = self
+            .custom_watchpoints
+            .iter()
+            .map(|wp| {
+                let access = match wp.access {
+                    WpAccess::Read => "read",
+                    WpAccess::ReadWrite => "readWrite",
+                    WpAccess::Write => "write",
+                };
+                json!({
+                    "address": hex(wp.addr),
+                    "size": wp.size,
+                    "access": access,
+                    "expression": wp.expression,
+                })
+            })
+            .collect();
+        json!({"watchpoints": items})
+    }
+
+    fn custom_watchpoint(&mut self, arguments: &Value) -> Handled {
+        let action = arguments["action"].as_str().unwrap_or("list");
+        match action {
+            "list" => Ok(self.watchpoint_list_json()),
+            "clear" => {
+                self.custom_watchpoints.clear();
+                let merged = self.merged_data_requests();
+                self.session()?
+                    .set_data_breakpoints(&merged)
+                    .map_err(fail)?;
+                Ok(self.watchpoint_list_json())
+            }
+            "remove" => {
+                let reference = arguments["address"]
+                    .as_str()
+                    .ok_or("watchpoint remove needs an address")?;
+                let addr = parse_address(reference, 0)?;
+                self.custom_watchpoints.retain(|wp| wp.addr != addr);
+                let merged = self.merged_data_requests();
+                self.session()?
+                    .set_data_breakpoints(&merged)
+                    .map_err(fail)?;
+                Ok(self.watchpoint_list_json())
+            }
+            "set" => {
+                let reference = arguments["address"]
+                    .as_str()
+                    .ok_or("watchpoint set needs an address")?;
+                let addr = parse_address(reference, 0)?;
+                let size = arguments["size"].as_u64().unwrap_or(4) as u32;
+                if !matches!(size, 1 | 2 | 4) || !addr.is_multiple_of(size) {
+                    return Err("DWT watchpoint requires a 1, 2, or 4-byte aligned address".into());
+                }
+                let access = parse_access(arguments["access"].as_str());
+                let expression = arguments["expression"].as_str().map(str::to_owned);
+                let prev = self.custom_watchpoints.clone();
+                self.custom_watchpoints.retain(|wp| wp.addr != addr);
+                self.custom_watchpoints.push(DataRequest {
+                    addr,
+                    size,
+                    access,
+                    expression,
+                    options: BreakpointOptions::default(),
+                });
+                let merged = self.merged_data_requests();
+                let resolved = self
+                    .session()?
+                    .set_data_breakpoints(&merged)
+                    .map_err(fail)?;
+                if let Some(last) = resolved.last().filter(|r| !r.verified) {
+                    self.custom_watchpoints = prev;
+                    let rollback = self.merged_data_requests();
+                    let _ = self.session()?.set_data_breakpoints(&rollback);
+                    return Err(last
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "no DWT comparator available".to_owned())
+                        .into());
+                }
+                Ok(self.watchpoint_list_json())
+            }
+            other => Err(format!("unknown watchpoint action {other:?}").into()),
+        }
+    }
+
     fn set_data_breakpoints(&mut self, arguments: &Value) -> Handled {
         let mut requests = Vec::new();
         for item in arguments["breakpoints"].as_array().into_iter().flatten() {
@@ -1105,12 +1209,15 @@ impl Dap {
                 options: breakpoint_options(item),
             });
         }
+        self.dap_data_breakpoints = requests.clone();
+        let merged = self.merged_data_requests();
         let resolved = self
             .session()?
-            .set_data_breakpoints(&requests)
+            .set_data_breakpoints(&merged)
             .map_err(fail)?;
         let items: Vec<Value> = resolved
             .iter()
+            .take(self.dap_data_breakpoints.len())
             .map(|item| self.describe_breakpoint(item))
             .collect();
         Ok(json!({"breakpoints": items}))
@@ -1871,6 +1978,8 @@ impl Dap {
         if std::mem::replace(&mut self.finished, true) {
             return Ok(json!({}));
         }
+        self.dap_data_breakpoints.clear();
+        self.custom_watchpoints.clear();
         self.sampler.unbind();
         if let Some(session) = self.session.as_mut() {
             session.end_debugging(halt).map_err(fail)?;

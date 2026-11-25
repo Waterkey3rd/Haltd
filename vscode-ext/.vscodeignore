@@ -2,5 +2,6 @@ src/**
 scripts/**
 node_modules/**
 tsconfig.json
+tsconfig.webview.json
 **/*.map
 .gitignore

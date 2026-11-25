@@ -2,7 +2,7 @@
   "name": "haltd-embedded",
   "displayName": "Haltd Embedded",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "WaterKeyqwq",
   "license": "MIT",
   "repository": {
@@ -235,23 +235,27 @@
         "icon": "$(add)"
       },
       {
+        "command": "haltd.popOutLiveWatch",
+        "title": "Pop Out to Editor Tab",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "haltd.dockLiveWatchToPanel",
+        "title": "Dock to Bottom Panel",
+        "icon": "$(layout-panel)"
+      },
+      {
+        "command": "haltd.configureWatchColumns",
+        "title": "Configure Live Watch Columns",
+        "icon": "$(layout)"
+      },
+      {
         "command": "haltd.addToTimeline",
         "title": "Add to Timeline (HSS)"
       },
       {
-        "command": "haltd.removeWatch",
-        "title": "Remove",
-        "icon": "$(close)"
-      },
-      {
-        "command": "haltd.setWatchRate",
-        "title": "Set Refresh Rate (0-5 Hz)",
-        "icon": "$(dashboard)"
-      },
-      {
-        "command": "haltd.writeWatch",
-        "title": "Set Value",
-        "icon": "$(edit)"
+        "command": "haltd.loadTimelinePreset",
+        "title": "Haltd: Load Timeline Preset"
       },
       {
         "command": "haltd.openTimeline",
@@ -314,22 +318,6 @@
       {
         "command": "haltd.addSelectionToTimeline",
         "title": "Haltd: Add Selection to Timeline (HSS)"
-      },
-      {
-        "command": "haltd.removeSelectedWatch",
-        "title": "Remove Selected from Live Watch"
-      },
-      {
-        "command": "haltd.editSelectedWatch",
-        "title": "Edit Selected Live Watch Value"
-      },
-      {
-        "command": "haltd.setSelectedWatchRate",
-        "title": "Set Selected Live Watch Refresh Rate"
-      },
-      {
-        "command": "haltd.copySelectedWatch",
-        "title": "Copy Selected Live Watch Value"
       }
     ],
     "keybindings": [
@@ -350,42 +338,6 @@
         "key": "ctrl+g",
         "mac": "cmd+g",
         "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
-      },
-      {
-        "command": "haltd.addSelectionToTimeline",
-        "args": "liveWatch",
-        "key": "ctrl+g",
-        "mac": "cmd+g",
-        "when": "inDebugMode && debugType == 'haltd' && focusedView == 'haltd.liveWatch'"
-      },
-      {
-        "command": "haltd.removeSelectedWatch",
-        "key": "delete",
-        "mac": "backspace",
-        "when": "focusedView == 'haltd.liveWatch'"
-      },
-      {
-        "command": "haltd.editSelectedWatch",
-        "key": "f2",
-        "when": "focusedView == 'haltd.liveWatch'"
-      },
-      {
-        "command": "haltd.editSelectedWatch",
-        "args": "enter",
-        "key": "enter",
-        "when": "focusedView == 'haltd.liveWatch'"
-      },
-      {
-        "command": "haltd.setSelectedWatchRate",
-        "key": "ctrl+r",
-        "mac": "cmd+r",
-        "when": "focusedView == 'haltd.liveWatch'"
-      },
-      {
-        "command": "haltd.copySelectedWatch",
-        "key": "ctrl+c",
-        "mac": "cmd+c",
-        "when": "focusedView == 'haltd.liveWatch'"
       },
       {
         "command": "haltd.openTimeline",
@@ -419,16 +371,53 @@
             "Put the currently executing task first, followed by all other FreeRTOS tasks."
           ],
           "description": "How FreeRTOS tasks are presented in the Debug Call Stack view."
+        },
+        "haltd.liveWatch.columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "hex",
+              "type",
+              "address",
+              "rate"
+            ]
+          },
+          "default": [
+            "hex",
+            "type",
+            "address",
+            "rate"
+          ],
+          "description": "Optional columns visible in the Live Watch table (Expression and Value are always displayed)."
+        },
+        "haltd.liveWatch.freshnessDurationMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "Duration in milliseconds for Live Watch value change highlighting to cool down while running (0 disables fade)."
         }
       }
     },
-    "views": {
-      "debug": [
+    "viewsContainers": {
+      "panel": [
         {
+          "id": "haltd-panel",
+          "title": "Live Watch",
+          "icon": "resources/livewatch.svg"
+        }
+      ]
+    },
+    "views": {
+      "haltd-panel": [
+        {
+          "type": "webview",
           "id": "haltd.liveWatch",
-          "name": "Live Watch",
-          "visibility": "visible"
-        },
+          "name": "Live Watch"
+        }
+      ],
+      "debug": [
         {
           "id": "haltd.tasks",
           "name": "FreeRTOS Tasks",
@@ -444,12 +433,44 @@
     "menus": {
       "editor/context": [
         {
+          "command": "haltd.addToWatch",
+          "when": "inDebugMode && debugType == haltd",
+          "group": "debug@10"
+        },
+        {
           "command": "haltd.addToTimeline",
           "when": "inDebugMode && debugType == haltd",
           "group": "debug@11"
         }
       ],
+      "editor/title": [
+        {
+          "command": "haltd.addToWatch",
+          "when": "activeWebviewPanelId == haltd.liveWatchPanel",
+          "group": "navigation@1"
+        },
+        {
+          "command": "haltd.configureWatchColumns",
+          "when": "activeWebviewPanelId == haltd.liveWatchPanel",
+          "group": "navigation@2"
+        },
+        {
+          "command": "haltd.openTimeline",
+          "when": "activeWebviewPanelId == haltd.liveWatchPanel",
+          "group": "navigation@3"
+        },
+        {
+          "command": "haltd.dockLiveWatchToPanel",
+          "when": "activeWebviewPanelId == haltd.liveWatchPanel",
+          "group": "navigation@4"
+        }
+      ],
       "debug/variables/context": [
+        {
+          "command": "haltd.addToWatch",
+          "when": "debugType == haltd",
+          "group": "z_haltd@1"
+        },
         {
           "command": "haltd.addToTimeline",
           "when": "debugType == haltd",
@@ -463,14 +484,24 @@
           "group": "navigation@1"
         },
         {
-          "command": "haltd.openTimeline",
+          "command": "haltd.configureWatchColumns",
           "when": "view == haltd.liveWatch",
           "group": "navigation@2"
         },
         {
-          "command": "haltd.openRttTerminal",
+          "command": "haltd.openTimeline",
           "when": "view == haltd.liveWatch",
           "group": "navigation@3"
+        },
+        {
+          "command": "haltd.openRttTerminal",
+          "when": "view == haltd.liveWatch",
+          "group": "navigation@4"
+        },
+        {
+          "command": "haltd.popOutLiveWatch",
+          "when": "view == haltd.liveWatch",
+          "group": "navigation@5"
         },
         {
           "command": "haltd.refreshPeripherals",
@@ -485,31 +516,6 @@
       ],
       "view/item/context": [
         {
-          "command": "haltd.setWatchRate",
-          "when": "view == haltd.liveWatch",
-          "group": "inline@0"
-        },
-        {
-          "command": "haltd.writeWatch",
-          "when": "view == haltd.liveWatch && viewItem == watchWritable",
-          "group": "inline@1"
-        },
-        {
-          "command": "haltd.removeWatch",
-          "when": "view == haltd.liveWatch && !listMultiSelection",
-          "group": "inline@2"
-        },
-        {
-          "command": "haltd.addToTimeline",
-          "when": "view == haltd.liveWatch",
-          "group": "1_haltd@1"
-        },
-        {
-          "command": "haltd.setWatchRate",
-          "when": "view == haltd.liveWatch",
-          "group": "1_haltd@2"
-        },
-        {
           "command": "haltd.readRegister",
           "when": "view == haltd.peripherals && viewItem =~ /sideEffects/",
           "group": "inline"
@@ -522,15 +528,7 @@
       ],
       "commandPalette": [
         {
-          "command": "haltd.removeWatch",
-          "when": "false"
-        },
-        {
-          "command": "haltd.setWatchRate",
-          "when": "false"
-        },
-        {
-          "command": "haltd.writeWatch",
+          "command": "haltd.dockLiveWatchToPanel",
           "when": "false"
         },
         {
@@ -548,29 +546,13 @@
         {
           "command": "haltd.addSelectionToTimeline",
           "when": "false"
-        },
-        {
-          "command": "haltd.removeSelectedWatch",
-          "when": "false"
-        },
-        {
-          "command": "haltd.editSelectedWatch",
-          "when": "false"
-        },
-        {
-          "command": "haltd.setSelectedWatchRate",
-          "when": "false"
-        },
-        {
-          "command": "haltd.copySelectedWatch",
-          "when": "false"
         }
       ]
     }
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --external:bufferutil --external:utf-8-validate --outfile=dist/extension.js --sourcemap",
-    "typecheck": "tsc --noEmit"
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --external:bufferutil --external:utf-8-validate --outfile=dist/extension.js --sourcemap && esbuild src/webview/liveWatchApp.ts --bundle --platform=browser --format=iife --outfile=dist/liveWatchApp.js --sourcemap",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.webview.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

@@ -125,12 +125,14 @@ impl Scalar {
         })
     }
 
-    /// Bytes to store for `text`, a number or `true`/`false`.
+    /// Bytes to store for `text`: decimal/hex/binary numbers (with optional `_`
+    /// separators), `true`/`false`, or single-byte character literals `'A'`.
     pub fn encode(&self, text: &str) -> Result<u64, String> {
         let text = text.trim();
         let bad = || format!("{text:?} is not a valid value");
         if self.kind == ScalarKind::Float {
-            let value: f64 = text.parse().map_err(|_| bad())?;
+            let cleaned = strip_numeric_separators(text).ok_or_else(bad)?;
+            let value: f64 = cleaned.parse().map_err(|_| bad())?;
             return Ok(if self.size == 4 {
                 u64::from((value as f32).to_bits())
             } else {
@@ -142,19 +144,108 @@ impl Scalar {
             "false" => return Ok(0),
             _ => {}
         }
-        let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-            Some(hex) => i128::from_str_radix(hex, 16),
-            None => text.parse::<i128>(),
-        }
-        .map_err(|_| bad())?;
         let width = self.bits.map_or(self.size * 8, |bits| bits.bit_size);
+        if width == 0 || width > 64 {
+            return Err(format!("unsupported scalar width {width}"));
+        }
+        let parsed = if let Some(ch) = parse_char_literal(text) {
+            if width < 8 && u32::from(ch) >= (1u32 << width) {
+                return Err(format!("{text} does not fit in {width} bits"));
+            }
+            i128::from(ch)
+        } else {
+            let cleaned = strip_numeric_separators(text).ok_or_else(bad)?;
+            match cleaned
+                .strip_prefix("0x")
+                .or_else(|| cleaned.strip_prefix("0X"))
+            {
+                Some(hex) => i128::from_str_radix(hex, 16),
+                None => match cleaned
+                    .strip_prefix("0b")
+                    .or_else(|| cleaned.strip_prefix("0B"))
+                {
+                    Some(bin) => i128::from_str_radix(bin, 2),
+                    None => cleaned.parse::<i128>(),
+                },
+            }
+            .map_err(|_| bad())?
+        };
+        self.encode_int(parsed, text)
+    }
+
+    /// Range-check an integer value and mask it to the scalar's bit width.
+    pub fn encode_int(&self, parsed: i128, label: &str) -> Result<u64, String> {
+        let width = self.bits.map_or(self.size * 8, |bits| bits.bit_size);
+        if width == 0 || width > 64 {
+            return Err(format!("unsupported scalar width {width}"));
+        }
         let (low, high) = match self.kind {
             ScalarKind::Signed => (-(1i128 << (width - 1)), (1i128 << width) - 1),
             _ => (0, (1i128 << width) - 1),
         };
         if parsed < low || parsed > high {
-            return Err(format!("{text} does not fit in {width} bits"));
+            return Err(format!("{label} does not fit in {width} bits"));
         }
         Ok(parsed as u64 & (u64::MAX >> (64 - width)))
+    }
+}
+
+fn strip_numeric_separators(text: &str) -> Option<String> {
+    if text.is_empty() || text.starts_with('_') || text.ends_with('_') || text.contains("__") {
+        return None;
+    }
+    Some(text.replace('_', ""))
+}
+
+fn parse_char_literal(text: &str) -> Option<u8> {
+    let inner = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    if let Some(esc) = inner.strip_prefix('\\') {
+        return match esc {
+            "n" => Some(b'\n'),
+            "r" => Some(b'\r'),
+            "t" => Some(b'\t'),
+            "0" => Some(b'\0'),
+            "\\" => Some(b'\\'),
+            "'" => Some(b'\''),
+            "\"" => Some(b'"'),
+            _ => esc
+                .strip_prefix('x')
+                .filter(|hex| hex.len() == 2)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok()),
+        };
+    }
+    let mut chars = inner.chars();
+    let ch = chars.next()?;
+    (chars.next().is_none() && u32::from(ch) <= 0xFF).then_some(ch as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar(kind: ScalarKind, size: u32) -> Scalar {
+        Scalar {
+            kind,
+            size,
+            bits: None,
+        }
+    }
+
+    #[test]
+    fn encodes_binary_underscores_and_char_literals() {
+        let u8s = scalar(ScalarKind::Unsigned, 1);
+        assert_eq!(u8s.encode("0b1010_0101"), Ok(0b1010_0101));
+        assert_eq!(u8s.encode("0B1111"), Ok(0b1111));
+        assert_eq!(u8s.encode("'A'"), Ok(65));
+        assert_eq!(u8s.encode("'\\n'"), Ok(10));
+        assert_eq!(u8s.encode("'\\x7f'"), Ok(0x7F));
+        assert!(u8s.encode("_12").is_err());
+
+        let u32s = scalar(ScalarKind::Unsigned, 4);
+        assert_eq!(u32s.encode("1_000_000"), Ok(1_000_000));
+        assert_eq!(u32s.encode("0xFF00_1234"), Ok(0xFF00_1234));
+
+        let f32s = scalar(ScalarKind::Float, 4);
+        assert_eq!(f32s.encode("1_234.5"), Ok(u64::from(1234.5f32.to_bits())));
     }
 }

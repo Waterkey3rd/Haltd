@@ -626,3 +626,22 @@ fn optimized_functions_stop_at_their_entry() {
     let after = db.after_prologue(function.low, function.high).unwrap();
     assert_eq!(after, function.low);
 }
+
+#[test]
+fn completes_globals_and_encodes_enum_names() {
+    let db = load();
+    let mut m = target();
+    let completions = db.complete_globals("g_state", 10);
+    assert!(completions.iter().any(|c| c.name == "g_state_ptr"));
+
+    let parsed = symbols::parse("g_state_ptr->mode").unwrap();
+    let symbols::Evaluated::Place(place) = db.evaluate(&parsed, &mut m).unwrap() else {
+        panic!("expected Place");
+    };
+    let run_val = db.encode_place_value(&place, "Run").unwrap();
+    let current = db
+        .render_place(&place, &mut m, &FormatOptions::default())
+        .unwrap();
+    assert_eq!(current, "Run");
+    assert!(run_val <= 16);
+}

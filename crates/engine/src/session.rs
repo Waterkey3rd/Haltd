@@ -357,6 +357,16 @@ pub fn write_scalar(
     text: &str,
 ) -> std::result::Result<(), String> {
     let value = scalar.encode(text)?;
+    write_scalar_bits(handle, place, scalar, value)
+}
+
+/// Write an already-encoded scalar value to the target, keeping neighbouring bit-fields intact.
+pub fn write_scalar_bits(
+    handle: &ProbeHandle,
+    place: Place,
+    scalar: Scalar,
+    value: u64,
+) -> std::result::Result<(), String> {
     let size = scalar.size as usize;
     handle
         .call_blocking(Priority::P0, move |probe: &mut dyn Probe| {
@@ -1531,7 +1541,11 @@ impl Session {
         }
         let scalar = Scalar::of(&self.db, &place)
             .ok_or_else(|| EngineError::Other("only numeric values can be set".to_owned()))?;
-        write_scalar(&self.handle, place, scalar, text).map_err(EngineError::Other)?;
+        let value = self
+            .db
+            .encode_place_value(&place, text)
+            .map_err(EngineError::Other)?;
+        write_scalar_bits(&self.handle, place, scalar, value).map_err(EngineError::Other)?;
         self.invalidate();
         Ok(())
     }

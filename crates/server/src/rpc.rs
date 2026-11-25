@@ -6,12 +6,13 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use rtt::Rtt;
-use sampler::{Mode, Sampler};
+use sampler::{BatchSignal, Mode, Sampler};
 use serde_json::{json, Value};
-use tsdb::{Recorder, Tsdb};
+use tsdb::{export_recording_csv, export_recording_csv_bytes, CsvOptions, Recorder, Tsdb};
 
 use crate::control::{Control, ControlBus};
 use crate::diagnose::Diagnostic;
+use crate::presets::{self, TimelinePreset};
 use crate::ws::Subscriptions;
 
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -117,8 +118,20 @@ pub struct App {
     rtt: Arc<Rtt>,
     control: Arc<ControlBus>,
     recorder: Mutex<Option<Recorder>>,
+    last_recording: Mutex<Option<PathBuf>>,
     origin_ns: i64,
     clients: Arc<AtomicUsize>,
+}
+
+pub(crate) struct CsvExportRequest {
+    pub series_ids: Vec<u32>,
+    pub t0: i64,
+    pub t1: i64,
+    pub zoh: bool,
+    pub relative_time: bool,
+    pub from_recording: bool,
+    pub hlrec_path: Option<PathBuf>,
+    pub series_names: Option<Vec<String>>,
 }
 
 /// Counts a connected data client for as long as it lives.
@@ -138,6 +151,7 @@ impl App {
             rtt,
             control,
             recorder: Mutex::new(None),
+            last_recording: Mutex::new(None),
             origin_ns,
             clients: Arc::default(),
         })
@@ -227,8 +241,15 @@ impl App {
             .take()
             .ok_or_else(|| server_error("not recording"))?;
         let path = recorder.path().to_owned();
+        let started_ns = recorder.started_ns() - self.origin_ns;
         let stats = recorder.stop().map_err(server_error)?;
-        ok(json!({"path": path, "samples": stats.samples, "dropped": stats.dropped}))
+        *self.last_recording.lock().expect("last recording lock") = Some(path.clone());
+        ok(json!({
+            "path": path,
+            "startedNs": started_ns,
+            "samples": stats.samples,
+            "dropped": stats.dropped,
+        }))
     }
 
     fn record_start(&self, params: &Value) -> RpcResult {
@@ -242,30 +263,127 @@ impl App {
         };
         let recorder =
             Recorder::start(self.tsdb().clone(), Path::new(&path)).map_err(server_error)?;
+        *self.last_recording.lock().expect("last recording lock") = Some(path.clone());
         *slot = Some(recorder);
         ok(json!({"path": path}))
+    }
+
+    fn csv_options(&self, req: &CsvExportRequest) -> CsvOptions {
+        CsvOptions {
+            zero_order_hold: req.zoh,
+            relative_time: req.relative_time,
+            session_origin_ns: self.origin_ns,
+        }
+    }
+
+    fn resolve_hlrec_path(&self, given: Option<PathBuf>) -> Result<PathBuf, RpcError> {
+        given
+            .or_else(|| {
+                self.last_recording
+                    .lock()
+                    .expect("last recording lock")
+                    .clone()
+            })
+            .ok_or_else(|| server_error("no recording available to export"))
+    }
+
+    pub(crate) fn export_csv_bytes(
+        &self,
+        req: &CsvExportRequest,
+    ) -> Result<(Vec<u8>, u64), RpcError> {
+        let options = self.csv_options(req);
+        if req.from_recording {
+            let hlrec = self.resolve_hlrec_path(req.hlrec_path.clone())?;
+            return export_recording_csv_bytes(&hlrec, req.series_names.as_deref(), options)
+                .map_err(server_error);
+        }
+        let t0 = if req.t0 == i64::MIN {
+            i64::MIN
+        } else {
+            req.t0 + self.origin_ns
+        };
+        let t1 = if req.t1 == i64::MAX {
+            i64::MAX
+        } else {
+            req.t1 + self.origin_ns
+        };
+        self.tsdb()
+            .export_csv_bytes(&req.series_ids, t0, t1, options)
+            .map_err(server_error)
+    }
+
+    pub(crate) fn read_recording_bytes(
+        &self,
+        given: Option<PathBuf>,
+    ) -> Result<(PathBuf, Vec<u8>), RpcError> {
+        let path = self.resolve_hlrec_path(given)?;
+        let bytes = std::fs::read(&path).map_err(server_error)?;
+        Ok((path, bytes))
     }
 
     fn record_export(&self, params: &Value) -> RpcResult {
         if params["format"].as_str().unwrap_or("csv") != "csv" {
             return Err(invalid("only csv export is supported"));
         }
-        let ids = series_ids(params)?;
-        let t0 = params["t0"]
-            .as_i64()
-            .map_or(i64::MIN, |t| t + self.origin_ns);
-        let t1 = params["t1"]
-            .as_i64()
-            .map_or(i64::MAX, |t| t + self.origin_ns);
+        let from_recording = params["fromRecording"].as_bool().unwrap_or(false);
+        let ids = if from_recording && !params["seriesIds"].is_array() {
+            Vec::new()
+        } else {
+            series_ids(params)?
+        };
+        let t0 = params["t0"].as_i64().unwrap_or(i64::MIN);
+        let t1 = params["t1"].as_i64().unwrap_or(i64::MAX);
         let path = match params["path"].as_str() {
             Some(path) => PathBuf::from(path),
             None => default_output("csv")?,
         };
-        let rows = self
-            .tsdb()
-            .export_csv(&ids, t0, t1, &path)
-            .map_err(server_error)?;
+        let series_names = params["seriesNames"].as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        });
+        let req = CsvExportRequest {
+            series_ids: ids,
+            t0,
+            t1,
+            zoh: params["zoh"].as_bool().unwrap_or(false),
+            relative_time: params["relativeTime"].as_bool().unwrap_or(true),
+            from_recording,
+            hlrec_path: params["hlrecPath"].as_str().map(PathBuf::from),
+            series_names,
+        };
+        let options = self.csv_options(&req);
+        let rows = if req.from_recording {
+            let hlrec = self.resolve_hlrec_path(req.hlrec_path)?;
+            export_recording_csv(&hlrec, &path, req.series_names.as_deref(), options)
+                .map_err(server_error)?
+        } else {
+            let abs_t0 = if req.t0 == i64::MIN {
+                i64::MIN
+            } else {
+                req.t0 + self.origin_ns
+            };
+            let abs_t1 = if req.t1 == i64::MAX {
+                i64::MAX
+            } else {
+                req.t1 + self.origin_ns
+            };
+            self.tsdb()
+                .export_csv_with(&req.series_ids, abs_t0, abs_t1, options, &path)
+                .map_err(server_error)?
+        };
         ok(json!({"path": path, "rows": rows}))
+    }
+
+    fn record_save_hlrec(&self, params: &Value) -> RpcResult {
+        let dest = PathBuf::from(string_param(params, "path")?);
+        let src = self.resolve_hlrec_path(params["hlrecPath"].as_str().map(PathBuf::from))?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(server_error)?;
+        }
+        let bytes = std::fs::copy(&src, &dest).map_err(server_error)?;
+        ok(json!({"path": dest, "bytes": bytes}))
     }
 
     fn events(&self, params: &Value) -> RpcResult {
@@ -300,21 +418,59 @@ impl App {
             "session.status" => {
                 let mut status = sampler.status_json();
                 status["nowNs"] = json!(self.tsdb().now_ns() - self.origin_ns);
-                status["recording"] = json!(self
-                    .recorder
-                    .lock()
-                    .expect("recorder lock")
+                let rec_guard = self.recorder.lock().expect("recorder lock");
+                let rec_path = rec_guard
                     .as_ref()
-                    .map(|recorder| recorder.path().to_owned()));
+                    .map(|recorder| recorder.path().to_owned());
+                let rec_info = rec_guard.as_ref().map(|recorder| {
+                    let stats = recorder.stats();
+                    json!({
+                        "active": true,
+                        "path": recorder.path(),
+                        "startedNs": recorder.started_ns() - self.origin_ns,
+                        "samples": stats.samples,
+                        "dropped": stats.dropped,
+                    })
+                });
+                drop(rec_guard);
+                status["recording"] = json!(rec_path);
+                status["recordingInfo"] = json!(rec_info);
+                status["lastRecordingPath"] = json!(self
+                    .last_recording
+                    .lock()
+                    .expect("last recording lock")
+                    .clone());
                 status["controller"] = json!(self.control.has_controller());
                 ok(status)
             }
             "session.stats" => ok(sampler.stats_json()),
+            "symbols.complete" => {
+                let query = params["query"].as_str().unwrap_or("");
+                let limit = params["limit"].as_u64().unwrap_or(40) as usize;
+                let items: Vec<Value> = sampler
+                    .complete_globals(query, limit)
+                    .into_iter()
+                    .map(|item| {
+                        json!({
+                            "name": item.name,
+                            "type": item.type_name,
+                            "address": format!("{:#010x}", item.addr),
+                        })
+                    })
+                    .collect();
+                ok(json!({"items": items}))
+            }
 
             "watch.add" => {
                 let rate = params["rateHz"].as_u64().map(|rate| rate as u32);
                 let info = sampler
                     .watch_add(string_param(params, "expr")?, rate)
+                    .map_err(server_error)?;
+                ok(json!(info))
+            }
+            "watch.modify" => {
+                let info = sampler
+                    .watch_modify(u32_param(params, "id")?, string_param(params, "expr")?)
                     .map_err(server_error)?;
                 ok(json!(info))
             }
@@ -375,6 +531,119 @@ impl App {
                 }
                 ok(json!({}))
             }
+            "timeline.clear" => {
+                self.rtt.clear_plotted();
+                sampler.timeline_clear();
+                ok(json!({}))
+            }
+            "timeline.applyBatch" => {
+                let replace = params["replace"].as_bool().unwrap_or(true);
+                let rate_hz = params["rateHz"].as_u64().map(|rate| rate as u32);
+                let signals = params["signals"]
+                    .as_array()
+                    .ok_or_else(|| invalid("signals must be an array"))?;
+                if replace {
+                    self.rtt.clear_plotted();
+                }
+                let mut expr_items = Vec::new();
+                let mut rtt_items = Vec::new();
+                for item in signals {
+                    let kind = item["kind"].as_str().unwrap_or("expr");
+                    let expr = item["expr"]
+                        .as_str()
+                        .ok_or_else(|| invalid("signal expr must be a string"))?
+                        .to_owned();
+                    let group = item["group"].as_str().map(str::to_owned);
+                    let color = item["color"].as_str().map(str::to_owned);
+                    let mode_str = item["mode"].as_str();
+                    if kind == "rtt" || mode_str == Some("rtt") {
+                        rtt_items.push((expr, group, color));
+                    } else {
+                        let mode = Mode::parse(mode_str).map_err(|e| invalid(&e))?;
+                        let priority = item["priority"].as_i64().unwrap_or(0) as i32;
+                        expr_items.push(BatchSignal {
+                            expr,
+                            mode,
+                            group,
+                            color,
+                            priority,
+                        });
+                    }
+                }
+                let mut added: Vec<Value> = sampler
+                    .timeline_apply_batch(replace, rate_hz, &expr_items)
+                    .map_err(server_error)?
+                    .into_iter()
+                    .map(|status| json!(status))
+                    .collect();
+                for (name, group, color) in rtt_items {
+                    match self.rtt.plot_signal(&name, group.clone()) {
+                        Ok(id) => {
+                            if color.is_some() || group.is_some() {
+                                self.tsdb().update_meta(id, group.clone(), color.clone());
+                            }
+                            added.push(json!({
+                                "seriesId": id,
+                                "name": name,
+                                "root": name,
+                                "mode": "rtt",
+                                "actualMode": "rtt",
+                                "rateHz": 0,
+                                "error": null,
+                            }));
+                        }
+                        Err(err) => {
+                            added.push(json!({
+                                "seriesId": 0,
+                                "name": name,
+                                "root": name,
+                                "mode": "rtt",
+                                "actualMode": "none",
+                                "rateHz": 0,
+                                "error": err,
+                            }));
+                        }
+                    }
+                }
+                self.rtt.set_paused(sampler.rate().rate_hz == 0);
+                ok(json!({"series": added}))
+            }
+            "timeline.presets.list" => {
+                let ws = sampler.workspace();
+                let data = presets::load(ws.as_deref()).map_err(server_error)?;
+                ok(json!(data))
+            }
+            "timeline.presets.save" => {
+                let ws = sampler.workspace();
+                let preset: TimelinePreset = serde_json::from_value(params["preset"].clone())
+                    .map_err(|e| invalid(&format!("invalid preset: {e}")))?;
+                let overwrite = params["overwriteName"].as_str();
+                let data =
+                    presets::save_preset(ws.as_deref(), preset, overwrite).map_err(server_error)?;
+                ok(json!(data))
+            }
+            "timeline.presets.delete" => {
+                let ws = sampler.workspace();
+                let data = presets::delete_preset(ws.as_deref(), string_param(params, "name")?)
+                    .map_err(server_error)?;
+                ok(json!(data))
+            }
+            "timeline.presets.rename" => {
+                let ws = sampler.workspace();
+                let data = presets::rename_preset(
+                    ws.as_deref(),
+                    string_param(params, "from")?,
+                    string_param(params, "to")?,
+                )
+                .map_err(server_error)?;
+                ok(json!(data))
+            }
+            "timeline.presets.setActive" => {
+                let ws = sampler.workspace();
+                let data = presets::set_active(ws.as_deref(), params["name"].as_str())
+                    .map_err(server_error)?;
+                ok(json!(data))
+            }
             "timeline.list" => {
                 let decorate = |mut item: Value, id: u32| {
                     let meta = self.tsdb().get(id).map(|series| series.meta());
@@ -392,6 +661,7 @@ impl App {
                         "seriesId": id,
                         "name": name,
                         "root": name,
+                        "mode": "rtt",
                         "actualMode": "rtt",
                         "rateHz": 0,
                         "error": null,
@@ -472,6 +742,7 @@ impl App {
             "record.start" => self.record_start(params),
             "record.stop" => self.record_stop(),
             "record.export" => self.record_export(params),
+            "record.saveHlrec" => self.record_save_hlrec(params),
 
             "target.halt" => self.control(Control::Halt),
             "target.go" => self.control(Control::Go),

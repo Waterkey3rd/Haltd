@@ -94,6 +94,26 @@
         </div>
       </div>
 
+      <div class="toolbar-divider"></div>
+
+      <div class="toolbar-group preset-cluster">
+        <button type="button" id="preset-btn" title="Load or save workspace Timeline presets">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="currentColor" d="M2 3.5a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11a.5.5 0 0 1-.5-.5zm0 4a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11a.5.5 0 0 1-.5-.5zm0 4a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5z"/>
+          </svg>
+          <span id="preset-label">Presets</span>
+          <span id="preset-dirty" class="dirty-dot" hidden title="Modified since saved"></span>
+          <svg class="icon icon-caret" viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="currentColor" d="M4.2 6.2a.6.6 0 0 1 .85 0L8 9.15l2.95-2.95a.6.6 0 1 1 .85.85l-3.38 3.38a.6.6 0 0 1-.85 0L4.2 7.05a.6.6 0 0 1 0-.85z"/>
+          </svg>
+        </button>
+        <button type="button" id="preset-save" class="icon-btn" title="Save current Timeline configuration to active preset">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="currentColor" d="M3 2.5A1.5 1.5 0 0 1 4.5 1h6.59a1.5 1.5 0 0 1 1.06.44l1.41 1.41a1.5 1.5 0 0 1 .44 1.06V13.5A1.5 1.5 0 0 1 12.5 15h-8A1.5 1.5 0 0 1 3 13.5v-11zM4.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5H5V9.5A1.5 1.5 0 0 1 6.5 8h3A1.5 1.5 0 0 1 11 9.5V14h1.5a.5.5 0 0 0 .5-.5V3.91a.5.5 0 0 0-.15-.35l-1.41-1.41A.5.5 0 0 0 11.09 2H11v3a1 1 0 0 1-1 1H6.5a1 1 0 0 1-1-1V2h-1zm2 0v3H10V2H6.5zM10 14V9.5a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5V14h4z"/>
+          </svg>
+        </button>
+      </div>
+
       <span class="spacer"></span>
 
       <div class="toolbar-group">
@@ -111,7 +131,7 @@
         <button type="button" id="layout-mode" aria-pressed="false" title="Grouped by track vs Split individual lanes">Grouped</button>
         <button type="button" id="toggle-band" aria-pressed="true" title="Show min/max envelope band">Bands</button>
         <button type="button" id="record" title="Start / stop .hlrec recording">Record</button>
-        <button type="button" id="export" title="Export visible window to CSV">CSV</button>
+        <button type="button" id="export" title="Export signals or recording to CSV">Export CSV</button>
         <button type="button" id="snapshot" title="Save PNG snapshot">PNG</button>
 
         <label class="control-pill theme-pill" title="Color theme (Auto follows VS Code)">
@@ -143,12 +163,26 @@
       <span id="overview-range" class="overview-meta">0.00 s — 0.00 s</span>
     </div>
 
+    <div id="record-banner" class="record-banner" hidden>
+      <span class="rec-banner-badge">REC SAVED</span>
+      <span id="record-banner-summary" class="mono"></span>
+      <span class="spacer"></span>
+      <button type="button" id="record-banner-csv" class="mini-btn btn-primary">Export CSV…</button>
+      <button type="button" id="record-banner-zoom" class="mini-btn">Zoom to Recording</button>
+      <button type="button" id="record-banner-hlrec" class="mini-btn">Save .hlrec…</button>
+      <button type="button" id="record-banner-close" class="mini-btn" title="Dismiss">×</button>
+    </div>
+
     <main id="tracks-workspace">
       <div id="tracks-scroll">
         <div id="legend-resizer" title="Drag to resize legend column width"></div>
         <div id="empty">
           <div class="empty-card">
-            <div class="empty-icon">📈</div>
+            <div class="empty-icon">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="2 14 6 14 9 5 13 19 16 11 19 11 22 14" />
+              </svg>
+            </div>
             <h3>Timeline Ready</h3>
             <p>Add a global/static C/C++ expression above, press <kbd>Ctrl+G</kbd> in VS Code, or enable RTT auto-decoding to see waveforms appear on synchronized tracks.</p>
             <div class="empty-shortcuts">
@@ -160,6 +194,7 @@
               <span><kbd>Click</kbd> Sample Cursor</span>
               <span><kbd>A</kbd>/<kbd>B</kbd> Measure</span>
             </div>
+            <div id="empty-presets" class="empty-presets" hidden></div>
           </div>
         </div>
         <div id="tracks-list" hidden></div>
@@ -239,6 +274,84 @@
         </div>
       </div>
     </main>
+
+    <div id="preset-popover" class="popover preset-popover" hidden>
+      <div class="popover-header">
+        <span>Timeline Presets</span>
+        <button type="button" id="preset-close" class="mini-btn" title="Close">×</button>
+      </div>
+      <div id="preset-list" class="popover-body preset-list"></div>
+      <form id="preset-save-form" class="preset-save-row">
+        <input
+          id="preset-new-name"
+          type="text"
+          placeholder="Save current layout as…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button type="submit" class="mini-btn btn-primary">Save</button>
+      </form>
+    </div>
+
+    <div id="export-popover" class="popover export-popover" hidden>
+      <div class="popover-header">
+        <span>Export CSV</span>
+        <button type="button" id="export-close" class="mini-btn" title="Close">×</button>
+      </div>
+      <form id="export-form" class="popover-body export-form">
+        <div class="export-section-title">Time Range</div>
+        <label class="export-radio-row">
+          <input type="radio" id="exp-range-cursors" name="exp-range" value="cursors" />
+          <span>Cursor A..B</span>
+          <span id="exp-cursors-meta" class="export-meta"></span>
+        </label>
+        <label class="export-radio-row">
+          <input type="radio" id="exp-range-visible" name="exp-range" value="visible" checked />
+          <span>Visible Window</span>
+          <span id="exp-visible-meta" class="export-meta"></span>
+        </label>
+        <label class="export-radio-row">
+          <input type="radio" id="exp-range-all" name="exp-range" value="all" />
+          <span>All Buffered History</span>
+          <span class="export-meta">(ring buffer)</span>
+        </label>
+        <label class="export-radio-row">
+          <input type="radio" id="exp-range-recording" name="exp-range" value="recording" />
+          <span>Last Recording (.hlrec)</span>
+          <span id="exp-recording-meta" class="export-meta"></span>
+        </label>
+
+        <div class="export-section-title">Signals &amp; Alignment</div>
+        <label class="export-check-row">
+          <input type="checkbox" id="exp-visible-only" checked />
+          <span>Visible signals only</span>
+        </label>
+        <div class="export-inline-radios">
+          <label class="export-radio-row">
+            <input type="radio" id="exp-align-sparse" name="exp-align" value="sparse" />
+            <span>Sparse (exact)</span>
+          </label>
+          <label class="export-radio-row">
+            <input type="radio" id="exp-align-zoh" name="exp-align" value="zoh" checked />
+            <span>Zero-Order Hold</span>
+          </label>
+        </div>
+        <label class="export-check-row">
+          <input type="checkbox" id="exp-relative-time" checked />
+          <span>Start timestamps at 0.000 s</span>
+        </label>
+
+        <label class="export-file-row">
+          <span>Filename</span>
+          <input id="exp-filename" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+
+        <div class="export-actions">
+          <span class="spacer"></span>
+          <button type="submit" class="btn-primary">Save CSV…</button>
+        </div>
+      </form>
+    </div>
 
     <div id="events-popover" class="popover" hidden>
       <div class="popover-header">

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::{Event, SeriesMeta, Tsdb};
+use crate::{write_csv_series, CsvColumn, CsvOptions, Event, SeriesMeta, Tsdb};
 
 const MAGIC: &[u8; 8] = b"HLREC\x001\n";
 /// Accepted when reading recordings written before the rename to Haltd.
@@ -35,6 +35,7 @@ struct Counters {
 
 pub struct Recorder {
     path: PathBuf,
+    started_ns: i64,
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
     thread: Option<JoinHandle<io::Result<()>>>,
@@ -109,6 +110,7 @@ impl Recorder {
             samples: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
         });
+        let started_ns = tsdb.now_ns();
         let last_event = tsdb.events_since(0).last().map_or(0, |event| event.seq);
         let mut writer = Writer {
             tsdb,
@@ -131,6 +133,7 @@ impl Recorder {
             })?;
         Ok(Self {
             path: path.to_owned(),
+            started_ns,
             stop,
             counters,
             thread: Some(thread),
@@ -139,6 +142,10 @@ impl Recorder {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn started_ns(&self) -> i64 {
+        self.started_ns
     }
 
     pub fn stats(&self) -> RecordingStats {
@@ -219,6 +226,52 @@ pub fn read_recording(path: &Path) -> io::Result<Recording> {
     }
 }
 
+fn write_recording_csv(
+    hlrec_path: &Path,
+    only_names: Option<&[String]>,
+    options: CsvOptions,
+    out: impl Write,
+) -> io::Result<u64> {
+    let mut recording = read_recording(hlrec_path)?;
+    let selected: Vec<SeriesMeta> = recording
+        .series
+        .into_iter()
+        .filter(|meta| only_names.is_none_or(|wanted| wanted.iter().any(|name| name == &meta.name)))
+        .collect();
+    let names: Vec<String> = selected.iter().map(|meta| meta.name.clone()).collect();
+    let columns: Vec<CsvColumn> = selected
+        .iter()
+        .map(|meta| CsvColumn {
+            samples: recording.samples.remove(&meta.id).unwrap_or_default(),
+            seed: None,
+        })
+        .collect();
+    write_csv_series(&names, &columns, options.session_origin_ns, options, out)
+}
+
+/// Export an `.hlrec` recording file directly to CSV without relying on the
+/// in-memory ring buffer.
+pub fn export_recording_csv(
+    hlrec_path: &Path,
+    csv_path: &Path,
+    only_names: Option<&[String]>,
+    options: CsvOptions,
+) -> io::Result<u64> {
+    let out = BufWriter::new(File::create(csv_path)?);
+    write_recording_csv(hlrec_path, only_names, options, out)
+}
+
+/// Export an `.hlrec` recording file into an in-memory CSV byte buffer.
+pub fn export_recording_csv_bytes(
+    hlrec_path: &Path,
+    only_names: Option<&[String]>,
+    options: CsvOptions,
+) -> io::Result<(Vec<u8>, u64)> {
+    let mut out = Vec::new();
+    let rows = write_recording_csv(hlrec_path, only_names, options, &mut out)?;
+    Ok((out, rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +342,36 @@ mod tests {
 
         let recording = read_recording(&path).unwrap();
         assert_eq!(recording.samples[&a.id()], [(1, 4.5)]);
+    }
+
+    #[test]
+    fn recording_exports_directly_to_csv_with_zoh_and_filter() {
+        let tsdb = Arc::new(Tsdb::default());
+        let a = tsdb.create_series("sig_a".to_owned(), None, None);
+        let b = tsdb.create_series("sig_b".to_owned(), None, None);
+        let hlrec = scratch("export.hlrec");
+        let recorder = Recorder::start(tsdb.clone(), &hlrec).unwrap();
+        a.push(1_000_000_000, 5.0);
+        b.push(2_000_000_000, 9.0);
+        thread::sleep(FLUSH_INTERVAL * 2);
+        recorder.stop().unwrap();
+
+        let csv_path = scratch("export.csv");
+        let rows = export_recording_csv(
+            &hlrec,
+            &csv_path,
+            Some(&["sig_a".to_owned(), "sig_b".to_owned()]),
+            CsvOptions {
+                zero_order_hold: true,
+                relative_time: true,
+                session_origin_ns: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            std::fs::read_to_string(&csv_path).unwrap(),
+            "t_s,sig_a,sig_b\n0.000000000,5,\n1.000000000,5,9\n"
+        );
     }
 }

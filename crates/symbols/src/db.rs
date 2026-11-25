@@ -69,6 +69,14 @@ pub struct Variable {
     pub(crate) die: u32,
 }
 
+/// Global variable completion candidate for UI autocomplete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalCompletion {
+    pub name: String,
+    pub type_name: String,
+    pub addr: u32,
+}
+
 /// A function with code in the image.
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -304,6 +312,62 @@ impl SymbolDb {
             .globals
             .iter()
             .map(|entry| self.make_variable(entry))
+            .collect()
+    }
+
+    /// Search global/static variables for UI autocomplete, prioritizing prefix matches.
+    pub fn complete_globals(&self, query: &str, limit: usize) -> Vec<GlobalCompletion> {
+        let needle = query.trim().to_ascii_lowercase();
+        let limit = limit.clamp(1, 100);
+        let is_internal =
+            |name: &str| name.is_empty() || name.starts_with("_GLOBAL__") || name.starts_with('$');
+
+        let mut ranked: Vec<(u8, &index::GlobalEntry, &str)> = Vec::new();
+        if needle.is_empty() {
+            for entry in &self.index.globals {
+                let name = self.index.str(entry.name);
+                if is_internal(name) {
+                    continue;
+                }
+                ranked.push((0, entry, name));
+                if ranked.len() >= limit {
+                    break;
+                }
+            }
+        } else {
+            for entry in &self.index.globals {
+                let name = self.index.str(entry.name);
+                if is_internal(name) {
+                    continue;
+                }
+                let lower = name.to_ascii_lowercase();
+                let short = lower.rsplit("::").next().unwrap_or(&lower);
+                if lower.starts_with(&needle) || short.starts_with(&needle) {
+                    ranked.push((0, entry, name));
+                } else if lower.contains(&needle) {
+                    ranked.push((1, entry, name));
+                }
+            }
+            ranked.sort_by(|a, b| (a.0, a.2.len(), a.2).cmp(&(b.0, b.2.len(), b.2)));
+            ranked.truncate(limit);
+        }
+
+        ranked
+            .into_iter()
+            .map(|(_, entry, name)| {
+                let var = self.make_variable(entry);
+                let type_name = self
+                    .variable_type(&var)
+                    .ok()
+                    .flatten()
+                    .map(|ty| self.type_name(ty))
+                    .unwrap_or_default();
+                GlobalCompletion {
+                    name: name.to_owned(),
+                    type_name,
+                    addr: entry.addr,
+                }
+            })
             .collect()
     }
 

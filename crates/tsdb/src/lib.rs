@@ -13,8 +13,91 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub use record::{read_recording, Recorder, Recording, RecordingStats};
+pub use record::{
+    export_recording_csv, export_recording_csv_bytes, read_recording, Recorder, Recording,
+    RecordingStats,
+};
 pub use ring::{Chunk, Ring};
+
+/// Options controlling CSV export alignment and time column origin.
+#[derive(Clone, Copy, Debug)]
+pub struct CsvOptions {
+    /// Fill missing timestamps on mixed-rate series with each column's last known sample.
+    pub zero_order_hold: bool,
+    /// Shift `t_s` so the earliest exported sample sits at `0.000000000`.
+    pub relative_time: bool,
+    /// Reference epoch subtracted when `relative_time` is `false`.
+    pub session_origin_ns: i64,
+}
+
+impl Default for CsvOptions {
+    fn default() -> Self {
+        Self {
+            zero_order_hold: false,
+            relative_time: true,
+            session_origin_ns: 0,
+        }
+    }
+}
+
+pub(crate) struct CsvColumn {
+    pub samples: Vec<(i64, f64)>,
+    pub seed: Option<f64>,
+}
+
+pub(crate) fn write_csv_series(
+    names: &[String],
+    columns: &[CsvColumn],
+    fallback_origin: i64,
+    options: CsvOptions,
+    mut out: impl Write,
+) -> io::Result<u64> {
+    write!(out, "t_s")?;
+    for name in names {
+        write!(out, ",{}", name.replace(',', ";"))?;
+    }
+    writeln!(out)?;
+
+    let origin = if options.relative_time {
+        columns
+            .iter()
+            .filter_map(|column| column.samples.first().map(|(t, _)| *t))
+            .min()
+            .unwrap_or(fallback_origin)
+    } else {
+        options.session_origin_ns
+    };
+
+    let mut positions = vec![0usize; columns.len()];
+    let mut held: Vec<Option<f64>> = columns.iter().map(|c| c.seed).collect();
+    let mut rows = 0;
+    loop {
+        let next = columns
+            .iter()
+            .zip(&positions)
+            .filter_map(|(column, position)| column.samples.get(*position).map(|(t, _)| *t))
+            .min();
+        let Some(time) = next else { break };
+        write!(out, "{:.9}", (time - origin) as f64 / 1e9)?;
+        for (idx, (column, position)) in columns.iter().zip(&mut positions).enumerate() {
+            match column.samples.get(*position) {
+                Some((t, v)) if *t == time => {
+                    write!(out, ",{v}")?;
+                    held[idx] = Some(*v);
+                    *position += 1;
+                }
+                _ => match held[idx].filter(|_| options.zero_order_hold) {
+                    Some(v) => write!(out, ",{v}")?,
+                    None => write!(out, ",")?,
+                },
+            }
+        }
+        writeln!(out)?;
+        rows += 1;
+    }
+    out.flush()?;
+    Ok(rows)
+}
 
 /// 1 kHz for ten minutes.
 pub const DEFAULT_CAPACITY: usize = 600_000;
@@ -228,55 +311,58 @@ impl Tsdb {
     /// Write `[t0, t1)` as CSV, one row per distinct timestamp. Series sampled
     /// together share rows; the others leave their columns blank.
     pub fn export_csv(&self, ids: &[u32], t0: i64, t1: i64, path: &Path) -> io::Result<u64> {
+        self.export_csv_with(ids, t0, t1, CsvOptions::default(), path)
+    }
+
+    pub fn export_csv_with(
+        &self,
+        ids: &[u32],
+        t0: i64,
+        t1: i64,
+        options: CsvOptions,
+        path: &Path,
+    ) -> io::Result<u64> {
+        let out = BufWriter::new(File::create(path)?);
+        self.write_export(ids, t0, t1, options, out)
+    }
+
+    pub fn export_csv_bytes(
+        &self,
+        ids: &[u32],
+        t0: i64,
+        t1: i64,
+        options: CsvOptions,
+    ) -> io::Result<(Vec<u8>, u64)> {
+        let mut out = Vec::new();
+        let rows = self.write_export(ids, t0, t1, options, &mut out)?;
+        Ok((out, rows))
+    }
+
+    fn write_export(
+        &self,
+        ids: &[u32],
+        t0: i64,
+        t1: i64,
+        options: CsvOptions,
+        out: impl Write,
+    ) -> io::Result<u64> {
         let series: Vec<Arc<Series>> = ids.iter().filter_map(|id| self.get(*id)).collect();
-        let mut columns: Vec<Vec<(i64, f64)>> = Vec::with_capacity(series.len());
+        let names: Vec<String> = series.iter().map(|item| item.meta().name).collect();
+        let mut columns = Vec::with_capacity(series.len());
         for item in &series {
             let chunk = item.read_since(0, usize::MAX >> 1);
-            columns.push(
-                chunk
-                    .t
-                    .into_iter()
-                    .zip(chunk.v)
-                    .filter(|(t, _)| *t >= t0 && *t < t1)
-                    .collect(),
-            );
-        }
-        let mut out = BufWriter::new(File::create(path)?);
-        write!(out, "t_s")?;
-        for item in &series {
-            write!(out, ",{}", item.meta().name.replace(',', ";"))?;
-        }
-        writeln!(out)?;
-
-        let origin = columns
-            .iter()
-            .filter_map(|column| column.first().map(|(t, _)| *t))
-            .min()
-            .unwrap_or(t0);
-        let mut positions = vec![0usize; columns.len()];
-        let mut rows = 0;
-        loop {
-            let next = columns
-                .iter()
-                .zip(&positions)
-                .filter_map(|(column, position)| column.get(*position).map(|(t, _)| *t))
-                .min();
-            let Some(time) = next else { break };
-            write!(out, "{:.9}", (time - origin) as f64 / 1e9)?;
-            for (column, position) in columns.iter().zip(&mut positions) {
-                match column.get(*position) {
-                    Some((t, v)) if *t == time => {
-                        write!(out, ",{v}")?;
-                        *position += 1;
-                    }
-                    _ => write!(out, ",")?,
+            let mut seed = None;
+            let mut samples = Vec::new();
+            for (t, v) in chunk.t.into_iter().zip(chunk.v) {
+                if t < t0 {
+                    seed = Some(v);
+                } else if t < t1 {
+                    samples.push((t, v));
                 }
             }
-            writeln!(out)?;
-            rows += 1;
+            columns.push(CsvColumn { samples, seed });
         }
-        out.flush()?;
-        Ok(rows)
+        write_csv_series(&names, &columns, t0, options, out)
     }
 }
 
@@ -370,5 +456,33 @@ mod tests {
         }
         let path = scratch("range.csv");
         assert_eq!(db.export_csv(&[a.id()], 3, 6, &path).unwrap(), 3);
+    }
+
+    #[test]
+    fn csv_zoh_fills_missing_columns_and_keeps_session_origin() {
+        let db = Tsdb::default();
+        let a = db.create_series("a".to_owned(), None, None);
+        let b = db.create_series("b".to_owned(), None, None);
+        a.push(500_000_000, 10.0);
+        b.push(1_000_000_000, 1.0);
+        a.push(2_000_000_000, 20.0);
+
+        let (bytes, rows) = db
+            .export_csv_bytes(
+                &[a.id(), b.id()],
+                1_000_000_000,
+                3_000_000_000,
+                CsvOptions {
+                    zero_order_hold: true,
+                    relative_time: false,
+                    session_origin_ns: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "t_s,a,b\n1.000000000,10,1\n2.000000000,20,1\n"
+        );
     }
 }

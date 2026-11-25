@@ -2,6 +2,7 @@
 
 use crate::db::SymbolDb;
 use crate::expr::{parse, Evaluated, Place};
+use crate::scalar::Scalar;
 use crate::types::{BaseEncoding, BitField, Member, TypeKind, TypeRef};
 use crate::{MemoryReader, Result, SymbolError};
 
@@ -78,6 +79,33 @@ impl SymbolDb {
 }
 
 impl SymbolDb {
+    /// Encode a user-entered string for `place`, supporting enum member names
+    /// in addition to numeric and character literals.
+    pub fn encode_place_value(
+        &self,
+        place: &Place,
+        text: &str,
+    ) -> std::result::Result<u64, String> {
+        let scalar = Scalar::of(self, place)
+            .ok_or_else(|| "only numeric values can be written".to_owned())?;
+        let trimmed = text.trim();
+        let (_, info) = self.strip(place.ty).map_err(|e| e.to_string())?;
+        if let TypeKind::Enum { enumerators } = &info.kind {
+            if let Some((_, val)) = enumerators
+                .iter()
+                .find(|(name, _)| name == trimmed)
+                .or_else(|| {
+                    enumerators
+                        .iter()
+                        .find(|(name, _)| name.rsplit("::").next() == Some(trimmed))
+                })
+            {
+                return scalar.encode_int(i128::from(*val), trimmed);
+            }
+        }
+        scalar.encode(trimmed)
+    }
+
     /// Bytes occupied by `place`.
     pub fn place_size(&self, place: &Place) -> Result<u64> {
         Ok(match place.bits {

@@ -6,6 +6,7 @@ pub mod daemon;
 pub mod dap;
 pub mod diagnose;
 mod http;
+mod presets;
 pub mod protocol;
 mod rpc;
 mod ws;

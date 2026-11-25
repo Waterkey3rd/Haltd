@@ -4,6 +4,7 @@ export interface SeriesInfo {
   seriesId: number;
   name: string;
   root: string;
+  mode?: string;
   actualMode: string;
   rateHz: number;
   error: string | null;
