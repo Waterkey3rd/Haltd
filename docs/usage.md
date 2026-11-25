@@ -139,8 +139,8 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 
 | 快捷键 | 作用域 | 效果 |
 |---|---|---|
-| `Ctrl+G`（macOS `Cmd+G`） | 源码编辑器 | 将选中表达式或光标所在变量加入 Live Watch（调试结束后恢复原生「转到行」） |
-| `Ctrl+H`（macOS `Cmd+H`） | 源码编辑器 / Live Watch | 将选中变量加入 Timeline（HSS） |
+| `Ctrl+G`（macOS `Cmd+G`） | 源码编辑器 / Live Watch | 将选中变量加入 Timeline（HSS）（调试结束后恢复原生「转到行」） |
+| `Ctrl+H`（macOS `Cmd+H`） | 源码编辑器 | 将选中表达式或光标所在变量加入 Live Watch |
 | `Del`（macOS `Backspace`） | Live Watch 视图 | 删除选中监视项 |
 | `F2` / `Enter` | Live Watch 视图 | 编辑可写标量值（结构体按 `Enter` 展开/折叠） |
 | `Ctrl+R`（macOS `Cmd+R`） | Live Watch 视图 | 设置选中项刷新率（0–5 Hz） |
@@ -154,7 +154,7 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 采用参考 SEGGER Ozone Timeline / Data Graph 的多轨道同步示波器布局：每条轨道左侧为独立图例与控制栏（含来源标识 `HSS` / `POLL` / `RTT` 与数值读数），右侧为波形画布，底部共用同一条时间轴与可拖拽游标手柄（`S` / `A` / `B`）。点击状态栏 Timeline 按钮、按 `Ctrl+Shift+T` 或执行 `Haltd: Open Timeline` 打开，也可通过 <http://127.0.0.1:47110/timeline> 在浏览器访问。
 
 **添加信号与采样率**：
-- 在源码或 Live Watch 按 `Ctrl+H`（或右键「Add to Timeline (HSS)」）、在顶部输入表达式回车，或将左下角 `RTT` 抽屉中的解码信号直接拖拽到任意轨道或空白区新建轨道；结构体与数组会自动展开（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
+- 在源码或 Live Watch 按 `Ctrl+G`（或右键「Add to Timeline (HSS)」）、在顶部输入表达式回车，或将左下角 `RTT` 抽屉中的解码信号直接拖拽到任意轨道或空白区新建轨道；结构体与数组会自动展开（默认上限 64 路）。请使用全局或静态变量，局部变量无法持续采样。
 - **选好信号后，需在工具栏 `Sample` 下拉框选择采样率（`20 Hz` ~ `1 kHz`）才会开始采集 HSS/Poll**；选 `Off` 时暂停采样（RTT 自动解码信号在固件输出时即会到达）。
 
 | 采样模式 | 说明 |
@@ -168,15 +168,15 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 
 | 操作 | 效果 |
 |---|---|
-| 滚轮 | 以鼠标位置为中心缩放时间轴 |
-| `Shift` + 滚轮 | 横向滚动时间窗 |
-| `Ctrl` + 滚轮 | 缩放鼠标所在轨道的 Y 轴 |
+| 滚轮 | 横向滚动时间窗 |
+| `Shift` + 滚轮 | 缩放鼠标所在轨道的 Y 轴 |
+| `Ctrl` + 滚轮 | 以鼠标位置为中心缩放时间轴 |
 | 左键拖动 / 中键拖动 | 上下左右自由平移（纯纵向拖动保持实时跟随，横向拖动暂停跟随） |
 | `Shift` + 左键拖动 | 仅上下平移当前轨道 Y 轴（保持时间轴实时跟随） |
 | `Ctrl` + 左键拖动 | 框选时间区间放大 |
-| 双击轨道或时间轴 | 在该位置放置采样游标 `S`（Ozone Sample Cursor），图例立即显示该时刻各信号值 |
-| 拖动游标线或底部手柄 | 移动采样游标 `S` 或测量游标 `A` / `B` |
-| 右键菜单 | Zoom to Fit、Y 自动缩放、放置 `A`/`B`/`S`、清除游标、改色、移动到其他轨道/新建轨道、隐藏/独显、删除信号、导出可见 CSV |
+| 单击 / 双击轨道或时间轴 | 在该位置放置临时采样游标 `S`（虚线，图例与波形交点显示当前值，悬停时显示 `Δt`） |
+| 拖动游标线或底部手柄 | 移动采样游标 `S`、测量游标 `A` / `B` 或固定标签 `M1`, `M2`… |
+| 右键菜单 | Zoom to Fit、Y 自动缩放、放置 `A`/`B`/`S`、添加/删除/清除标签（含 `S`）、清除游标、改色、移动到其他轨道/新建轨道、隐藏/独显、删除信号、导出可见 CSV |
 | 拖动图例信号 / RTT 信号 | 拖到其他轨道改变分组，拖到空白区域新建轨道 |
 | 拖动轨道底边框 | 调整该轨道高度（自动记忆）；拖动图例右边界可调整图例栏宽度 |
 
@@ -277,7 +277,8 @@ channels:
 
 ## 6. FreeRTOS 与 SVD 外设视图
 
-- **FreeRTOS Tasks 视图**：固件使用 FreeRTOS 时自动识别，基于 DWARF 布局解析 TCB 与链表（支持 CM3 / CM4F），显示任务状态、优先级、剩余栈空间及各任务独立调用栈。在 Call Stack 视图中点击对应任务线程即可切换查看上下文。
+- **FreeRTOS Tasks 视图**：固件使用 FreeRTOS 时自动识别，基于 DWARF 布局解析 TCB 与链表（支持 CM3 / CM4F），显示任务状态、优先级、剩余栈空间及各任务独立调用栈。默认设置 `haltd.rtos.threadView` 为 `currentOnly`（仿 SEGGER Ozone，调试器 Call Stack 仅高亮当前执行线程/中断上下文，其余任务在 FreeRTOS Tasks 面板查看；如需在 Call Stack 展开全部任务，可改为 `currentFirst`）。
+- **与 SEGGER Ozone 同时 attach**：支持两方同时连接到同一块开发板/探针；当 Ozone 恢复运行、暂停或单步时，Haltd 会通过 CoreSight (`DHCSR`/`DCRDR`) 同步当前状态并刷新真实调用栈，若检测到已被另一调试器占用的硬件比较器也会在控制台发出提醒。
 - **Peripherals 视图**：需配置 CMSIS-SVD（`launch.json` / `project.yaml` 指定，或由已安装的 Ozone 目录 `/opt/SEGGER` / `C:\Program Files\SEGGER` 自动匹配）。支持按位段查看与修改寄存器。
   - 对于带读副作用的寄存器（如 `DR`、`RDR`、`RXDR` 等），默认跳过自动读取并显示 `<not read: reading changes it>`，需要时可右键手动读取（该屏蔽列表结合 `readAction` 与常见外设名称推断，可能存在个别遗漏）。
 
@@ -317,11 +318,11 @@ rtt:
 `haltd` 二进制可脱离 VS Code 独立使用。未指定 `--device` 时默认值为 `STM32H723VG`（可通过 `--device` 或 `HALTD_DEVICE` 覆盖）：
 
 ```bash
-haltd info --device STM32G474RE                          # 查看探针与目标状态（--no-target 仅查探针）
+haltd info --device STM32G474RE                          # 查看探针与目标状态（--no-target 仅查探针，--dump-stack <FILE> 导出现场栈与寄存器快照）
 haltd flash firmware.elf --device STM32G474RE            # 增量烧录（--no-run 烧录后保持暂停）
 haltd read uwTick --elf firmware.elf --device STM32G474RE # 不暂停读取变量或表达式
 haltd read 0x20000000 --count 16 --device STM32G474RE    # 读取内存
-haltd tasks --elf firmware.elf --backtrace --device STM32G474RE # 查看 FreeRTOS 任务与调用栈
+haltd tasks --elf firmware.elf --backtrace --device STM32G474RE # 查看 FreeRTOS 任务与调用栈（支持 --dump-stack <FILE>）
 haltd symbols firmware.elf --lookup main                 # 离线查看 ELF 符号与缓存耗时（无需连接探针）
 haltd devices --filter STM32H7 --json                    # 查询 J-Link 支持器件列表、内核与 Flash/RAM 大小（仅需 J-Link 库，无需连接探针）
 ```
@@ -366,7 +367,7 @@ haltd devices --filter STM32H7 --json                    # 查询 J-Link 支持�
 | RTT 没有输出 | 确认已配置 `.haltd/rtt.yaml`、固件启用了 RTT，且 ELF 中存在 `_SEGGER_RTT` |
 | Windows 烧录路径报错 | Windows 下 J-Link DLL 只接受系统当前代码页（`CP_ACP`）路径，避免路径包含当前代码页无法表示的字符 |
 | 修改环境或升级插件未生效 | 彻底重启 VS Code 窗口，并等待约 30 秒让旧后台进程空闲退出 |
-| 其他异常定位 | 查看缓存目录下的 `serve.log` 与 VS Code 调试控制台输出 |
+| 其他异常定位 | 执行命令面板 `Haltd: Collect Diagnostics` 复制脱敏诊断包，并查看输出面板 `Haltd`、缓存目录下的 `serve.log` 与调试控制台输出 |
 
 ### 已知限制与硬件验证情况
 

@@ -1,5 +1,5 @@
 import type { SeriesInfo } from "../client";
-import { computeSeriesStatsFromColumns, formatNumber } from "./math";
+import { computeSeriesStatsFromColumns, formatNumber, formatSeconds } from "./math";
 import {
   colorOf,
   isSeriesVisible,
@@ -255,7 +255,23 @@ export function updateLegendReadouts(state: TimelineState): void {
   const tReadout = legendReadoutTime(state);
   if (hoverEl) {
     if (state.hoverTime !== null) {
-      hoverEl.textContent = `Hover t = ${state.hoverTime.toFixed(4)} s`;
+      let text = `Hover t = ${state.hoverTime.toFixed(4)} s`;
+      if (state.sampleCursor !== null) {
+        const dt = state.hoverTime - state.sampleCursor;
+        text += `  Δt = ${formatSeconds(dt)}`;
+        const selected =
+          state.selectedSeriesId !== null
+            ? state.series.find((s) => s.seriesId === state.selectedSeriesId)
+            : undefined;
+        if (selected) {
+          const vHover = valueAt(state, selected, state.hoverTime);
+          const vSample = valueAt(state, selected, state.sampleCursor);
+          if (vHover !== null && vSample !== null) {
+            text += `  Δ${selected.name} = ${formatNumber(vHover - vSample, 5)}`;
+          }
+        }
+      }
+      hoverEl.textContent = text;
     } else if (state.sampleCursor !== null) {
       hoverEl.textContent = `Sample S = ${state.sampleCursor.toFixed(4)} s`;
     } else {

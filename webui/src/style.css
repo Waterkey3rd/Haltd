@@ -990,6 +990,14 @@ select.off {
   border-left: 3px solid var(--cursor-b);
 }
 
+.cursor-chip.cursor-pin {
+  border-left: 3px solid #20c997;
+}
+
+.cursor-pins-wrap {
+  display: contents;
+}
+
 .chip-label {
   color: var(--muted);
   font-weight: 700;
@@ -1003,7 +1011,7 @@ select.off {
 
 #cursor-table-wrap {
   max-height: 130px;
-  overflow-y: auto;
+  overflow: auto;
 }
 
 #cursor-table {

@@ -119,6 +119,10 @@ impl BreakpointTable {
         }
     }
 
+    pub fn set_policy(&mut self, policy: FlashBreakpoints) {
+        self.policy = policy;
+    }
+
     fn hardware_used(&self) -> usize {
         self.entries
             .values()

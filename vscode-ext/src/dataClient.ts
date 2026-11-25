@@ -24,6 +24,33 @@ export interface WatchValue {
   value: string;
 }
 
+export interface HaltdDiagnostic {
+  id: number;
+  code: string;
+  message: string;
+  detail?: string;
+  causes: string[];
+  actions: string[];
+}
+
+export class BackendRpcError extends Error {
+  constructor(
+    message: string,
+    readonly rpcCode: number,
+    readonly haltd?: HaltdDiagnostic,
+  ) {
+    super(message);
+    this.name = "BackendRpcError";
+  }
+}
+
+export interface WsCloseInfo {
+  code: number;
+  reason: string;
+  error?: string;
+  expected: boolean;
+}
+
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
@@ -57,6 +84,7 @@ export class DataClient extends EventEmitter {
   private open(): void {
     const socket = new WebSocket(`ws://127.0.0.1:${BACKEND_PORT}/ws`);
     this.socket = socket;
+    let lastSocketError: string | undefined;
     socket.on("open", () => this.emit("open"));
     socket.on("message", (data, isBinary) => {
       if (!isBinary) {
@@ -65,15 +93,23 @@ export class DataClient extends EventEmitter {
         this.onBinary(data as Buffer);
       }
     });
-    // "close" always follows, so errors need no handling beyond not throwing.
-    socket.on("error", () => undefined);
-    socket.on("close", () => {
+    // "close" always follows, so capture the underlying error for diagnostics.
+    socket.on("error", (err) => {
+      lastSocketError = err instanceof Error ? err.message : String(err);
+    });
+    socket.on("close", (code, reason) => {
       this.socket = undefined;
       for (const request of this.pending.values()) {
         request.reject(new Error("connection lost"));
       }
       this.pending.clear();
-      this.emit("close");
+      const closeInfo: WsCloseInfo = {
+        code,
+        reason: reason.toString("utf8"),
+        error: lastSocketError,
+        expected: !this.wanted,
+      };
+      this.emit("close", closeInfo);
       if (this.wanted) {
         this.timer = setTimeout(() => this.open(), RECONNECT_MS);
       }
@@ -99,7 +135,9 @@ export class DataClient extends EventEmitter {
     }
     this.pending.delete(message.id);
     if (message.error) {
-      request.reject(new Error(message.error.message));
+      const rpcCode = typeof message.error.code === "number" ? message.error.code : -32000;
+      const haltd = message.error.data as HaltdDiagnostic | undefined;
+      request.reject(new BackendRpcError(String(message.error.message ?? "RPC error"), rpcCode, haltd));
     } else {
       request.resolve(message.result);
     }

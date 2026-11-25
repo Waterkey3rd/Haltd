@@ -117,6 +117,7 @@ impl Peripheral {
 pub struct Device {
     pub name: String,
     pub peripherals: Vec<Peripheral>,
+    pub interrupts: HashMap<u32, String>,
 }
 
 impl Device {
@@ -509,7 +510,19 @@ pub fn parse(xml: &str) -> Result<Device, String> {
         .partition(|node| node.attribute("derivedFrom").is_none());
     let mut by_name: HashMap<String, Peripheral> = HashMap::new();
     let mut peripherals = Vec::new();
+    let mut interrupts: HashMap<u32, String> = HashMap::new();
     for node in plain.iter().chain(derived.iter()) {
+        for interrupt in node.children().filter(|c| c.has_tag_name("interrupt")) {
+            if let (Some(irq_name), Some(value)) =
+                (text(interrupt, "name"), number_of(interrupt, "value"))
+            {
+                if let Ok(irq_num) = u32::try_from(value) {
+                    interrupts
+                        .entry(irq_num)
+                        .or_insert_with(|| irq_name.to_owned());
+                }
+            }
+        }
         for peripheral in parse_peripheral(*node, defaults, &by_name) {
             by_name.insert(peripheral.name.clone(), peripheral.clone());
             peripherals.push(peripheral);
@@ -519,6 +532,7 @@ pub fn parse(xml: &str) -> Result<Device, String> {
     Ok(Device {
         name: text(root, "name").unwrap_or("").to_owned(),
         peripherals,
+        interrupts,
     })
 }
 
@@ -579,6 +593,7 @@ mod tests {
       <description>Serial
         port</description>
       <baseAddress>0x40000000</baseAddress>
+      <interrupt><name>USART1</name><value>37</value></interrupt>
       <registers>
         <register>
           <name>SR</name>
@@ -743,5 +758,14 @@ mod tests {
     fn invalid_input_is_an_error() {
         assert!(parse("<device>").is_err());
         assert!(parse("<device/>").is_err());
+    }
+
+    #[test]
+    fn parses_peripheral_interrupt_numbers() {
+        let device = sample();
+        assert_eq!(
+            device.interrupts.get(&37).map(String::as_str),
+            Some("USART1")
+        );
     }
 }

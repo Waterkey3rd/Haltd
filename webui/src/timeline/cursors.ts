@@ -122,6 +122,54 @@ function drawHoverValueBox(
   ctx.restore();
 }
 
+function drawValueBoxes(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  visibleMembers: SeriesInfo[],
+  t: number,
+  state: TimelineState,
+  toY: (value: number) => number,
+  plotLeft: number,
+  plotTop: number,
+  plotWidth: number,
+  plotHeight: number,
+  dotColorOverride?: string,
+): void {
+  const dpr = devicePixelRatio || 1;
+  const placedY: number[] = [];
+  const minGap = 17 * dpr;
+  for (const member of visibleMembers) {
+    const v = valueAt(state, member, t);
+    if (v === null) continue;
+    const py = toY(v);
+    if (py < plotTop || py > plotTop + plotHeight) continue;
+    const color = colorOf(state, member, state.series.indexOf(member));
+    ctx.fillStyle = dotColorOverride ?? color;
+    ctx.beginPath();
+    ctx.arc(x, py, 3.5 * dpr, 0, Math.PI * 2);
+    ctx.fill();
+
+    let boxY = py;
+    for (const prevY of placedY) {
+      if (Math.abs(boxY - prevY) < minGap) {
+        boxY = prevY + minGap;
+      }
+    }
+    placedY.push(boxY);
+    drawHoverValueBox(
+      ctx,
+      x,
+      boxY,
+      formatNumber(v, 5),
+      color,
+      state,
+      plotLeft + plotWidth,
+      plotTop,
+      plotTop + plotHeight,
+    );
+  }
+}
+
 export function drawOverlays(
   state: TimelineState,
   groupName: string,
@@ -227,18 +275,40 @@ export function drawOverlays(
       const xs = vline(state.sampleCursor, theme.sampleCursor, [6 * dpr, 3 * dpr]);
       if (xs !== null) {
         drawBadge(context, xs, top + 2 * dpr, "S", theme.sampleCursor, "#111315", "center");
-        for (const member of visibleMembers) {
-          const v = valueAt(state, member, state.sampleCursor);
-          if (v !== null) {
-            const py = toY(v);
-            if (py >= top && py <= top + height) {
-              context.fillStyle = theme.sampleCursor;
-              context.beginPath();
-              context.arc(xs, py, 3.5 * dpr, 0, Math.PI * 2);
-              context.fill();
-            }
-          }
-        }
+        drawValueBoxes(
+          context,
+          xs,
+          visibleMembers,
+          state.sampleCursor,
+          state,
+          toY,
+          left,
+          top,
+          width,
+          height,
+          theme.sampleCursor,
+        );
+      }
+    }
+
+    // 5b. Pinned Markers (M1, M2, ...)
+    for (const pin of state.pins) {
+      const xp = vline(pin.t, theme.pinColor);
+      if (xp !== null) {
+        drawBadge(context, xp, top + 2 * dpr, pin.label, theme.pinColor, "#ffffff", "center");
+        drawValueBoxes(
+          context,
+          xp,
+          visibleMembers,
+          pin.t,
+          state,
+          toY,
+          left,
+          top,
+          width,
+          height,
+          theme.pinColor,
+        );
       }
     }
 
@@ -246,36 +316,29 @@ export function drawOverlays(
     if (state.hoverTime !== null && state.hoverTime >= min && state.hoverTime <= max) {
       const hx = vline(state.hoverTime, theme.crosshair, [3 * dpr, 3 * dpr]);
       if (hx !== null) {
-        const placedY: number[] = [];
-        const minGap = 17 * dpr;
-        for (const member of visibleMembers) {
-          const v = valueAt(state, member, state.hoverTime);
-          if (v === null) continue;
-          const py = toY(v);
-          if (py < top || py > top + height) continue;
-          const color = colorOf(state, member, state.series.indexOf(member));
-          context.fillStyle = color;
-          context.beginPath();
-          context.arc(hx, py, 3.5 * dpr, 0, Math.PI * 2);
-          context.fill();
-
-          let boxY = py;
-          for (const prevY of placedY) {
-            if (Math.abs(boxY - prevY) < minGap) {
-              boxY = prevY + minGap;
-            }
-          }
-          placedY.push(boxY);
-          drawHoverValueBox(
+        drawValueBoxes(
+          context,
+          hx,
+          visibleMembers,
+          state.hoverTime,
+          state,
+          toY,
+          left,
+          top,
+          width,
+          height,
+        );
+        if (state.sampleCursor !== null) {
+          const dt = state.hoverTime - state.sampleCursor;
+          const align = hx + 90 * dpr > left + width ? "right" : "left";
+          drawBadge(
             context,
             hx,
-            boxY,
-            formatNumber(v, 5),
-            color,
-            state,
-            left + width,
-            top,
-            top + height,
+            top + 18 * dpr,
+            `Δt ${formatSeconds(dt)}`,
+            theme.sampleCursor,
+            "#111315",
+            align,
           );
         }
       }
@@ -423,11 +486,11 @@ export function drawSharedAxis(canvas: HTMLCanvasElement, state: TimelineState):
     ctx.fillText(labels[i], x, 7 * dpr);
   }
 
-  // Draggable triangular cursor handles (S, A, B)
+  // Draggable triangular cursor handles (S, Pins, A, B)
   const drawHandle = (tVal: number | null, color: string, label: string, fillText: string) => {
     if (tVal === null || tVal < tStart || tVal > tEnd) return;
     const x = left + timeToPx(tVal, plotW, tStart, tEnd);
-    const hw = 7 * dpr;
+    const hw = Math.max(7, 4 + label.length * 2.5) * dpr;
     const hh = 11 * dpr;
     ctx.save();
     ctx.fillStyle = color;
@@ -446,31 +509,41 @@ export function drawSharedAxis(canvas: HTMLCanvasElement, state: TimelineState):
   };
 
   drawHandle(state.sampleCursor, theme.sampleCursor, "S", "#111315");
+  for (const pin of state.pins) {
+    drawHandle(pin.t, theme.pinColor, pin.label, "#ffffff");
+  }
   drawHandle(state.cursorA, theme.cursorA, "A", "#ffffff");
   drawHandle(state.cursorB, theme.cursorB, "B", "#ffffff");
 }
+
+type AxisDragTarget = { kind: "S" | "A" | "B" } | { kind: "pin"; id: number };
 
 export function attachSharedAxisInteractions(
   canvas: HTMLCanvasElement,
   state: TimelineState,
   onCursorMoved: () => void,
 ): void {
-  let dragging: "S" | "A" | "B" | null = null;
+  let dragging: AxisDragTarget | null = null;
+  let pendingClickX: number | null = null;
 
-  const hitCursor = (clientX: number): "S" | "A" | "B" | null => {
+  const hitCursor = (clientX: number): AxisDragTarget | null => {
     const rect = canvas.getBoundingClientRect();
     const metrics = getSharedAxisMetrics(canvas, state);
     const localX = clientX - rect.left - metrics.leftPx;
-    const candidates: Array<{ kind: "S" | "A" | "B"; val: number | null }> = [
-      { kind: "B", val: state.cursorB },
-      { kind: "A", val: state.cursorA },
-      { kind: "S", val: state.sampleCursor },
+    const candidates: Array<{ target: AxisDragTarget; val: number | null }> = [
+      { target: { kind: "B" }, val: state.cursorB },
+      { target: { kind: "A" }, val: state.cursorA },
+      ...state.pins
+        .slice()
+        .reverse()
+        .map((p) => ({ target: { kind: "pin", id: p.id } as AxisDragTarget, val: p.t })),
+      { target: { kind: "S" }, val: state.sampleCursor },
     ];
     for (const c of candidates) {
       if (c.val === null) continue;
       const cx = timeToPx(c.val, metrics.plotWidthPx, metrics.tStart, metrics.tEnd);
       if (Math.abs(localX - cx) <= 9) {
-        return c.kind;
+        return c.target;
       }
     }
     return null;
@@ -488,7 +561,10 @@ export function attachSharedAxisInteractions(
     const hit = hitCursor(event.clientX);
     if (hit) {
       dragging = hit;
+      pendingClickX = null;
       event.preventDefault();
+    } else {
+      pendingClickX = event.clientX;
     }
   });
 
@@ -507,13 +583,24 @@ export function attachSharedAxisInteractions(
   window.addEventListener("mousemove", (event) => {
     if (!dragging) return;
     const t = timeFromClientX(event.clientX);
-    if (dragging === "S") state.sampleCursor = t;
-    if (dragging === "A") state.cursorA = t;
-    if (dragging === "B") state.cursorB = t;
+    if (dragging.kind === "S") state.sampleCursor = t;
+    else if (dragging.kind === "A") state.cursorA = t;
+    else if (dragging.kind === "B") state.cursorB = t;
+    else if (dragging.kind === "pin") {
+      const pinId = dragging.id;
+      const pin = state.pins.find((p) => p.id === pinId);
+      if (pin) pin.t = t;
+    }
     onCursorMoved();
   });
 
-  window.addEventListener("mouseup", () => {
+  window.addEventListener("mouseup", (event) => {
+    if (!dragging && pendingClickX !== null && Math.abs(event.clientX - pendingClickX) < 4) {
+      state.sampleCursor = timeFromClientX(event.clientX);
+      state.sampleCursorPinned = true;
+      onCursorMoved();
+    }
+    pendingClickX = null;
     dragging = null;
   });
 }
@@ -526,13 +613,31 @@ export function updateCursorInspector(state: TimelineState): void {
   const bEl = byId("cursor-b-val");
   const dtEl = byId("cursor-dt-val");
   const freqEl = byId("cursor-freq-val");
+  const pinsWrap = byId("cursor-pins");
   const zoomBtn = byId<HTMLButtonElement>("cursor-zoom");
   const clearBtn = byId<HTMLButtonElement>("cursor-clear");
+  const thead = byId<HTMLTableSectionElement>("cursor-thead");
   const tbody = byId<HTMLTableSectionElement>("cursor-tbody");
 
   if (sEl) sEl.textContent = state.sampleCursor !== null ? `${state.sampleCursor.toFixed(4)} s` : "—";
   if (aEl) aEl.textContent = state.cursorA !== null ? `${state.cursorA.toFixed(4)} s` : "—";
   if (bEl) bEl.textContent = state.cursorB !== null ? `${state.cursorB.toFixed(4)} s` : "—";
+  if (pinsWrap) {
+    pinsWrap.replaceChildren(
+      ...state.pins.map((pin) => {
+        const chip = document.createElement("div");
+        chip.className = "cursor-chip cursor-pin";
+        const lbl = document.createElement("span");
+        lbl.className = "chip-label";
+        lbl.textContent = pin.label;
+        const val = document.createElement("span");
+        val.className = "chip-val";
+        val.textContent = `${pin.t.toFixed(4)} s`;
+        chip.append(lbl, val);
+        return chip;
+      }),
+    );
+  }
   if (clearBtn) {
     clearBtn.hidden =
       state.cursorA === null && state.cursorB === null && state.sampleCursor === null;
@@ -561,13 +666,37 @@ export function updateCursorInspector(state: TimelineState): void {
     } else if (state.sampleCursor !== null) {
       output.textContent = `Sample S = ${state.sampleCursor.toFixed(4)} s`;
     } else {
-      output.textContent = "Double-click to place Sample S; A / B keys place measurement cursors.";
+      output.textContent = "Click to place Sample S; A / B keys place measurement cursors.";
     }
   }
 
+  if (thead) {
+    const headerRow = document.createElement("tr");
+    const baseCols = ["Signal", "S", "A", "B", "ΔV (B−A)", "dV/dt"];
+    for (const label of baseCols) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      headerRow.append(th);
+    }
+    for (const pin of state.pins) {
+      const th = document.createElement("th");
+      th.textContent = `${pin.label} (${pin.t.toFixed(3)}s)`;
+      th.title = `${pin.label} @ ${pin.t.toFixed(4)} s`;
+      headerRow.append(th);
+    }
+    thead.replaceChildren(headerRow);
+  }
+
   if (!tbody) return;
-  if (state.cursorA === null && state.cursorB === null && state.sampleCursor === null) {
+  if (
+    state.cursorA === null &&
+    state.cursorB === null &&
+    state.sampleCursor === null &&
+    state.pins.length === 0
+  ) {
     tbody.replaceChildren();
+    if (dtEl) dtEl.textContent = "—";
+    if (freqEl) freqEl.textContent = "—";
     return;
   }
 
@@ -596,7 +725,12 @@ export function updateCursorInspector(state: TimelineState): void {
       tdDv.textContent = formatNumber(dv, 5);
       const tdSlope = document.createElement("td");
       tdSlope.textContent = slope !== null ? `${formatNumber(slope, 4)}/s` : "—";
-      tr.append(tdName, tdS, tdA, tdB, tdDv, tdSlope);
+      const pinCells = state.pins.map((pin) => {
+        const td = document.createElement("td");
+        td.textContent = formatNumber(valueAt(state, item, pin.t), 5);
+        return td;
+      });
+      tr.append(tdName, tdS, tdA, tdB, tdDv, tdSlope, ...pinCells);
       return tr;
     }),
   );

@@ -14,8 +14,8 @@ use engine::breakpoints::{DataRequest, FunctionBreakpoint, LineBreakpoint, Resol
 use engine::conditions::BreakpointOptions;
 use engine::project::ProjectConfig;
 use engine::session::{
-    CycleDelta, DisplayFrame, FaultReport, LaunchOptions, RunState, Session, StopReason,
-    VariableView, MAIN_THREAD,
+    CycleDelta, DisplayFrame, FaultReport, HaltedPoll, LaunchOptions, RunState, Session,
+    StopReason, VariableView, MAIN_THREAD,
 };
 use engine::step::StepKind;
 use probe_api::{ConnectCfg, Interface, Probe, Progress, WpAccess, DEFAULT_SPEED_KHZ};
@@ -28,9 +28,10 @@ use symbols::{Place, Scalar, ScalarKind};
 use tsdb::EventKind;
 
 use crate::control::Control;
+use crate::diagnose::Diagnostic;
 use crate::protocol::write_message;
 
-type Handled = Result<Value, String>;
+pub type Handled = Result<Value, Diagnostic>;
 
 /// Largest single memory request, to keep the event loop responsive.
 const MAX_MEMORY_REQUEST: usize = 1 << 20;
@@ -40,8 +41,8 @@ const UNREADABLE: &str = "<unreadable>";
 const IMPRECISE_NOTE: &str = "The reported position is imprecise: the instruction that caused \
                               the error may be a few instructions earlier.";
 
-fn fail(error: impl std::fmt::Display) -> String {
-    error.to_string()
+fn fail<E: Into<Diagnostic>>(error: E) -> Diagnostic {
+    error.into()
 }
 
 /// Sends messages back to the client from any thread.
@@ -80,7 +81,21 @@ impl Client {
         });
         match result {
             Ok(body) => response["body"] = body,
-            Err(message) => response["message"] = json!(message),
+            Err(diag) => {
+                response["message"] = json!(diag.message);
+                response["body"] = json!({
+                    "error": {
+                        "id": diag.id,
+                        "format": "{message}",
+                        "variables": {
+                            "message": diag.user_summary(),
+                            "code": diag.code,
+                        },
+                        "showUser": diag.show_user,
+                    },
+                    "haltd": diag,
+                });
+            }
         }
         self.send(response);
     }
@@ -130,6 +145,22 @@ enum AfterConfiguration {
     Observe,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RtosThreadView {
+    #[default]
+    CurrentOnly,
+    CurrentFirst,
+}
+
+impl RtosThreadView {
+    fn from_arg(value: Option<&str>) -> Self {
+        match value {
+            Some("currentFirst") => Self::CurrentFirst,
+            _ => Self::CurrentOnly,
+        }
+    }
+}
+
 /// One connected client.
 pub struct Dap {
     client: Client,
@@ -152,6 +183,7 @@ pub struct Dap {
     fault: Option<Value>,
     fault_thread: Option<i64>,
     last_tasks: Vec<Value>,
+    rtos_thread_view: RtosThreadView,
 }
 
 /// What the sampler needs to know about a connected target.
@@ -230,6 +262,8 @@ fn stop_body(reason: &StopReason, thread: i64, fault: Option<&Value>) -> Value {
     if let Some(fault) = fault {
         body["description"] = fault["summary"].clone();
         body["text"] = fault["name"].clone();
+    } else if matches!(reason, StopReason::External) {
+        body["description"] = json!("Paused by external debugger");
     }
     body
 }
@@ -316,23 +350,23 @@ fn parse_access(text: Option<&str>) -> WpAccess {
     }
 }
 
-fn parse_address(reference: &str, offset: i64) -> Result<u32, String> {
+fn parse_address(reference: &str, offset: i64) -> Result<u32, Diagnostic> {
     let base = match reference.strip_prefix("0x") {
         Some(digits) => u32::from_str_radix(digits, 16),
         None => reference.parse(),
     }
     .map_err(|_| format!("invalid memory reference {reference:?}"))?;
     u32::try_from(i64::from(base) + offset)
-        .map_err(|_| "the address is outside the address space".to_owned())
+        .map_err(|_| "the address is outside the address space".into())
 }
 
-fn parse_word(text: &str) -> Result<u32, String> {
+fn parse_word(text: &str) -> Result<u32, Diagnostic> {
     let scalar = Scalar {
         kind: ScalarKind::Unsigned,
         size: 4,
         bits: None,
     };
-    scalar.encode(text).map(|value| value as u32)
+    Ok(scalar.encode(text)? as u32)
 }
 
 fn register_text(value: u32, bits: u32) -> String {
@@ -375,7 +409,7 @@ fn field_bits(field: &svd::Field) -> String {
 }
 
 /// A value for a field: a number, or one of the field's declared names.
-fn field_value(field: &svd::Field, text: &str) -> Result<u32, String> {
+fn field_value(field: &svd::Field, text: &str) -> Result<u32, Diagnostic> {
     let named = field
         .values
         .iter()
@@ -387,47 +421,49 @@ fn field_value(field: &svd::Field, text: &str) -> Result<u32, String> {
     }
 }
 
-fn parse_interface(arguments: &Value) -> Result<Interface, String> {
+fn parse_interface(arguments: &Value) -> Result<Interface, Diagnostic> {
     match arguments["interface"].as_str().unwrap_or("SWD") {
         text if text.eq_ignore_ascii_case("swd") => Ok(Interface::Swd),
         text if text.eq_ignore_ascii_case("jtag") => Ok(Interface::Jtag),
-        other => Err(format!("unknown interface {other:?}")),
+        other => Err(format!("unknown interface {other:?}").into()),
     }
 }
 
 /// `speed` is a number of kHz, or "auto" for the default rate.
-fn parse_speed(arguments: &Value) -> Result<u32, String> {
+fn parse_speed(arguments: &Value) -> Result<u32, Diagnostic> {
     match &arguments["speed"] {
         Value::Null => Ok(DEFAULT_SPEED_KHZ),
         Value::Number(number) => number
             .as_u64()
             .map(|value| value as u32)
-            .ok_or_else(|| format!("invalid speed {number}")),
+            .ok_or_else(|| format!("invalid speed {number}").into()),
         Value::String(text) if text == "auto" => Ok(DEFAULT_SPEED_KHZ),
-        Value::String(text) => text.parse().map_err(|_| format!("invalid speed {text:?}")),
-        other => Err(format!("invalid speed {other}")),
+        Value::String(text) => Ok(text
+            .parse()
+            .map_err(|_| format!("invalid speed {text:?}"))?),
+        other => Err(format!("invalid speed {other}").into()),
     }
 }
 
 /// An empty value counts as not configured, as `${env:X}` can expand to one.
-fn parse_serial(arguments: &Value) -> Result<Option<u32>, String> {
+fn parse_serial(arguments: &Value) -> Result<Option<u32>, Diagnostic> {
     match &arguments["serial"] {
         Value::Null => Ok(None),
         Value::String(text) if text.is_empty() => Ok(None),
-        Value::String(text) => text
-            .parse()
-            .map(Some)
-            .map_err(|_| format!("invalid serial {text:?}")),
+        Value::String(text) => Ok(Some(
+            text.parse()
+                .map_err(|_| format!("invalid serial {text:?}"))?,
+        )),
         Value::Number(number) => number
             .as_u64()
             .and_then(|value| u32::try_from(value).ok())
             .map(Some)
-            .ok_or_else(|| format!("invalid serial {number}")),
-        other => Err(format!("invalid serial {other}")),
+            .ok_or_else(|| format!("invalid serial {number}").into()),
+        other => Err(format!("invalid serial {other}").into()),
     }
 }
 
-fn launch_options(arguments: &Value) -> Result<LaunchOptions, String> {
+fn launch_options(arguments: &Value) -> Result<LaunchOptions, Diagnostic> {
     let elf = arguments["elf"]
         .as_str()
         .ok_or("the launch configuration needs \"elf\"")?;
@@ -530,6 +566,7 @@ impl Dap {
             fault: None,
             fault_thread: None,
             last_tasks: Vec::new(),
+            rtos_thread_view: RtosThreadView::default(),
         };
         if let Some(session) = &mut dap.session {
             session.set_cancel_token(dap.cancel.clone());
@@ -537,10 +574,10 @@ impl Dap {
         dap
     }
 
-    fn session(&mut self) -> Result<&mut Session, String> {
+    fn session(&mut self) -> Result<&mut Session, Diagnostic> {
         self.session
             .as_mut()
-            .ok_or_else(|| "no target is connected".to_owned())
+            .ok_or_else(|| "no target is connected".into())
     }
 
     fn forget_handles(&mut self) {
@@ -652,21 +689,39 @@ impl Dap {
             .event("stopped", stop_body(reason, thread, self.fault.as_ref()));
     }
 
-    /// Check for a stop while the target runs.
+    /// Check for a stop while running, or external resume/stepping while halted.
     pub fn poll(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        match session.poll() {
-            Ok(Some(reason)) => self.report_stop(&reason),
-            Ok(None) => self.flush_output(),
-            Err(error) => {
-                tracing::warn!("polling the target failed: {error}");
-                self.client.console(&format!("probe error: {error}"));
-                if let Some(session) = self.session.as_mut() {
-                    session.mark_halted();
+        if *session.state() == RunState::Running {
+            match session.poll() {
+                Ok(Some(reason)) => self.report_stop(&reason),
+                Ok(None) => self.flush_output(),
+                Err(error) => {
+                    tracing::warn!("polling the target failed: {error}");
+                    self.client.console(&format!("probe error: {error}"));
+                    if let Some(session) = self.session.as_mut() {
+                        session.mark_halted();
+                    }
                 }
             }
+            return;
+        }
+        match session.poll_halted() {
+            Ok(HaltedPoll::Unchanged) => self.flush_output(),
+            Ok(HaltedPoll::ResumedExternally) => {
+                self.forget_handles();
+                self.flush_output();
+                self.note_running();
+                self.client.console("Target resumed by external debugger");
+                self.client.event(
+                    "continued",
+                    json!({"threadId": MAIN_THREAD, "allThreadsContinued": true}),
+                );
+            }
+            Ok(HaltedPoll::MovedExternally(reason)) => self.report_stop(&reason),
+            Err(error) => tracing::debug!("halted poll failed: {error}"),
         }
     }
 
@@ -676,6 +731,8 @@ impl Dap {
             self.is_running() && self.session.as_ref().is_some_and(Session::is_auto_resuming);
         if busy {
             Duration::ZERO
+        } else if self.session.is_some() && !self.is_running() {
+            idle.max(Duration::from_millis(200))
         } else {
             idle
         }
@@ -741,7 +798,7 @@ impl Dap {
                 self.client.respond(request, result);
                 return false;
             }
-            other => Err(format!("unsupported request {other:?}")),
+            other => Err(format!("unsupported request {other:?}").into()),
         };
         self.client.respond(request, result);
         true
@@ -772,7 +829,7 @@ impl Dap {
     }
 
     /// Reuse a kept-alive connection when the settings allow it.
-    fn prepare_session(&mut self, options: LaunchOptions) -> Result<(), String> {
+    fn prepare_session(&mut self, options: LaunchOptions) -> Result<(), Diagnostic> {
         if self.session.as_ref().is_some_and(|s| s.matches(&options)) {
             return self.session()?.reconfigure(options).map_err(fail);
         }
@@ -803,6 +860,7 @@ impl Dap {
 
     fn launch(&mut self, arguments: &Value) -> Handled {
         self.sampler.unbind();
+        self.rtos_thread_view = RtosThreadView::from_arg(arguments["rtosThreadView"].as_str());
         self.prepare_session(launch_options(arguments)?)?;
         let flash = arguments["flash"].as_str().unwrap_or("changed");
         if flash != "never" {
@@ -826,13 +884,14 @@ impl Dap {
 
     fn attach(&mut self, arguments: &Value) -> Handled {
         self.sampler.unbind();
+        self.rtos_thread_view = RtosThreadView::from_arg(arguments["rtosThreadView"].as_str());
         self.prepare_session(launch_options(arguments)?)?;
         self.after_configuration = AfterConfiguration::Observe;
         self.client.event("initialized", json!({}));
         Ok(json!({}))
     }
 
-    fn apply_start(&mut self, mode: AfterConfiguration) -> Result<(), String> {
+    fn apply_start(&mut self, mode: AfterConfiguration) -> Result<(), Diagnostic> {
         match mode {
             AfterConfiguration::Run => {
                 self.session()?.resume().map_err(fail)?;
@@ -849,6 +908,9 @@ impl Dap {
                 Ok(())
             }
             AfterConfiguration::Observe => {
+                self.session()?
+                    .observe_stop(&StopReason::Pause)
+                    .map_err(fail)?;
                 if !self.is_running() {
                     self.report_stop(&StopReason::Pause);
                 }
@@ -952,7 +1014,7 @@ impl Dap {
         &mut self,
         reference: i64,
         name: &str,
-    ) -> Result<(Option<Place>, Option<String>), String> {
+    ) -> Result<(Option<Place>, Option<String>), Diagnostic> {
         let index = usize::try_from(reference - 1).map_err(|_| "unknown variable reference")?;
         let node = self
             .variables
@@ -1080,7 +1142,7 @@ impl Dap {
         }
         self.fault
             .clone()
-            .ok_or_else(|| "the target is running".to_owned())
+            .ok_or_else(|| "the target is running".into())
     }
 
     fn cycle_counter(&mut self) -> Handled {
@@ -1122,7 +1184,7 @@ impl Dap {
         let address = parse_address(reference, arguments["offset"].as_i64().unwrap_or(0))?;
         let count = arguments["count"].as_u64().unwrap_or(0) as usize;
         if count > MAX_MEMORY_REQUEST {
-            return Err(format!("reading {count} bytes at once is not supported"));
+            return Err(format!("reading {count} bytes at once is not supported").into());
         }
         let bytes = self.session()?.read_memory(address, count).map_err(fail)?;
         let mut body = json!({"address": hex(address)});
@@ -1194,11 +1256,11 @@ impl Dap {
         }
     }
 
-    fn device(&mut self) -> Result<Arc<svd::Device>, String> {
+    fn device(&mut self) -> Result<Arc<svd::Device>, Diagnostic> {
         self.session()?
             .peripherals()
             .map_err(fail)?
-            .ok_or_else(|| "no SVD file: set \"svd\" in launch.json".to_owned())
+            .ok_or_else(|| "no SVD file: set \"svd\" in launch.json".into())
     }
 
     fn write_peripheral(
@@ -1214,7 +1276,7 @@ impl Dap {
             .and_then(|found| found.register(register))
             .ok_or_else(|| format!("no register {peripheral}.{register}"))?;
         if !target.access.can_write() {
-            return Err(format!("{register} is read-only"));
+            return Err(format!("{register} is read-only").into());
         }
         let session = self.session()?;
         let Some(field_name) = field else {
@@ -1230,7 +1292,7 @@ impl Dap {
             .find(|candidate| candidate.name == field_name)
             .ok_or_else(|| format!("no field {field_name}"))?;
         if !found.access.can_write() {
-            return Err(format!("{field_name} is read-only"));
+            return Err(format!("{field_name} is read-only").into());
         }
         // A write-only register reads as nothing useful, so start from zero.
         let current = if target.access == svd::Access::WriteOnly {
@@ -1325,22 +1387,24 @@ impl Dap {
         if running && !self.last_threads.is_empty() {
             return Ok(json!({"threads": self.last_threads}));
         }
-        let tasks = if running {
-            None
+        let threads: Vec<Value> = if running {
+            vec![json!({"id": MAIN_THREAD, "name": "main"})]
         } else {
-            self.session()?.tasks().map_err(fail)?
-        };
-        let threads: Vec<Value> = match tasks {
-            Some(tasks) if !tasks.is_empty() => tasks
-                .iter()
-                .map(|task| {
-                    json!({
-                        "id": task.tcb,
-                        "name": format!("{} [{}, {}]", task.name, task.state.name(), task.priority),
-                    })
-                })
-                .collect(),
-            _ => vec![json!({"id": MAIN_THREAD, "name": "main"})],
+            let (active_id, active_label) = self.session()?.active_context_label().map_err(fail)?;
+            let mut out = vec![json!({"id": active_id, "name": active_label})];
+            if self.rtos_thread_view == RtosThreadView::CurrentFirst {
+                if let Some(tasks) = self.session()?.tasks().map_err(fail)? {
+                    for task in tasks {
+                        if i64::from(task.tcb) != active_id {
+                            out.push(json!({
+                                "id": task.tcb,
+                                "name": format!("{} [{}, {}]", task.name, task.state.name(), task.priority),
+                            }));
+                        }
+                    }
+                }
+            }
+            out
         };
         self.last_threads.clone_from(&threads);
         Ok(json!({"threads": threads}))
@@ -1390,7 +1454,7 @@ impl Dap {
                 "path": self.editor_path(&location.file),
             });
         }
-        if frame.is_exception {
+        if frame.is_exception || frame.is_label {
             out["presentationHint"] = json!("label");
         } else if frame.is_inlined {
             out["name"] = json!(format!("{} [inlined]", frame.name));
@@ -1402,7 +1466,7 @@ impl Dap {
 
     fn stack_trace(&mut self, arguments: &Value) -> Handled {
         if self.is_running() {
-            return Err("the target is running".to_owned());
+            return Err("the target is running".into());
         }
         let thread = arguments["threadId"].as_i64().unwrap_or(MAIN_THREAD);
         let frames = self.session()?.stack_trace(thread).map_err(fail)?;

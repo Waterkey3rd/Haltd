@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gimli::{AttributeValue, DebugInfoOffset, Dwarf, UnitOffset};
-use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
+use object::{Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
 
 use crate::cache;
 use crate::index::{self, FunctionEntry, Index, RawElfSymbol, R};
@@ -12,7 +12,7 @@ use crate::lines::LineTable;
 use crate::paths;
 use crate::scope::Node;
 use crate::types::{Type, TypeRef};
-use crate::{Result, SymbolError};
+use crate::{MemoryReader, Result, SymbolError};
 
 /// The ELF stays mapped on Linux, where linkers replace their output by
 /// unlinking it. Windows cannot write a file while it is mapped, which would
@@ -77,11 +77,20 @@ pub struct Function {
     pub high: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CodeSection {
+    addr: u32,
+    file_offset: usize,
+    len: usize,
+}
+
 pub struct SymbolDb {
     // Holds 'static slices into `_map`; see `load`.
     pub(crate) dwarf: Dwarf<R>,
     pub(crate) debug_frame: gimli::DebugFrame<R>,
     pub(crate) index: Index,
+    code_sections: Vec<CodeSection>,
+    symbols_by_addr: Vec<usize>,
     units: Mutex<HashMap<u32, Arc<gimli::Unit<R>>>>,
     pub(crate) type_cache: Mutex<HashMap<TypeRef, Arc<Type>>>,
     pub(crate) qualified_names: Mutex<HashMap<TypeRef, Option<String>>>,
@@ -165,6 +174,34 @@ impl SymbolDb {
         };
         let index_time = index_started.elapsed();
 
+        let mut code_sections: Vec<CodeSection> = object
+            .sections()
+            .filter(|section| section.kind() == SectionKind::Text && section.size() > 0)
+            .filter_map(|section| {
+                let addr = u32::try_from(section.address()).ok()?;
+                let (offset, len) = section.file_range()?;
+                let file_offset = usize::try_from(offset).ok()?;
+                let len = usize::try_from(len).ok()?;
+                file_offset
+                    .checked_add(len)
+                    .filter(|&end| end <= map.len())?;
+                Some(CodeSection {
+                    addr,
+                    file_offset,
+                    len,
+                })
+            })
+            .collect();
+        code_sections.sort_by_key(|section| section.addr);
+
+        let mut symbols_by_addr: Vec<usize> = (0..index.elf_symbols.len())
+            .filter(|&i| index.elf_symbols[i].addr != 0)
+            .collect();
+        symbols_by_addr.sort_by_key(|&i| {
+            let sym = &index.elf_symbols[i];
+            (sym.addr, std::cmp::Reverse(sym.size))
+        });
+
         let stats = LoadStats {
             cache_hit,
             hash: hash_time,
@@ -181,6 +218,8 @@ impl SymbolDb {
             dwarf,
             debug_frame,
             index,
+            code_sections,
+            symbols_by_addr,
             units: Mutex::new(HashMap::new()),
             type_cache: Mutex::new(HashMap::new()),
             qualified_names: Mutex::new(HashMap::new()),
@@ -278,11 +317,104 @@ impl SymbolDb {
 
     /// Name of the linker symbol covering `addr`.
     pub fn symbol_at(&self, addr: u32) -> Option<String> {
-        self.index
-            .elf_symbols
-            .iter()
-            .find(|e| addr >= e.addr && addr - e.addr < e.size)
-            .map(|e| self.index.str(e.name).to_owned())
+        let pos = self
+            .symbols_by_addr
+            .partition_point(|&i| self.index.elf_symbols[i].addr <= addr);
+        for &idx in self.symbols_by_addr[..pos].iter().rev() {
+            let entry = &self.index.elf_symbols[idx];
+            if entry.size > 0 && addr - entry.addr < entry.size {
+                return Some(self.index.str(entry.name).to_owned());
+            }
+            if addr - entry.addr > 0x1_0000 {
+                break;
+            }
+        }
+        // Handwritten assembly handlers often omit `.size`; allow matching within
+        // an executable section up to the next symbol or 256 bytes.
+        if let Some(&idx) = pos.checked_sub(1).and_then(|p| self.symbols_by_addr.get(p)) {
+            let entry = &self.index.elf_symbols[idx];
+            if entry.size == 0 && self.is_code_addr(addr) {
+                let next_addr = self.symbols_by_addr[pos..]
+                    .iter()
+                    .map(|&i| self.index.elf_symbols[i].addr)
+                    .find(|&next| next > entry.addr)
+                    .unwrap_or(u32::MAX);
+                let limit = next_addr.saturating_sub(entry.addr).min(256);
+                if addr - entry.addr < limit {
+                    return Some(self.index.str(entry.name).to_owned());
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn is_code_addr(&self, addr: u32) -> bool {
+        let pos = self.code_sections.partition_point(|s| s.addr <= addr);
+        let Some(section) = pos.checked_sub(1).and_then(|p| self.code_sections.get(p)) else {
+            return false;
+        };
+        usize::try_from(addr - section.addr).is_ok_and(|offset| offset < section.len)
+    }
+
+    /// Start address of the function or assembly routine containing `pc`.
+    pub(crate) fn function_start_at(&self, pc: u32) -> Option<u32> {
+        if let Some(entry) = self.function_entry_at(pc) {
+            return Some(entry.low);
+        }
+        let pos = self
+            .symbols_by_addr
+            .partition_point(|&i| self.index.elf_symbols[i].addr <= pc);
+        for &idx in self.symbols_by_addr[..pos].iter().rev() {
+            let entry = &self.index.elf_symbols[idx];
+            if entry.size > 0 && pc - entry.addr < entry.size {
+                return Some(entry.addr);
+            }
+            if pc - entry.addr > 0x1_0000 {
+                break;
+            }
+        }
+        if let Some(&idx) = pos.checked_sub(1).and_then(|p| self.symbols_by_addr.get(p)) {
+            let entry = &self.index.elf_symbols[idx];
+            if entry.size == 0 && self.is_code_addr(pc) {
+                let next_addr = self.symbols_by_addr[pos..]
+                    .iter()
+                    .map(|&i| self.index.elf_symbols[i].addr)
+                    .find(|&next| next > entry.addr)
+                    .unwrap_or(u32::MAX);
+                let limit = next_addr.saturating_sub(entry.addr).min(256);
+                if pc - entry.addr < limit {
+                    return Some(entry.addr);
+                }
+            }
+        }
+        None
+    }
+
+    /// Read machine code from the mapped ELF `.text` sections, falling back to
+    /// target memory when `addr` is not covered by any mapped section.
+    pub(crate) fn read_code(
+        &self,
+        addr: u32,
+        buf: &mut [u8],
+        memory: &mut dyn MemoryReader,
+    ) -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let pos = self.code_sections.partition_point(|s| s.addr <= addr);
+        if let Some(section) = pos.checked_sub(1).and_then(|p| self.code_sections.get(p)) {
+            if let Ok(offset) = usize::try_from(addr - section.addr) {
+                if offset
+                    .checked_add(buf.len())
+                    .is_some_and(|end| end <= section.len)
+                {
+                    let start = section.file_offset + offset;
+                    buf.copy_from_slice(&self._map[start..start + buf.len()]);
+                    return Ok(());
+                }
+            }
+        }
+        memory.read(addr, buf).map_err(SymbolError::Memory)
     }
 
     /// The definition of a type, given its qualified name.
@@ -373,7 +505,14 @@ fn elf_symbols(object: &object::File<'static>) -> Vec<RawElfSymbol> {
         .filter(|symbol| symbol.is_definition())
         .filter_map(|symbol| {
             let name = symbol.name().ok()?;
-            if name.is_empty() {
+            if name.is_empty()
+                || name == "$t"
+                || name == "$d"
+                || name == "$a"
+                || name.starts_with("$t.")
+                || name.starts_with("$d.")
+                || name.starts_with("$a.")
+            {
                 return None;
             }
             // Thumb function symbols carry the mode in bit 0.

@@ -45,10 +45,18 @@ struct HssAuto {
 pub struct MockProbe {
     regions: Vec<Region>,
     regs: BTreeMap<Reg, u32>,
+    stale_read_regs: Option<BTreeMap<Reg, u32>>,
+    stale_is_halted: Option<bool>,
     halted: bool,
     /// Each `go` pops one entry: `is_halted` polls until the target stops.
     halt_script: VecDeque<u32>,
     polls_until_halt: Option<u32>,
+    dcrsr_sel: u32,
+    dcrdr: u32,
+    dfsr: u32,
+    icsr: Option<u32>,
+    fpccr: Option<u32>,
+    dwt_ctrl: Option<u32>,
     breakpoints: BTreeMap<u32, (u32, BpKind)>,
     watchpoints: BTreeMap<u32, WatchpointSpec>,
     next_handle: u32,
@@ -59,6 +67,114 @@ pub struct MockProbe {
     rtt_up: BTreeMap<u32, VecDeque<u8>>,
     rtt_down: BTreeMap<u32, Vec<u8>>,
     connected: bool,
+}
+
+impl MockProbe {
+    /// Simulates an external debugger (e.g. SEGGER Ozone) resuming the core.
+    pub fn mock_external_resume(&mut self) {
+        self.halted = false;
+        self.polls_until_halt = None;
+    }
+
+    /// Simulates an external debugger halting the core at `pc` with `dfsr`.
+    pub fn mock_external_halt(&mut self, pc: u32, dfsr: u32) {
+        self.halted = true;
+        self.polls_until_halt = None;
+        self.regs.insert(Reg::R(15), pc);
+        self.dfsr = dfsr;
+    }
+
+    /// Simulates a stale J-Link `read_regs` cache while keeping `DCRDR` live.
+    pub fn mock_set_stale_read_regs(&mut self, stale: bool) {
+        if stale {
+            self.stale_read_regs = Some(self.regs.clone());
+        } else {
+            self.stale_read_regs = None;
+        }
+    }
+
+    /// Directly updates a register in the underlying target state.
+    pub fn mock_set_reg(&mut self, reg: Reg, value: u32) {
+        self.regs.insert(reg, value);
+    }
+
+    /// Simulates a stale J-Link `is_halted()` cache while keeping `DHCSR.S_HALT` live.
+    pub fn mock_set_stale_is_halted(&mut self, stale: Option<bool>) {
+        self.stale_is_halted = stale;
+    }
+
+    fn scs_reg_from_sel(sel: u32) -> Option<Reg> {
+        match sel {
+            0..=15 => Some(Reg::R(sel as u8)),
+            16 => Some(Reg::Xpsr),
+            17 => Some(Reg::Msp),
+            18 => Some(Reg::Psp),
+            20 => Some(Reg::Primask),
+            0x21 => Some(Reg::Fpscr),
+            0x40..=0x5F => Some(Reg::S((sel - 0x40) as u8)),
+            _ => None,
+        }
+    }
+
+    fn read_scs(&self, addr: u32) -> Option<u32> {
+        match addr {
+            // DHCSR: C_DEBUGEN | S_REGRDY, plus C_HALT | S_HALT when halted.
+            0xE000_EDF0 => {
+                let mut v = (1 << 0) | (1 << 16);
+                if self.halted {
+                    v |= (1 << 1) | (1 << 17);
+                }
+                Some(v)
+            }
+            0xE000_EDF4 => Some(self.dcrsr_sel),
+            0xE000_EDF8 => Some(self.dcrdr),
+            0xE000_ED30 => Some(self.dfsr),
+            0xE000_ED04 => Some(self.icsr.unwrap_or(1 << 11)),
+            0xE000_EF34 => Some(self.fpccr.unwrap_or(0)),
+            0xE000_2000 => Some(0), // FP_CTRL
+            0xE000_1000 => Some(self.dwt_ctrl.unwrap_or(0x4000_0000)), // DWT_CTRL (4 comparators)
+            _ => None,
+        }
+    }
+
+    fn write_scs(&mut self, addr: u32, val: u32) -> bool {
+        match addr {
+            0xE000_EDF0 => true, // DHCSR writes accepted (C_MASKINTS etc.)
+            0xE000_EDF4 => {
+                let sel = val & 0x7F;
+                self.dcrsr_sel = sel;
+                if let Some(reg) = Self::scs_reg_from_sel(sel) {
+                    if val & (1 << 16) != 0 {
+                        self.regs.insert(reg, self.dcrdr);
+                    } else {
+                        self.dcrdr = self.regs.get(&reg).copied().unwrap_or(0);
+                    }
+                }
+                true
+            }
+            0xE000_EDF8 => {
+                self.dcrdr = val;
+                true
+            }
+            0xE000_ED30 => {
+                self.dfsr &= !val;
+                true
+            }
+            0xE000_ED04 => {
+                self.icsr = Some(val);
+                true
+            }
+            0xE000_EF34 => {
+                self.fpccr = Some(val);
+                true
+            }
+            0xE000_1000 => {
+                self.dwt_ctrl = Some(val);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl MockProbe {
@@ -191,12 +307,13 @@ impl Probe for MockProbe {
                 self.halted = true;
             }
         }
-        Ok(self.halted)
+        Ok(self.stale_is_halted.unwrap_or(self.halted))
     }
 
     fn read_regs(&mut self, ids: &[Reg], out: &mut [u32]) -> Result<()> {
+        let source = self.stale_read_regs.as_ref().unwrap_or(&self.regs);
         for (id, slot) in ids.iter().zip(out.iter_mut()) {
-            *slot = self.regs.get(id).copied().unwrap_or(0);
+            *slot = source.get(id).copied().unwrap_or(0);
         }
         Ok(())
     }
@@ -207,15 +324,40 @@ impl Probe for MockProbe {
     }
 
     fn read_mem(&mut self, addr: u32, buf: &mut [u8], _width: AccessWidth) -> Result<()> {
-        let (index, offset) = self.range(addr, buf.len())?;
-        buf.copy_from_slice(&self.regions[index].data[offset..offset + buf.len()]);
-        Ok(())
+        match self.range(addr, buf.len()) {
+            Ok((index, offset)) => {
+                buf.copy_from_slice(&self.regions[index].data[offset..offset + buf.len()]);
+                Ok(())
+            }
+            Err(err) => {
+                if buf.len() == 4 && (addr & 3) == 0 {
+                    if let Some(val) = self.read_scs(addr) {
+                        buf.copy_from_slice(&val.to_le_bytes());
+                        return Ok(());
+                    }
+                }
+                Err(err)
+            }
+        }
     }
 
     fn write_mem(&mut self, addr: u32, data: &[u8], _width: AccessWidth) -> Result<()> {
-        let (index, offset) = self.range(addr, data.len())?;
-        self.regions[index].data[offset..offset + data.len()].copy_from_slice(data);
-        Ok(())
+        match self.range(addr, data.len()) {
+            Ok((index, offset)) => {
+                self.regions[index].data[offset..offset + data.len()].copy_from_slice(data);
+                Ok(())
+            }
+            Err(err) => {
+                if (addr & 3) == 0 {
+                    if let Ok(bytes) = <[u8; 4]>::try_from(data) {
+                        if self.write_scs(addr, u32::from_le_bytes(bytes)) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(err)
+            }
+        }
     }
 
     fn set_bp(&mut self, addr: u32, kind: BpKind) -> Result<BpHandle> {

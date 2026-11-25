@@ -48,6 +48,11 @@ export function drawOverview(state: TimelineState): void {
     ctx.fillStyle = theme.sampleCursor;
     ctx.fillRect(sx - dpr * 0.5, 0, Math.max(1.5, dpr), h);
   }
+  ctx.fillStyle = theme.pinColor;
+  for (const pin of state.pins) {
+    const px = toX(pin.t);
+    ctx.fillRect(px - dpr * 0.5, 0, Math.max(1.5, dpr), h);
+  }
   if (state.cursorA !== null) {
     const ax = toX(state.cursorA);
     ctx.fillStyle = theme.cursorA;

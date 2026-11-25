@@ -4,6 +4,7 @@ pub mod bridge;
 pub mod control;
 pub mod daemon;
 pub mod dap;
+pub mod diagnose;
 mod http;
 pub mod protocol;
 mod rpc;

@@ -18,6 +18,7 @@ use tsdb::Tsdb;
 
 use crate::control::{ControlBus, Incoming};
 use crate::dap::{Client, Dap};
+use crate::diagnose::Diagnostic;
 use crate::http;
 use crate::protocol::read_message;
 use crate::rpc::App;
@@ -167,7 +168,9 @@ fn reject(stream: TcpStream) -> io::Result<()> {
     if let Some(request) = read_message(&mut reader)? {
         client.respond(
             &request,
-            Err("another debug session is already controlling the target".to_owned()),
+            Err(Diagnostic::from(
+                "another debug session is already controlling the target",
+            )),
         );
     }
     Ok(())
@@ -228,7 +231,7 @@ fn run_controller(stream: TcpStream, shared: &Shared) -> io::Result<()> {
                 let _ = reply.send(dap.control(command));
             }
             Err(RecvTimeoutError::Timeout) => {
-                if dap.is_running() {
+                if dap.session.is_some() {
                     dap.poll();
                 }
             }

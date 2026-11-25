@@ -45,7 +45,7 @@
 - **HardFault 自动拦截与译码**：发生异常时在入口第一时间暂停，自动解析 `CFSR` / `HFSR` / `MMFAR` / `BFAR` / `AFSR`，并在调用栈中跨过 `<exception N>` 直接定位到出错代码行。
 - **FreeRTOS 感知**：直接从 DWARF 信息读取 TCB 与任务链表布局（支持 CM3 / CM4F），无需硬编码偏移，可查看任务状态、优先级、剩余栈高水位及各任务独立调用栈。
 - **不停机变量与波形采样**：
-  - **Live Watch**：通过 AHB-AP 不停机实时读写全局变量、结构体与位段（0~5 Hz 可调），支持 Ozone 风格快捷键（`Ctrl+G` 加入 Live Watch、`Ctrl+H` 加入 Timeline 等）。
+  - **Live Watch**：通过 AHB-AP 不停机实时读写全局变量、结构体与位段（0~5 Hz 可调），支持 Ozone 风格快捷键（`Ctrl+G` 加入 Timeline、`Ctrl+H` 加入 Live Watch 等）。
   - **Timeline（HSS / 轮询 / RTT）**：最高 1 kHz 高速采样（超出探针 HSS 带宽预算的信号自动降级为轮询），采用仿 Ozone Timeline / Data Graph 的多轨道同步示波器 UI，同时承载 HSS 与 RTT 波形、鼠标缩放/游标、拖拽分组、深浅色主题、`.hlrec` 录制与 CSV/PNG 导出。
 - **RTT 终端与结构化解码**：除文本终端、正则、`rtt.yaml`、Lua 与 SystemView 外，支持按通道名自动匹配 ELF 结构体与文本 `key=value` 数值并自动加入 Timeline（可在 `launch.json` 配置）。
 - **VS Code 芯片选型辅助**：在 `launch.json` 中为 `device` 提供 J-Link 器件自动补全、内核/Flash/RAM 与内置 profile 悬停提示、未知器件警告及 `Haltd: Select Device` 命令。

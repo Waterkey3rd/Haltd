@@ -7,6 +7,9 @@ export interface ContextMenuActions {
   placeCursorA: (time: number) => void;
   placeCursorB: (time: number) => void;
   placeSampleCursor: (time: number) => void;
+  addPin: (time: number) => void;
+  removePin: (id: number) => void;
+  clearPins: () => void;
   clearCursors: () => void;
   changeSignalColor: (item: SeriesInfo) => void;
   moveSignalToTrack: (item: SeriesInfo, targetTrack: string | null) => void;
@@ -21,6 +24,7 @@ export interface ContextMenuRequest {
   clientY: number;
   trackName: string;
   timeAtCursor: number | null;
+  pinId?: number;
   signal?: SeriesInfo;
 }
 
@@ -97,11 +101,31 @@ export function showContextMenu(
   );
   addItem(
     "Pin Sample Cursor Here",
-    "DblClick",
+    "Click",
     () => {
       if (req.timeAtCursor !== null) actions.placeSampleCursor(req.timeAtCursor);
     },
     req.timeAtCursor === null,
+  );
+  addItem(
+    "Add Pin Here",
+    "",
+    () => {
+      if (req.timeAtCursor !== null) actions.addPin(req.timeAtCursor);
+    },
+    req.timeAtCursor === null,
+  );
+  if (req.pinId !== undefined) {
+    const targetPin = state.pins.find((p) => p.id === req.pinId);
+    if (targetPin) {
+      addItem(`Remove Pin ${targetPin.label}`, "", () => actions.removePin(targetPin.id));
+    }
+  }
+  addItem(
+    "Clear All Pins",
+    "",
+    () => actions.clearPins(),
+    state.pins.length === 0 && state.sampleCursor === null,
   );
   addItem(
     "Clear Cursors",

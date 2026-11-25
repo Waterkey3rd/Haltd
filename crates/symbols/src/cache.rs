@@ -7,7 +7,7 @@ use crate::index::Index;
 
 const MAGIC: &[u8; 8] = b"JLKDIDX\0";
 /// Bump whenever [`Index`] or the way it is computed changes.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const HEADER_LEN: usize = MAGIC.len() + 4;
 
 pub(crate) fn default_dir() -> Option<PathBuf> {

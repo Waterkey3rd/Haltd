@@ -22,6 +22,7 @@ export interface CanvasTheme {
   tickStroke: string;
   crosshair: string;
   sampleCursor: string;
+  pinColor: string;
   cursorA: string;
   cursorB: string;
   cursorSpanFill: string;
@@ -234,6 +235,7 @@ export class ThemeManager {
         tickStroke: "rgba(0, 0, 0, 0.55)",
         crosshair: "rgba(0, 0, 0, 0.75)",
         sampleCursor: "#9a5b00",
+        pinColor: "#00664d",
         cursorA: "#004a99",
         cursorB: "#a80000",
         cursorSpanFill: "rgba(0, 74, 153, 0.12)",
@@ -266,6 +268,7 @@ export class ThemeManager {
         tickStroke: "rgba(255, 255, 255, 0.55)",
         crosshair: "rgba(255, 255, 255, 0.85)",
         sampleCursor: "#facc15",
+        pinColor: "#2dd4bf",
         cursorA: "#38bdf8",
         cursorB: "#fb7185",
         cursorSpanFill: "rgba(56, 189, 248, 0.14)",
@@ -298,6 +301,7 @@ export class ThemeManager {
         tickStroke: "rgba(31, 35, 40, 0.25)",
         crosshair: "rgba(25, 113, 194, 0.65)",
         sampleCursor: "#d97706",
+        pinColor: "#099268",
         cursorA: "#0969da",
         cursorB: "#cf222e",
         cursorSpanFill: "rgba(9, 105, 218, 0.08)",
@@ -329,6 +333,7 @@ export class ThemeManager {
       tickStroke: "rgba(255, 255, 255, 0.18)",
       crosshair: "rgba(77, 171, 247, 0.65)",
       sampleCursor: "#fcc419",
+      pinColor: "#20c997",
       cursorA: "#4dabf7",
       cursorB: "#ff8787",
       cursorSpanFill: "rgba(77, 171, 247, 0.08)",

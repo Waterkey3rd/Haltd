@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tsdb::{Recorder, Tsdb};
 
 use crate::control::{Control, ControlBus};
+use crate::diagnose::Diagnostic;
 use crate::ws::Subscriptions;
 
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -25,41 +26,70 @@ pub(crate) enum Reply {
     Binary(Vec<u8>),
 }
 
-type RpcResult = Result<Reply, (i64, String)>;
-
-fn server_error(message: impl std::fmt::Display) -> (i64, String) {
-    (SERVER_ERROR, message.to_string())
+pub(crate) struct RpcError {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<Box<Diagnostic>>,
 }
 
-fn invalid(message: &str) -> (i64, String) {
-    (INVALID_PARAMS, message.to_owned())
+impl RpcError {
+    pub(crate) fn new(code: i64, message: String, data: Option<Diagnostic>) -> Self {
+        Self {
+            code,
+            message,
+            data: data.map(Box::new),
+        }
+    }
+
+    pub(crate) fn from_diagnostic(diag: Diagnostic) -> Self {
+        let message = diag.message.clone();
+        Self::new(SERVER_ERROR, message, Some(diag))
+    }
+
+    pub(crate) fn method_not_found(message: String) -> Self {
+        Self::new(METHOD_NOT_FOUND, message, None)
+    }
+}
+
+type RpcResult = Result<Reply, RpcError>;
+
+fn server_error(message: impl std::fmt::Display) -> RpcError {
+    RpcError::from_diagnostic(Diagnostic::from_message(&message.to_string()))
+}
+
+fn invalid(message: &str) -> RpcError {
+    RpcError::new(
+        INVALID_PARAMS,
+        message.to_owned(),
+        Some(Diagnostic::from_message(message)),
+    )
 }
 
 fn ok(value: Value) -> RpcResult {
     Ok(Reply::Json(value))
 }
 
-fn string_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, (i64, String)> {
+fn string_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
     params[name]
         .as_str()
         .ok_or_else(|| invalid(&format!("{name} must be a string")))
 }
 
-fn u32_param(params: &Value, name: &str) -> Result<u32, (i64, String)> {
+fn u32_param(params: &Value, name: &str) -> Result<u32, RpcError> {
     params[name]
         .as_u64()
         .map(|value| value as u32)
         .ok_or_else(|| invalid(&format!("{name} must be a number")))
 }
 
-fn i64_param(params: &Value, name: &str) -> Result<i64, (i64, String)> {
+fn i64_param(params: &Value, name: &str) -> Result<i64, RpcError> {
     params[name]
         .as_i64()
         .or_else(|| params[name].as_f64().map(|value| value as i64))
         .ok_or_else(|| invalid(&format!("{name} must be a number")))
 }
 
-fn series_ids(params: &Value) -> Result<Vec<u32>, (i64, String)> {
+fn series_ids(params: &Value) -> Result<Vec<u32>, RpcError> {
     params["seriesIds"]
         .as_array()
         .map(|items| {
@@ -71,7 +101,7 @@ fn series_ids(params: &Value) -> Result<Vec<u32>, (i64, String)> {
         .ok_or_else(|| invalid("seriesIds must be an array"))
 }
 
-fn default_output(extension: &str) -> Result<PathBuf, (i64, String)> {
+fn default_output(extension: &str) -> Result<PathBuf, RpcError> {
     let directory = symbols::paths::cache_root()
         .ok_or_else(|| server_error("no cache directory: set HALTD_CACHE_DIR or give a path"))?
         .join("recordings");
@@ -143,7 +173,7 @@ impl App {
         self.control.send(command, reply);
         match result.recv() {
             Ok(Ok(value)) => ok(value),
-            Ok(Err(message)) => Err(server_error(message)),
+            Ok(Err(diag)) => Err(RpcError::from_diagnostic(diag)),
             Err(_) => Err(server_error("the debug session ended")),
         }
     }
@@ -450,7 +480,9 @@ impl App {
                 elf: params["elf"].as_str().map(PathBuf::from),
             }),
 
-            other => Err((METHOD_NOT_FOUND, format!("unknown method {other:?}"))),
+            other => Err(RpcError::method_not_found(format!(
+                "unknown method {other:?}"
+            ))),
         }
     }
 }

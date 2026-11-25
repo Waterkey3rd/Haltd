@@ -53,6 +53,7 @@ fn compile(output: &Path) -> bool {
             "-Wl,-u,g_state_ref",
             "-Wl,-u,g_opaque",
             "-Wl,-u,prvTaskExitError",
+            "-Wl,-u,sim_pendsv_handler",
         ])
         .args(SOURCES)
         .arg("-o")

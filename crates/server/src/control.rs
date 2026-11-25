@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use tsdb::EventKind;
 
 use crate::dap::binding_of;
+use crate::diagnose::Diagnostic;
 
 pub enum Control {
     Halt,
@@ -20,7 +21,7 @@ pub enum Control {
     Reload { elf: Option<PathBuf> },
 }
 
-pub type ControlReply = Sender<Result<Value, String>>;
+pub type ControlReply = Sender<Result<Value, Diagnostic>>;
 
 /// What the DAP connection's loop receives.
 pub enum Incoming {
@@ -63,13 +64,13 @@ impl ControlBus {
         }
         let idle = self.idle.lock().expect("bus lock");
         let Some(idle) = idle.as_ref() else {
-            let _ = reply.send(Err("no target is connected".to_owned()));
+            let _ = reply.send(Err("no target is connected".into()));
             return;
         };
         let mut session = idle.session.lock().expect("session lock");
         let result = match session.as_mut() {
             Some(session) => run_idle(session, &idle.sampler, command),
-            None => Err("no target is connected".to_owned()),
+            None => Err("no target is connected".into()),
         };
         let _ = reply.send(result);
     }
@@ -80,8 +81,8 @@ fn run_idle(
     session: &mut Session,
     sampler: &Arc<Sampler>,
     command: Control,
-) -> Result<Value, String> {
-    let fail = |error: engine::session::EngineError| error.to_string();
+) -> Result<Value, Diagnostic> {
+    let fail = Diagnostic::from;
     match command {
         Control::Halt => {
             if *session.state() == RunState::Running {
@@ -105,7 +106,7 @@ fn run_idle(
             sampler.bind(binding_of(session));
             result.map_err(fail)?;
             if !resumed {
-                return Err("the image loaded but the target did not start".to_owned());
+                return Err("the image loaded but the target did not start".into());
             }
             sampler.note_event(EventKind::Reload, json!({}));
         }

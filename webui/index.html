@@ -150,14 +150,14 @@
           <div class="empty-card">
             <div class="empty-icon">📈</div>
             <h3>Timeline Ready</h3>
-            <p>Add a global/static C/C++ expression above, press <kbd>Ctrl+H</kbd> in VS Code, or enable RTT auto-decoding to see waveforms appear on synchronized tracks.</p>
+            <p>Add a global/static C/C++ expression above, press <kbd>Ctrl+G</kbd> in VS Code, or enable RTT auto-decoding to see waveforms appear on synchronized tracks.</p>
             <div class="empty-shortcuts">
-              <span><kbd>Wheel</kbd> Zoom Time</span>
-              <span><kbd>Shift+Wheel</kbd> Scroll Time</span>
-              <span><kbd>Ctrl+Wheel</kbd> Zoom Y</span>
+              <span><kbd>Wheel</kbd> Scroll Time</span>
+              <span><kbd>Shift+Wheel</kbd> Zoom Y</span>
+              <span><kbd>Ctrl+Wheel</kbd> Zoom Time</span>
               <span><kbd>Drag</kbd> Pan X/Y</span>
               <span><kbd>Ctrl+Drag</kbd> Box Zoom</span>
-              <span><kbd>DblClick</kbd> Sample Cursor</span>
+              <span><kbd>Click</kbd> Sample Cursor</span>
               <span><kbd>A</kbd>/<kbd>B</kbd> Measure</span>
             </div>
           </div>
@@ -197,13 +197,14 @@
               <span class="chip-label">1/Δt</span>
               <span id="cursor-freq-val" class="chip-val">—</span>
             </div>
+            <div id="cursor-pins" class="cursor-pins-wrap"></div>
             <span class="spacer"></span>
             <button type="button" id="cursor-zoom" class="mini-btn" hidden>Zoom A..B</button>
             <button type="button" id="cursor-clear" class="mini-btn" hidden>Clear Cursors</button>
           </div>
           <div id="cursor-table-wrap">
             <table id="cursor-table">
-              <thead>
+              <thead id="cursor-thead">
                 <tr>
                   <th>Signal</th>
                   <th>S</th>
@@ -270,7 +271,7 @@
       <span id="connection" class="status-item"><span class="status-dot"></span>Connecting…</span>
       <span id="rates" class="status-item"></span>
       <span id="hover-readout" class="status-item mono"></span>
-      <span id="measure" class="status-item">Double-click to place Sample S; A / B keys place measurement cursors.</span>
+      <span id="measure" class="status-item">Click to place Sample S; A / B keys place measurement cursors.</span>
       <span class="spacer"></span>
       <button type="button" id="events-btn" class="mini-btn status-events-btn" title="View target events (Halts, Resets, Reloads, Faults)">
         Events: 0

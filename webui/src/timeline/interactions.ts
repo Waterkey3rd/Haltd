@@ -1,6 +1,6 @@
 import type { SeriesInfo } from "../client";
 import { WHEEL_STEP, zoomDivisionAround, spanSeconds, pxToTime, panYRange } from "./math";
-import { getGroupYScale, nowSeconds, type TimelineState, type TrackRow } from "./state";
+import { getGroupYScale, nowSeconds, type Pin, type TimelineState, type TrackRow } from "./state";
 import type { ContextMenuRequest } from "./contextMenu";
 
 export interface InteractionCallbacks {
@@ -29,6 +29,7 @@ export function attachTrackInteractions(
   let drag:
     | {
         mode: "pan-xy";
+        button: number;
         x: number;
         y: number;
         end: number;
@@ -42,6 +43,7 @@ export function attachTrackInteractions(
     | { mode: "cursor-s" }
     | { mode: "cursor-a" }
     | { mode: "cursor-b" }
+    | { mode: "pin"; id: number }
     | null = null;
   let wheelTravel = 0;
 
@@ -52,14 +54,26 @@ export function attachTrackInteractions(
     return Math.abs(clientX - rect.left - px) <= 6;
   };
 
+  const findNearPin = (clientX: number): Pin | undefined => {
+    for (let i = state.pins.length - 1; i >= 0; i--) {
+      if (isNearCursor(clientX, state.pins[i].t)) {
+        return state.pins[i];
+      }
+    }
+    return undefined;
+  };
+
   over.addEventListener(
     "wheel",
     (event) => {
       event.preventDefault();
       const rect = over.getBoundingClientRect();
 
-      // Ctrl + Wheel: Zoom Y axis of hovered track
-      if (event.ctrlKey || event.metaKey) {
+      // Shift + Wheel: Zoom Y axis of hovered track
+      if (event.shiftKey) {
+        const rawDelta =
+          Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+        if (rawDelta === 0) return;
         const yCfg = getGroupYScale(state, groupName);
         const curMin = yCfg.auto ? (plot.scales.y.min ?? -1) : yCfg.min;
         const curMax = yCfg.auto ? (plot.scales.y.max ?? 1) : yCfg.max;
@@ -67,7 +81,7 @@ export function attachTrackInteractions(
         const fracY =
           1 - Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)));
         const pivotY = curMin + span * fracY;
-        const factor = event.deltaY > 0 ? 1.2 : 1 / 1.2;
+        const factor = rawDelta > 0 ? 1.2 : 1 / 1.2;
         const newSpan = span * factor;
         yCfg.auto = false;
         yCfg.min = pivotY - newSpan * fracY;
@@ -76,30 +90,30 @@ export function attachTrackInteractions(
         return;
       }
 
-      // Shift + Wheel: Horizontal scroll in time
-      if (event.shiftKey) {
-        const rawDelta =
-          Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-        if (rawDelta === 0) return;
-        const span = spanSeconds(state.division);
-        const step = (rawDelta / 400) * span;
+      // Ctrl/Meta + Wheel: Zoom time centered at mouse cursor
+      if (event.ctrlKey || event.metaKey) {
+        wheelTravel += event.deltaY;
+        if (Math.abs(wheelTravel) < WHEEL_STEP) return;
+        const steps = Math.sign(wheelTravel);
+        wheelTravel = 0;
+        const fraction = (event.clientX - rect.left) / Math.max(1, rect.width);
+        const currentEnd = state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd;
+        const zoomed = zoomDivisionAround(state.division, currentEnd, steps, fraction);
         callbacks.onStopFollowing();
-        state.viewEnd = Math.min(nowSeconds(state), state.viewEnd + step);
+        state.division = zoomed.division;
+        state.viewEnd = zoomed.viewEnd;
         callbacks.onRefresh();
         return;
       }
 
-      // Default Wheel: Zoom time centered at mouse cursor (Ozone style)
-      wheelTravel += event.deltaY;
-      if (Math.abs(wheelTravel) < WHEEL_STEP) return;
-      const steps = Math.sign(wheelTravel);
-      wheelTravel = 0;
-      const fraction = (event.clientX - rect.left) / Math.max(1, rect.width);
-      const currentEnd = state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd;
-      const zoomed = zoomDivisionAround(state.division, currentEnd, steps, fraction);
+      // Default Wheel: Horizontal scroll in time
+      const rawDelta =
+        Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      if (rawDelta === 0) return;
+      const span = spanSeconds(state.division);
+      const step = (rawDelta / 400) * span;
       callbacks.onStopFollowing();
-      state.division = zoomed.division;
-      state.viewEnd = zoomed.viewEnd;
+      state.viewEnd = Math.min(nowSeconds(state), state.viewEnd + step);
       callbacks.onRefresh();
     },
     { passive: false, signal },
@@ -117,6 +131,7 @@ export function attachTrackInteractions(
         event.preventDefault();
         drag = {
           mode: "pan-xy",
+          button: 1,
           x: event.clientX,
           y: event.clientY,
           end: state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd,
@@ -156,9 +171,15 @@ export function attachTrackInteractions(
         drag = { mode: "cursor-s" };
         return;
       }
+      const hitPin = findNearPin(event.clientX);
+      if (hitPin) {
+        drag = { mode: "pin", id: hitPin.id };
+        return;
+      }
 
       drag = {
         mode: "pan-xy",
+        button: 0,
         x: event.clientX,
         y: event.clientY,
         end: state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd,
@@ -192,7 +213,8 @@ export function attachTrackInteractions(
         if (
           isNearCursor(event.clientX, state.cursorA) ||
           isNearCursor(event.clientX, state.cursorB) ||
-          isNearCursor(event.clientX, state.sampleCursor)
+          isNearCursor(event.clientX, state.sampleCursor) ||
+          findNearPin(event.clientX) !== undefined
         ) {
           over.style.cursor = "ew-resize";
         } else if (event.ctrlKey || event.metaKey) {
@@ -241,11 +263,13 @@ export function attachTrackInteractions(
         max > min ? pxToTime(relX, rect.width, min, max) : plot.posToVal(relX, "x");
       const signalMatch: SeriesInfo | undefined =
         track.members.find((m) => m.seriesId === state.selectedSeriesId) ?? track.members[0];
+      const nearPin = findNearPin(event.clientX);
       callbacks.onContextMenu({
         clientX: event.clientX,
         clientY: event.clientY,
         trackName: groupName,
         timeAtCursor,
+        pinId: nearPin?.id,
         signal: signalMatch,
       });
     },
@@ -276,6 +300,16 @@ export function attachTrackInteractions(
         state.cursorB = plot.posToVal(relX, "x");
         callbacks.onUpdateMeasure();
         callbacks.onRedrawOverlays();
+        return;
+      }
+      if (drag.mode === "pin") {
+        const pinId = drag.id;
+        const pin = state.pins.find((p) => p.id === pinId);
+        if (pin) {
+          pin.t = plot.posToVal(relX, "x");
+          callbacks.onUpdateMeasure();
+          callbacks.onRedrawOverlays();
+        }
         return;
       }
       if (drag.mode === "box") {
@@ -325,7 +359,7 @@ export function attachTrackInteractions(
 
   window.addEventListener(
     "mouseup",
-    () => {
+    (event) => {
       if (!drag) return;
       over.style.cursor = "default";
       if (drag.mode === "box" && state.boxSelect) {
@@ -343,8 +377,20 @@ export function attachTrackInteractions(
         drag = null;
         return;
       }
-      if (drag.mode === "pan-xy" && drag.panX) {
-        callbacks.onRefresh();
+      if (drag.mode === "pan-xy") {
+        if (drag.panX) {
+          callbacks.onRefresh();
+        } else if (
+          drag.button === 0 &&
+          !drag.panY &&
+          Math.abs(event.clientX - drag.x) < 4 &&
+          Math.abs(event.clientY - drag.y) < 4
+        ) {
+          const rect = over.getBoundingClientRect();
+          const relX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+          const t = plot.posToVal(relX, "x");
+          callbacks.onPlaceSampleCursor(t);
+        }
       }
       drag = null;
     },

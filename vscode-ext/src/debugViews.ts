@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import type { DiagnosticsManager } from "./errors";
 
 const DEBUG_TYPE = "haltd";
 
@@ -235,8 +236,8 @@ export class TasksView implements vscode.TreeDataProvider<TaskNode> {
     const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
     item.id = `task-${node.task}-frame-${node.index}`;
     const path = node.source?.path;
-    if (path) {
-      item.description = `${path.split("/").pop()}:${node.line}`;
+    if (path && node.line > 0) {
+      item.description = `${path.split(/[/\\]/).pop()}:${node.line}`;
       const line = Math.max(node.line - 1, 0);
       item.command = {
         command: "vscode.open",
@@ -257,14 +258,13 @@ interface FaultEvent {
 
 /** Tell the user why the target faulted. The editor has already opened on the
  *  faulting line, because the adapter marks the handler frames as uninteresting. */
-export async function showFault(fault: FaultEvent, output: vscode.OutputChannel): Promise<void> {
+export async function showFault(fault: FaultEvent, diagnostics: DiagnosticsManager): Promise<void> {
+  diagnostics.recordFault(fault);
   const place = fault.file ? ` (${fault.file.split("/").pop()}:${fault.line})` : "";
   const message = `${fault.summary}${place}`;
   const choice = await vscode.window.showErrorMessage(`Haltd: ${message}`, "Details");
   if (choice === "Details") {
-    output.clear();
-    output.appendLine(JSON.stringify(fault, null, 2));
-    output.show(true);
+    diagnostics.outputChannel.show(true);
   }
 }
 

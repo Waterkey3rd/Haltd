@@ -25,7 +25,7 @@ pub use loc::{FrameRegisters, Located};
 pub use scalar::{Number, Scalar, ScalarKind};
 pub use scope::{LocalVar, ScopeFrame};
 pub use types::{BaseEncoding, BitField, Member, Type, TypeKind, TypeRef};
-pub use unwind::{exception_frame_size, CoreRegisters, FrameKind, StackFrame};
+pub use unwind::{exception_frame_size, CoreRegisters, FrameKind, StackFrame, UnwindStopReason};
 
 /// Target memory as the evaluator sees it.
 pub trait MemoryReader {

@@ -348,6 +348,9 @@ function isLaunchJson(document: vscode.TextDocument): boolean {
 export function registerDeviceAssist(
   context: vscode.ExtensionContext,
   getAdapterPath: () => string,
+  onError: (error: unknown, context: string) => void = (err) => {
+    void vscode.window.showErrorMessage(`Haltd: ${err instanceof Error ? err.message : String(err)}`);
+  },
 ): void {
   const catalog = new DeviceCatalog(context.extensionPath, getAdapterPath);
   const diagnostics = vscode.languages.createDiagnosticCollection("haltd");
@@ -486,7 +489,7 @@ export function registerDeviceAssist(
 
       const devices = await catalog.list();
       if (devices.length === 0) {
-        void vscode.window.showErrorMessage("Haltd: device list is unavailable");
+        onError(new Error("device list is unavailable"), "Select Device");
         return;
       }
       const ordered = [...devices].sort((a, b) => {
@@ -526,7 +529,7 @@ export function registerDeviceAssist(
           `\n${indent}"device": "${pickedDevice.entry.name}",`,
         );
       } else {
-        void vscode.window.showErrorMessage("Haltd: cannot locate position to insert device");
+        onError(new Error("cannot locate position to insert device"), "Select Device");
         return;
       }
       await vscode.workspace.applyEdit(edit);

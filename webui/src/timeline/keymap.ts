@@ -55,15 +55,15 @@ export const KEYBOARD_HELP: ShortcutHelpItem[] = [
 ];
 
 export const MOUSE_HELP: ShortcutHelpItem[] = [
-  { keys: "Wheel", description: "Zoom time axis centered at mouse cursor" },
-  { keys: "Shift + Wheel", description: "Scroll horizontally in time" },
-  { keys: "Ctrl + Wheel", description: "Zoom Y axis of track under mouse" },
+  { keys: "Wheel", description: "Scroll horizontally in time" },
+  { keys: "Shift + Wheel", description: "Zoom Y axis of track under mouse" },
+  { keys: "Ctrl + Wheel", description: "Zoom time axis centered at mouse cursor" },
   { keys: "Left / Middle Drag", description: "Pan X & Y freely (vertical-only drag keeps live follow)" },
   { keys: "Shift + Left Drag", description: "Pan Y axis only (keeps live follow)" },
   { keys: "Ctrl + Left Drag", description: "Box-select time region to zoom" },
-  { keys: "Double-Click", description: "Place Sample Cursor (S) and read values in legend" },
-  { keys: "Drag S / A / B", description: "Move Sample / A / B cursor handle on axis or plot" },
-  { keys: "Right-Click", description: "Track & signal context menu (fit, Y auto, cursors, move, CSV)" },
+  { keys: "Click / Double-Click", description: "Place Sample Cursor (S), shows values and Δt to hover" },
+  { keys: "Drag S / A / B / Pin", description: "Move Sample / A / B cursor or Pin handle on axis or plot" },
+  { keys: "Right-Click", description: "Track & signal context menu (fit, Y auto, cursors, pins, move, CSV)" },
   { keys: "Drag Legend Item", description: "Move signal to another track or drop on blank area for new track" },
   { keys: "Drag Track Border", description: "Resize track height" },
 ];

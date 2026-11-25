@@ -7,7 +7,7 @@ use probe_api::{AccessWidth, Probe};
 use probe_mock::MockProbe;
 use symbols::{
     CoreRegisters, FormatOptions, FrameKind, FrameRegisters, LoadOptions, Located, MemoryReader,
-    SymbolDb,
+    SymbolDb, UnwindStopReason,
 };
 
 const FIXTURE: &str = env!("FIXTURE_ELF");
@@ -272,7 +272,14 @@ fn names(frames: &[symbols::StackFrame]) -> Vec<String> {
     frames
         .iter()
         .map(|frame| match frame.kind {
-            FrameKind::Exception { number } => format!("<exception {number}>"),
+            FrameKind::Exception {
+                number,
+                heuristic: false,
+            } => format!("<exception {number}>"),
+            FrameKind::Exception {
+                number,
+                heuristic: true,
+            } => format!("<exception {number} (heuristic)>"),
             FrameKind::Code => frame.function.clone().unwrap_or_default(),
         })
         .collect()
@@ -376,8 +383,86 @@ fn stops_at_the_task_exit_stub_planted_as_a_return_address() {
     let mut start = CoreRegisters::default();
     start.r[13] = STACK;
     start.r[15] = in_with_frame(&db);
-    let frames = db.unwind(&start, &mut m).unwrap();
+    let (frames, reason) = db.unwind_detailed(&start, &mut m, 64).unwrap();
     assert_eq!(names(&frames), ["with_frame", "prvTaskExitError"]);
+    assert_eq!(reason, UnwindStopReason::Bottom);
+}
+
+#[test]
+fn unwinds_naked_pendsv_handler_to_interrupted_task_via_psp_heuristic() {
+    let db = load();
+    let mut m = target();
+    let (pendsv_addr, _) = db.elf_symbol("sim_pendsv_handler").unwrap();
+    let switch_fn = db.functions("c_switch_context")[0].clone();
+    let stub = db.functions("prvTaskExitError")[0].low;
+    // Find the instruction right after `bl c_switch_context` inside sim_pendsv_handler.
+    // Prologue: mrs (4), stmdb r0! (4), stmdb sp! (4), bl (4) -> return offset is +16.
+    let return_in_pendsv = (pendsv_addr + 16) | 1;
+
+    let msp = STACK;
+    let psp = STACK + 0x400;
+    // MSP has {r0, r3} pushed by sim_pendsv_handler (no LR pushed on MSP!)
+    write_words(&mut m, msp, &[psp - 9 * 4, 0]);
+    // Task stack below PSP has FreeRTOS {r4-r11, EXC_RETURN}
+    let mut below: Vec<u32> = (4..=11).collect();
+    below.push(0xFFFF_FFFD);
+    write_words(&mut m, psp - 9 * 4, &below);
+    // Hardware exception frame at PSP interrupted inside `with_frame`
+    write_words(
+        &mut m,
+        psp,
+        &[0, 0, 0, 0, 0, 0, in_with_frame(&db), 0x0100_0000],
+    );
+    // `with_frame` pushed {r3, lr = prvTaskExitError}
+    write_words(&mut m, psp + 0x20, &[0, stub | 1]);
+
+    let mut start = CoreRegisters {
+        xpsr: 14,
+        msp,
+        psp,
+        ..CoreRegisters::default()
+    };
+    start.r[13] = msp;
+    start.r[14] = return_in_pendsv;
+    start.r[15] = switch_fn.low;
+
+    let (frames, reason) = db.unwind_detailed(&start, &mut m, 64).unwrap();
+    assert_eq!(
+        names(&frames),
+        [
+            "c_switch_context",
+            "sim_pendsv_handler",
+            "<exception 14 (heuristic)>",
+            "with_frame",
+            "prvTaskExitError",
+        ]
+    );
+    assert_eq!(reason, UnwindStopReason::Bottom);
+}
+
+#[test]
+fn unwinds_empty_fde_naked_caller_via_thumb_prologue_scanner() {
+    let db = load();
+    let mut m = target();
+    let (naked_addr, _) = db.elf_symbol("sim_naked_caller").unwrap();
+    let switch_fn = db.functions("c_switch_context")[0].clone();
+    let stub = db.functions("prvTaskExitError")[0].low;
+    // Prologue: push {r4, lr} (2B), sub sp, #8 (2B), bl c_switch_context (4B) -> +8.
+    let return_in_naked = (naked_addr + 8) | 1;
+
+    // Frame layout inside sim_naked_caller: [sp+0..8]=local, [sp+8]=r4, [sp+12]=lr.
+    write_words(&mut m, STACK, &[0, 0, 0x4444_4444, stub | 1]);
+    let mut start = CoreRegisters::default();
+    start.r[13] = STACK;
+    start.r[14] = return_in_naked;
+    start.r[15] = switch_fn.low;
+
+    let (frames, reason) = db.unwind_detailed(&start, &mut m, 64).unwrap();
+    assert_eq!(
+        names(&frames),
+        ["c_switch_context", "sim_naked_caller", "prvTaskExitError"]
+    );
+    assert_eq!(reason, UnwindStopReason::Bottom);
 }
 
 fn marker_line(marker: &str) -> u32 {

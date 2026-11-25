@@ -16,6 +16,7 @@ use probe_jlink::JLinkOptions;
 use symbols::{
     CoreRegisters, FormatOptions, FrameKind, FrameRegisters, LoadOptions, LocalVar, Located,
     MemoryReader, Number, Place, Scalar, ScalarKind, SourceLocation, SymbolDb, SymbolError,
+    UnwindStopReason,
 };
 
 use crate::breakpoints::{
@@ -33,6 +34,10 @@ const DHCSR_KEY: u32 = 0xA05F_0000;
 const DHCSR_C_DEBUGEN: u32 = 1 << 0;
 const DHCSR_C_HALT: u32 = 1 << 1;
 const DHCSR_C_MASKINTS: u32 = 1 << 3;
+const DHCSR_S_REGRDY: u32 = 1 << 16;
+const DHCSR_S_HALT: u32 = 1 << 17;
+const DCRSR: u32 = 0xE000_EDF4;
+const DCRDR: u32 = 0xE000_EDF8;
 const DFSR: u32 = 0xE000_ED30;
 const DFSR_BKPT: u32 = 1 << 1;
 const DFSR_DWTTRAP: u32 = 1 << 2;
@@ -40,6 +45,8 @@ const DFSR_VCATCH: u32 = 1 << 3;
 const DFSR_EXTERNAL: u32 = 1 << 4;
 const DFSR_ALL: u32 = 0x1F;
 const DEMCR: u32 = 0xE000_EDFC;
+const FP_CTRL: u32 = 0xE000_2000;
+const FP_COMP0: u32 = 0xE000_2008;
 const DWT_CTRL: u32 = 0xE000_1000;
 const DWT_CYCCNT: u32 = 0xE000_1004;
 const DWT_COMP0: u32 = 0xE000_1020;
@@ -113,6 +120,13 @@ pub enum RunState {
     Halted,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HaltedPoll {
+    Unchanged,
+    ResumedExternally,
+    MovedExternally(StopReason),
+}
+
 #[derive(Clone, Debug)]
 pub struct LaunchOptions {
     pub connect: ConnectCfg,
@@ -132,7 +146,8 @@ pub struct DisplayFrame {
     pub pc: u32,
     pub is_inlined: bool,
     pub is_exception: bool,
-    /// Index into the real frames.
+    pub is_label: bool,
+    /// Index into the real frames (only valid when `!is_label`).
     real: usize,
     /// Position in that frame's inline chain.
     chain_index: usize,
@@ -143,6 +158,7 @@ pub(crate) struct UnwoundStack {
     thread: i64,
     frames: Vec<symbols::StackFrame>,
     display: Vec<DisplayFrame>,
+    stop_reason: UnwindStopReason,
 }
 
 #[derive(Clone, Debug)]
@@ -407,6 +423,7 @@ pub struct Session {
     cycles: CycleTracker,
     peripherals: Option<Arc<svd::Device>>,
     auto_resuming: bool,
+    last_halted_snapshot: Option<(u32, u32, u32, u32)>,
     /// The step that outlasted its wait, if one is under way.
     pub(crate) detached: Option<DetachedRun>,
 }
@@ -477,11 +494,16 @@ impl Session {
             cycles: CycleTracker::default(),
             peripherals: None,
             auto_resuming: false,
+            last_halted_snapshot: None,
             detached: None,
         };
         session.fault_catch = default_catch(&session.options);
         session.visualizers = session.load_visualizers();
         session.configure_target()?;
+        session.check_existing_comparators();
+        if halted {
+            session.refresh_halted_snapshot();
+        }
         Ok(session)
     }
 
@@ -499,6 +521,8 @@ impl Session {
         self.db = load_symbols(&options.elf)?;
         self.rtos = FreeRtos::detect(&self.db)?;
         self.options = options;
+        self.breakpoints
+            .set_policy(self.options.project.debug.flash_breakpoints);
         self.fault_catch = default_catch(&self.options);
         self.cycles = CycleTracker::default();
         self.peripherals = None;
@@ -509,8 +533,13 @@ impl Session {
         } else {
             RunState::Running
         };
+        self.last_halted_snapshot = None;
         self.invalidate();
-        self.configure_target()
+        self.configure_target()?;
+        if self.state == RunState::Halted {
+            self.refresh_halted_snapshot();
+        }
+        Ok(())
     }
 
     /// Stop and hand the probe back.
@@ -550,6 +579,7 @@ impl Session {
     /// Record that the target can no longer be treated as running.
     pub fn mark_halted(&mut self) {
         self.state = RunState::Halted;
+        self.refresh_halted_snapshot();
     }
 
     /// DAP thread id of whatever is executing.
@@ -558,6 +588,41 @@ impl Session {
             .current_task()?
             .filter(|tcb| *tcb != 0)
             .map_or(MAIN_THREAD, i64::from))
+    }
+
+    /// Thread id and human-readable label for the currently executing CPU/RTOS context.
+    pub fn active_context_label(&mut self) -> Result<(i64, String)> {
+        let exc = self.registers().map(|r| r.xpsr & IPSR_MASK).unwrap_or(0);
+        let device = if exc >= 16 {
+            self.peripherals().ok().flatten()
+        } else {
+            None
+        };
+        let exc_name = (exc != 0).then(|| format_exception_short(exc, device.as_deref()));
+
+        if self.rtos.is_some() {
+            let current_tcb = self.current_task()?.filter(|t| *t != 0);
+            let task_name = if let Some(tcb) = current_tcb {
+                self.tasks()?
+                    .and_then(|tasks| tasks.into_iter().find(|t| t.tcb == tcb).map(|t| t.name))
+            } else {
+                None
+            };
+            let id = current_tcb.map_or(MAIN_THREAD, i64::from);
+            let label = match (exc_name, task_name) {
+                (Some(exc_label), Some(task)) => format!("{exc_label} · Task: {task}"),
+                (Some(exc_label), None) => exc_label,
+                (None, Some(task)) => format!("Task: {task}"),
+                (None, None) => "main".to_owned(),
+            };
+            return Ok((id, label));
+        }
+
+        let label = match exc_name {
+            Some(exc_label) => format!("main ({exc_label})"),
+            None => "main".to_owned(),
+        };
+        Ok((MAIN_THREAD, label))
     }
 
     /// Remove every breakpoint and leave the target running or halted.
@@ -575,6 +640,7 @@ impl Session {
         self.call(|probe| probe.modify_u32(DEMCR, 0, VC_ALL_FAULTS))?;
         self.invalidate();
         if !halt {
+            self.last_halted_snapshot = None;
             self.call(|probe| probe.go())?;
             self.state = RunState::Running;
         }
@@ -630,7 +696,19 @@ impl Session {
     }
 
     fn probe_is_halted(&self) -> Result<bool> {
-        self.call(|probe| probe.is_halted())
+        self.call(|probe| {
+            let dll_halted = probe.is_halted()?;
+            if !dll_halted {
+                // If another debugger halted via CoreSight while DLL cache is stale, DHCSR detects it.
+                return Ok(probe
+                    .read_u32(DHCSR)
+                    .is_ok_and(|dhcsr| dhcsr & DHCSR_S_HALT != 0));
+            }
+            if let Ok(dhcsr) = probe.read_u32(DHCSR) {
+                return Ok(dhcsr & DHCSR_S_HALT != 0);
+            }
+            Ok(true)
+        })
     }
 
     pub(crate) fn registers(&self) -> Result<CoreRegisters> {
@@ -646,8 +724,81 @@ impl Session {
                 ..CoreRegisters::default()
             };
             registers.r.copy_from_slice(&values[..16]);
+
+            // Cross-check PC and SP via CoreSight DCRSR/DCRDR because J-Link DLL
+            // can return stale cached registers when SEGGER Ozone shares the probe.
+            if let Ok(dhcsr) = probe.read_u32(DHCSR) {
+                if dhcsr & DHCSR_S_HALT != 0 {
+                    if let (Ok(direct_pc), Ok(direct_sp)) = (
+                        read_core_reg_direct(probe, 15),
+                        read_core_reg_direct(probe, 13),
+                    ) {
+                        if (direct_pc & !1) != (registers.r[15] & !1)
+                            || direct_sp != registers.r[13]
+                        {
+                            tracing::warn!(
+                                cached_pc = registers.r[15],
+                                direct_pc,
+                                cached_sp = registers.r[13],
+                                direct_sp,
+                                "probe register cache stale vs CoreSight DCRDR; refreshing via CoreSight"
+                            );
+                            if let Ok(fresh) = read_all_core_regs_direct(probe) {
+                                return Ok(fresh);
+                            }
+                        }
+                    }
+                }
+            }
             Ok(registers)
         })
+    }
+
+    fn refresh_halted_snapshot(&mut self) {
+        if self.state != RunState::Halted {
+            self.last_halted_snapshot = None;
+            return;
+        }
+        if let Ok(regs) = self.registers() {
+            self.last_halted_snapshot = Some((regs.r[15] & !1, regs.r[13], regs.r[14], regs.xpsr));
+        }
+    }
+
+    fn check_existing_comparators(&mut self) {
+        let counts = self.call(|probe| {
+            let mut fpb_active = 0usize;
+            if let Ok(fp_ctrl) = probe.read_u32(FP_CTRL) {
+                if fp_ctrl & 1 != 0 {
+                    let num_code =
+                        (((fp_ctrl >> 4) & 0xF) | (((fp_ctrl >> 12) & 0x7) << 4)).min(16);
+                    for i in 0..num_code {
+                        if probe.read_u32(FP_COMP0 + i * 4).unwrap_or(0) & 1 != 0 {
+                            fpb_active += 1;
+                        }
+                    }
+                }
+            }
+            let mut dwt_active = 0usize;
+            if let Ok(dwt_ctrl) = probe.read_u32(DWT_CTRL) {
+                let num_comp = (dwt_ctrl >> 28).min(16);
+                for i in 0..num_comp {
+                    let func = probe
+                        .read_u32(DWT_FUNCTION0 + i * DWT_COMPARATOR_STRIDE)
+                        .unwrap_or(0);
+                    if func & 0xF != 0 {
+                        dwt_active += 1;
+                    }
+                }
+            }
+            Ok((fpb_active, dwt_active))
+        });
+        if let Ok((fpb, dwt)) = counts {
+            if fpb > 0 || dwt > 0 {
+                self.output.push(format!(
+                    "Warning: detected pre-existing hardware comparators ({fpb} FPB, {dwt} DWT) — another debugger (e.g. SEGGER Ozone) may be attached; available comparators are shared"
+                ));
+            }
+        }
     }
 
     pub fn has_fpu(&mut self) -> bool {
@@ -695,7 +846,11 @@ impl Session {
             return Ok(StopReason::Fault);
         }
         if dfsr & DFSR_DWTTRAP != 0 {
-            return Ok(StopReason::Data(self.matched_data_breakpoints()?));
+            let ids = self.matched_data_breakpoints()?;
+            if !ids.is_empty() || requested_pause {
+                return Ok(StopReason::Data(ids));
+            }
+            return Ok(StopReason::External);
         }
         if dfsr & DFSR_BKPT != 0 {
             let pc = self.registers()?.r[15] & !1;
@@ -713,7 +868,11 @@ impl Session {
             self.stop_location = self.breakpoints.location_at(pc);
             return Ok(StopReason::Breakpoint(ids));
         }
-        Ok(StopReason::Pause)
+        if requested_pause {
+            Ok(StopReason::Pause)
+        } else {
+            Ok(StopReason::External)
+        }
     }
 
     /// Which data breakpoints fired, from the comparators that matched.
@@ -863,9 +1022,16 @@ impl Session {
                 self.auto_resuming = true;
                 return Ok(None);
             }
-            let halted = self
-                .handle
-                .call_blocking(Priority::P1, |probe: &mut dyn Probe| probe.is_halted())??;
+            let halted = self.handle.call_blocking(
+                Priority::P1,
+                |probe: &mut dyn Probe| -> probe_api::Result<bool> {
+                    let dll_halted = probe.is_halted()?;
+                    if let Ok(dhcsr) = probe.read_u32(DHCSR) {
+                        return Ok(dhcsr & DHCSR_S_HALT != 0);
+                    }
+                    Ok(dll_halted)
+                },
+            )??;
             if !halted {
                 if resumed {
                     continue;
@@ -909,6 +1075,80 @@ impl Session {
         }
     }
 
+    /// Detect external resume or single-stepping while `haltd` believes the core is halted.
+    pub fn poll_halted(&mut self) -> Result<HaltedPoll> {
+        if self.state != RunState::Halted {
+            return Ok(HaltedPoll::Unchanged);
+        }
+        let snap = self.handle.call_blocking(
+            Priority::P1,
+            |probe: &mut dyn Probe| -> probe_api::Result<Option<(u32, u32, u32, u32)>> {
+                let dll_halted = probe.is_halted()?;
+                let dhcsr_halted = probe.read_u32(DHCSR).ok().map(|v| v & DHCSR_S_HALT != 0);
+                let halted = match dhcsr_halted {
+                    Some(h) => dll_halted && h,
+                    None => dll_halted,
+                };
+                if !halted {
+                    return Ok(None);
+                }
+                if dhcsr_halted == Some(true) {
+                    if let (Ok(pc), Ok(sp), Ok(lr), Ok(xpsr)) = (
+                        read_core_reg_direct(probe, 15),
+                        read_core_reg_direct(probe, 13),
+                        read_core_reg_direct(probe, 14),
+                        read_core_reg_direct(probe, 16),
+                    ) {
+                        return Ok(Some((pc & !1, sp, lr, xpsr)));
+                    }
+                }
+                let mut values = [0u32; 4];
+                probe.read_regs(
+                    &[Reg::R(15), Reg::R(13), Reg::R(14), Reg::Xpsr],
+                    &mut values,
+                )?;
+                Ok(Some((values[0] & !1, values[1], values[2], values[3])))
+            },
+        )??;
+        let Some(current) = snap else {
+            self.last_halted_snapshot = None;
+            self.invalidate();
+            self.state = RunState::Running;
+            self.begin_stop_tracking();
+            return Ok(HaltedPoll::ResumedExternally);
+        };
+        let Some(previous) = self.last_halted_snapshot else {
+            self.last_halted_snapshot = Some(current);
+            return Ok(HaltedPoll::Unchanged);
+        };
+        if previous == current {
+            return Ok(HaltedPoll::Unchanged);
+        }
+        self.last_halted_snapshot = Some(current);
+        let mut reason = self.consume_halt_reason(false)?;
+        if matches!(reason, StopReason::Pause) {
+            reason = StopReason::External;
+        }
+        self.note_stop(&reason)?;
+        Ok(HaltedPoll::MovedExternally(reason))
+    }
+
+    /// Synchronize stop metadata when attaching to an already-halted core.
+    pub fn observe_stop(&mut self, reason: &StopReason) -> Result<()> {
+        self.invalidate();
+        self.state = if self.probe_is_halted()? {
+            RunState::Halted
+        } else {
+            RunState::Running
+        };
+        if self.state == RunState::Halted {
+            self.note_stop(reason)?;
+        } else {
+            self.last_halted_snapshot = None;
+        }
+        Ok(())
+    }
+
     /// Work out which inlined frames to present at a new stop. A stop at the
     /// first instruction of an inlined body shows the call site first, so that
     /// step-into can enter it without running anything.
@@ -941,6 +1181,7 @@ impl Session {
             _ => 0,
         };
         self.hidden_inline = hide;
+        self.refresh_halted_snapshot();
         Ok(())
     }
 
@@ -972,6 +1213,7 @@ impl Session {
                 // Stepping into a fault or breakpoint should still be noticed.
             }
         }
+        self.last_halted_snapshot = None;
         self.invalidate();
         self.call(|probe| probe.go())?;
         self.state = RunState::Running;
@@ -1014,6 +1256,7 @@ impl Session {
         self.cycles = CycleTracker::default();
         self.invalidate();
         self.state = RunState::Halted;
+        self.refresh_halted_snapshot();
         Ok(())
     }
 
@@ -1320,12 +1563,12 @@ impl Session {
     }
 
     fn is_live_frame(&mut self, thread: i64, frame: usize) -> Result<bool> {
-        let real = self
+        let is_live = self
             .ensure_stack(thread)?
             .display
             .get(frame)
-            .map(|display| display.real);
-        Ok(real == Some(0) && self.is_current_thread(thread)?)
+            .is_some_and(|display| !display.is_exception && !display.is_label && display.real == 0);
+        Ok(is_live && self.is_current_thread(thread)?)
     }
 
     /// The SVD description, read on first use. None if the device has none.
@@ -1472,35 +1715,62 @@ impl Session {
             } else {
                 MAX_DISPLAY_FRAMES
             };
-            let frames = self.db.unwind_limited(&start, &mut self.memory, limit)?;
+            let (frames, stop_reason) = self.db.unwind_detailed(&start, &mut self.memory, limit)?;
             let current = self.is_current_thread(thread)?;
             let hidden = if current { self.hidden_inline } else { 0 };
             let override_location = self.stop_location.clone().filter(|_| current);
-            let display = self.expand_frames(&frames, hidden, override_location)?;
+            let show_stop_label = !self.shallow_unwind;
+            let display = self.expand_frames(
+                &frames,
+                hidden,
+                override_location,
+                &stop_reason,
+                show_stop_label,
+            )?;
             self.stack = Some(UnwoundStack {
                 thread,
                 frames,
                 display,
+                stop_reason,
             });
         }
         Ok(self.stack.as_ref().expect("just filled"))
     }
 
+    /// Why unwinding stopped on the thread most recently asked about, if known.
+    pub fn last_unwind_stop_reason(&self, thread: i64) -> Option<UnwindStopReason> {
+        self.stack
+            .as_ref()
+            .filter(|s| s.thread == thread)
+            .map(|s| s.stop_reason.clone())
+    }
+
     fn expand_frames(
-        &self,
+        &mut self,
         frames: &[symbols::StackFrame],
         hidden: usize,
         mut top_location: Option<SourceLocation>,
+        stop_reason: &UnwindStopReason,
+        show_stop_label: bool,
     ) -> Result<Vec<DisplayFrame>> {
+        let has_external_irq = frames
+            .iter()
+            .any(|frame| matches!(frame.kind, FrameKind::Exception { number, .. } if number >= 16));
+        let device = if has_external_irq {
+            self.peripherals().ok().flatten()
+        } else {
+            None
+        };
         let mut display = Vec::new();
         for (real, frame) in frames.iter().enumerate() {
-            if let FrameKind::Exception { number } = frame.kind {
+            if let FrameKind::Exception { number, heuristic } = frame.kind {
                 display.push(DisplayFrame {
-                    name: format!("<exception {number}>"),
+                    name: format_exception_frame(number, heuristic, device.as_deref()),
                     location: None,
                     pc: frame.pc,
                     is_inlined: false,
                     is_exception: true,
+                    is_label: false,
                     real,
                     chain_index: 0,
                 });
@@ -1514,6 +1784,7 @@ impl Session {
                     pc: frame.pc,
                     is_inlined: false,
                     is_exception: false,
+                    is_label: false,
                     real,
                     chain_index: 0,
                 });
@@ -1538,10 +1809,43 @@ impl Session {
                     pc: frame.pc,
                     is_inlined: chain[index].is_inlined,
                     is_exception: false,
+                    is_label: false,
                     real,
                     chain_index: index,
                 });
                 location = chain[index].call_site.clone();
+            }
+        }
+        if show_stop_label {
+            let stop_label = match *stop_reason {
+                UnwindStopReason::Bottom | UnwindStopReason::LimitReached => None,
+                UnwindStopReason::NoUnwindInfo { pc } => Some((
+                    format!("<unwind stopped: no unwind info at 0x{pc:08x}>"),
+                    pc,
+                )),
+                UnwindStopReason::MemoryError { pc, addr } => Some((
+                    format!("<unwind stopped: memory read 0x{addr:08x} failed at 0x{pc:08x}>"),
+                    pc,
+                )),
+                UnwindStopReason::CfaDidNotAdvance { pc, cfa } => Some((
+                    format!("<unwind stopped: CFA stuck at 0x{cfa:08x} (pc 0x{pc:08x})>"),
+                    pc,
+                )),
+                UnwindStopReason::ZeroReturnAddress { pc } => {
+                    Some((format!("<unwind stopped: zero LR at 0x{pc:08x}>"), pc))
+                }
+            };
+            if let Some((name, pc)) = stop_label {
+                display.push(DisplayFrame {
+                    name,
+                    location: None,
+                    pc,
+                    is_inlined: false,
+                    is_exception: false,
+                    is_label: true,
+                    real: frames.len(),
+                    chain_index: 0,
+                });
             }
         }
         Ok(display)
@@ -1559,10 +1863,10 @@ impl Session {
         let Some(display) = stack.display.get(index).cloned() else {
             return Err(EngineError::Other(format!("no frame {index}")));
         };
-        let real = stack.frames[display.real].clone();
-        if display.is_exception {
+        if display.is_exception || display.is_label {
             return Ok((Vec::new(), Vec::new()));
         }
+        let real = stack.frames[display.real].clone();
         let floats = if display.real == 0 {
             self.floats()
         } else {
@@ -1709,6 +2013,9 @@ impl Session {
         let Some(display) = stack.display.get(index) else {
             return Ok(Vec::new());
         };
+        if display.is_label {
+            return Ok(Vec::new());
+        }
         let registers = stack.frames[display.real].registers;
         const NAMES: [&str; 16] = [
             "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
@@ -1857,6 +2164,61 @@ impl Session {
         let value =
             DHCSR_KEY | DHCSR_C_DEBUGEN | DHCSR_C_HALT | if enable { DHCSR_C_MASKINTS } else { 0 };
         self.call(move |probe| probe.write_u32(DHCSR, value))
+    }
+}
+
+fn read_core_reg_direct(probe: &mut dyn Probe, reg_sel: u32) -> probe_api::Result<u32> {
+    probe.write_u32(DCRSR, reg_sel & 0x7F)?;
+    for _ in 0..32 {
+        let dhcsr = probe.read_u32(DHCSR)?;
+        if dhcsr & DHCSR_S_REGRDY != 0 {
+            return probe.read_u32(DCRDR);
+        }
+    }
+    Err(ProbeError::Other(format!(
+        "CoreSight DCRDR read timeout for register selector {reg_sel}"
+    )))
+}
+
+fn read_all_core_regs_direct(probe: &mut dyn Probe) -> probe_api::Result<CoreRegisters> {
+    let mut registers = CoreRegisters::default();
+    for (i, slot) in registers.r.iter_mut().enumerate() {
+        *slot = read_core_reg_direct(probe, i as u32)?;
+    }
+    registers.xpsr = read_core_reg_direct(probe, 16)?;
+    registers.msp = read_core_reg_direct(probe, 17)?;
+    registers.psp = read_core_reg_direct(probe, 18)?;
+    Ok(registers)
+}
+
+fn format_exception_short(number: u32, device: Option<&svd::Device>) -> String {
+    match number {
+        2 => "NMI".to_owned(),
+        3 => "HardFault".to_owned(),
+        4 => "MemManage".to_owned(),
+        5 => "BusFault".to_owned(),
+        6 => "UsageFault".to_owned(),
+        11 => "SVCall".to_owned(),
+        12 => "DebugMonitor".to_owned(),
+        14 => "PendSV".to_owned(),
+        15 => "SysTick".to_owned(),
+        n if n >= 16 => {
+            let irq = n - 16;
+            match device.and_then(|d| d.interrupts.get(&irq)) {
+                Some(name) => format!("IRQ {irq} ({name})"),
+                None => format!("IRQ {irq}"),
+            }
+        }
+        n => format!("exception {n}"),
+    }
+}
+
+fn format_exception_frame(number: u32, heuristic: bool, device: Option<&svd::Device>) -> String {
+    let base = format_exception_short(number, device);
+    if heuristic {
+        format!("<exception: {base} (heuristic)>")
+    } else {
+        format!("<exception: {base}>")
     }
 }
 

@@ -26,11 +26,14 @@ import { renderRttSignalsDrawer, updateLegendReadouts, type LegendCallbacks } fr
 import { fitTimeRange, FOLLOW_LAG_S, spanSeconds, stepDivision } from "./math";
 import { attachOverviewScrubber, drawOverview } from "./overview";
 import {
+  addPin,
+  clearAllPins,
   createInitialState,
   effectiveGroupOf,
   getGroupYScale,
   nextCustomTrackName,
   nowSeconds,
+  removePin,
   type RttSignalInfo,
 } from "./state";
 import {
@@ -237,6 +240,23 @@ const contextMenuActions: ContextMenuActions = {
   placeSampleCursor: (time) => {
     state.sampleCursor = time;
     state.sampleCursorPinned = true;
+    updateLegendReadouts(state);
+    updateCursorInspector(state);
+    redrawAllOverlays(state);
+  },
+  addPin: (time) => {
+    addPin(state, time);
+    updateCursorInspector(state);
+    redrawAllOverlays(state);
+  },
+  removePin: (id) => {
+    if (removePin(state, id)) {
+      updateCursorInspector(state);
+      redrawAllOverlays(state);
+    }
+  },
+  clearPins: () => {
+    clearAllPins(state);
     updateLegendReadouts(state);
     updateCursorInspector(state);
     redrawAllOverlays(state);

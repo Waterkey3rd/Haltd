@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 use tsdb::Event;
 
-use crate::rpc::{App, Reply};
+use crate::rpc::{App, Reply, RpcError};
 
 const PUSH_INTERVAL: Duration = Duration::from_millis(33);
 const OUTBOUND_QUEUE: usize = 256;
@@ -101,8 +101,15 @@ fn rtt_frames(app: &App, subscriptions: &Subscriptions) -> Vec<Vec<u8>> {
     frames
 }
 
-fn rpc_error(id: &Value, code: i64, message: String) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+fn rpc_error(id: &Value, error: RpcError) -> Value {
+    let mut err_obj = json!({
+        "code": error.code,
+        "message": error.message,
+    });
+    if let Some(data) = error.data {
+        err_obj["data"] = json!(data);
+    }
+    json!({"jsonrpc": "2.0", "id": id, "error": err_obj})
 }
 
 /// Parse and serve one request, off the async threads since it may wait on
@@ -116,7 +123,7 @@ async fn serve_request(
         Ok(request) => request,
         Err(error) => {
             return Some(Message::text(
-                rpc_error(&Value::Null, -32700, error.to_string()).to_string(),
+                rpc_error(&Value::Null, RpcError::new(-32700, error.to_string(), None)).to_string(),
             ))
         }
     };
@@ -133,8 +140,10 @@ async fn serve_request(
             Message::text(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string())
         }
         Ok(Ok(Reply::Binary(frame))) => Message::binary(frame),
-        Ok(Err((code, message))) => Message::text(rpc_error(&id, code, message).to_string()),
-        Err(error) => Message::text(rpc_error(&id, -32603, error.to_string()).to_string()),
+        Ok(Err(error)) => Message::text(rpc_error(&id, error).to_string()),
+        Err(error) => Message::text(
+            rpc_error(&id, RpcError::new(-32603, error.to_string(), None)).to_string(),
+        ),
     })
 }
 

@@ -43,5 +43,30 @@ fn main() {
         }
         println!("cargo::rustc-env={variable}={}", output.display());
     }
+    let sync_output = out_dir.join("session_sync.elf");
+    let sync_ok = Command::new(COMPILER)
+        .args([
+            "-mcpu=cortex-m3",
+            "-mthumb",
+            "-O0",
+            "-g",
+            "-gdwarf-5",
+            "-nostdlib",
+            "-Wl,-e,entry",
+            "-Wl,-Ttext=0x08000000",
+            "-Wl,-Tdata=0x20000000",
+            "-Wl,-Tbss=0x20001000",
+        ])
+        .arg("tests/fixtures/session_sync.c")
+        .arg("-o")
+        .arg(&sync_output)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !sync_ok {
+        println!("cargo::warning={COMPILER} failed; session_sync fixture tests are skipped");
+        return;
+    }
+    println!("cargo::rustc-env=FIXTURE_SYNC={}", sync_output.display());
     println!("cargo::rustc-cfg=has_arm_gcc");
 }

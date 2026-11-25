@@ -18,6 +18,12 @@ export interface Halted {
   to: number | null;
 }
 
+export interface Pin {
+  id: number;
+  t: number;
+  label: string;
+}
+
 export interface YScaleConfig {
   auto: boolean;
   min: number;
@@ -75,6 +81,8 @@ export interface TimelineState {
   cursorB: number | null;
   sampleCursor: number | null;
   sampleCursorPinned: boolean;
+  pins: Pin[];
+  nextPinId: number;
   hoverTime: number | null;
   boxSelect: { groupName: string; x0: number; x1: number } | null;
   querying: boolean;
@@ -170,6 +178,8 @@ export function createInitialState(canvasTheme: CanvasTheme): TimelineState {
     cursorB: null,
     sampleCursor: null,
     sampleCursorPinned: false,
+    pins: [],
+    nextPinId: 1,
     hoverTime: null,
     boxSelect: null,
     querying: false,
@@ -242,6 +252,32 @@ export function legendReadoutTime(state: TimelineState): number | null {
     return state.sampleCursor;
   }
   return null;
+}
+
+export function addPin(
+  state: Pick<TimelineState, "pins" | "nextPinId">,
+  t: number,
+): Pin {
+  const id = state.nextPinId++;
+  const pin: Pin = { id, t, label: `M${id}` };
+  state.pins.push(pin);
+  return pin;
+}
+
+export function removePin(state: Pick<TimelineState, "pins">, id: number): boolean {
+  const index = state.pins.findIndex((p) => p.id === id);
+  if (index < 0) return false;
+  state.pins.splice(index, 1);
+  return true;
+}
+
+export function clearAllPins(
+  state: Pick<TimelineState, "pins" | "nextPinId" | "sampleCursor" | "sampleCursorPinned">,
+): void {
+  state.pins = [];
+  state.nextPinId = 1;
+  state.sampleCursor = null;
+  state.sampleCursorPinned = false;
 }
 
 export function nextCustomTrackName(state: TimelineState, baseHint?: string): string {

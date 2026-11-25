@@ -11,6 +11,7 @@ import {
   type PeripheralNode,
 } from "./debugViews";
 import { registerDeviceAssist } from "./deviceAssist";
+import { DiagnosticsManager } from "./errors";
 import { LiveWatch } from "./liveWatch";
 
 const DEBUG_TYPE = "haltd";
@@ -123,14 +124,20 @@ class StatusBar implements vscode.Disposable {
 }
 
 /** Run the session's preLaunchTask, resolving true if it succeeded. */
-async function runBuildTask(name: string | undefined): Promise<boolean> {
+async function runBuildTask(
+  name: string | undefined,
+  diagnostics: DiagnosticsManager,
+): Promise<boolean> {
   if (!name) {
     return true;
   }
   const tasks = await vscode.tasks.fetchTasks();
   const task = tasks.find((candidate) => candidate.name === name);
   if (!task) {
-    void vscode.window.showErrorMessage(`Haltd: build task "${name}" was not found`);
+    void diagnostics.reportError(
+      new Error(`build task "${name}" was not found`),
+      "Build & Reload",
+    );
     return false;
   }
   const execution = await vscode.tasks.executeTask(task);
@@ -144,23 +151,29 @@ async function runBuildTask(name: string | undefined): Promise<boolean> {
   });
 }
 
-async function buildAndReload(status: StatusBar): Promise<void> {
+async function buildAndReload(
+  status: StatusBar,
+  diagnostics: DiagnosticsManager,
+): Promise<void> {
   const session = vscode.debug.activeDebugSession;
   if (!session || session.type !== DEBUG_TYPE) {
     void vscode.window.showWarningMessage("Haltd: no active debug session");
     return;
   }
   status.busy("Building");
-  if (!(await runBuildTask(session.configuration.preLaunchTask))) {
+  if (!(await runBuildTask(session.configuration.preLaunchTask, diagnostics))) {
     status.connected(session);
-    void vscode.window.showErrorMessage("Haltd: build failed; the target was not changed");
+    void diagnostics.reportError(
+      new Error("build failed; the target was not changed"),
+      "Build & Reload",
+    );
     return;
   }
   status.busy("Reloading");
   try {
     await session.customRequest("haltd/reload", { elf: session.configuration.elf });
   } catch (error) {
-    void vscode.window.showErrorMessage(`Haltd: reload failed: ${String(error)}`);
+    void diagnostics.reportError(error, "Build & Reload");
   } finally {
     status.connected(session);
   }
@@ -189,10 +202,6 @@ async function chooseExpression(context?: VariableContext): Promise<string | und
     }
   }
   return vscode.window.showInputBox({ prompt: "Expression, e.g. g_state.items[2].gain" });
-}
-
-function report(error: unknown): void {
-  void vscode.window.showErrorMessage(`Haltd: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 interface AddedSeries {
@@ -388,7 +397,10 @@ class RttTerminal {
   private readonly output = new vscode.EventEmitter<string>();
   private open = false;
 
-  constructor(private readonly client: DataClient) {
+  constructor(
+    private readonly client: DataClient,
+    private readonly onError: (error: unknown, context: string) => void,
+  ) {
     client.on("rtt", (channel: number, data: Buffer) => {
       if (channel === RTT_TERMINAL_CHANNEL && this.open) {
         this.output.fire(data.toString("utf8").replace(/\r?\n/g, "\r\n"));
@@ -402,7 +414,9 @@ class RttTerminal {
   }
 
   private subscribe(): void {
-    this.client.call("rtt.subscribe", { ch: RTT_TERMINAL_CHANNEL }).catch(report);
+    this.client
+      .call("rtt.subscribe", { ch: RTT_TERMINAL_CHANNEL })
+      .catch((e) => this.onError(e, "RTT Subscribe"));
   }
 
   show(): void {
@@ -426,7 +440,9 @@ class RttTerminal {
       },
       handleInput: (data) => {
         const text = data.replace(/\r/g, "\n");
-        this.client.call("rtt.write", { ch: RTT_TERMINAL_CHANNEL, data: text }).catch(report);
+        this.client
+          .call("rtt.write", { ch: RTT_TERMINAL_CHANNEL, data: text })
+          .catch((e) => this.onError(e, "RTT Write"));
       },
     };
     this.terminal = vscode.window.createTerminal({ name: "RTT", pty });
@@ -434,8 +450,10 @@ class RttTerminal {
   }
 }
 
-/** Fills in the project file location, which also tells the backend the workspace. */
+/** Fills in the project file location and checks launch prerequisites. */
 class ConfigurationProvider implements vscode.DebugConfigurationProvider {
+  constructor(private readonly diagnostics: DiagnosticsManager) {}
+
   resolveDebugConfiguration(
     folder: vscode.WorkspaceFolder | undefined,
     configuration: vscode.DebugConfiguration,
@@ -443,18 +461,38 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
     if (!configuration.project && folder) {
       configuration.project = path.join(folder.uri.fsPath, ".haltd", "project.yaml");
     }
+    if (configuration.rtosThreadView === undefined) {
+      configuration.rtosThreadView = vscode.workspace
+        .getConfiguration("haltd", folder?.uri)
+        .get<string>("rtos.threadView", "currentOnly");
+    }
+    return configuration;
+  }
+
+  resolveDebugConfigurationWithSubstitutedVariables(
+    _folder: vscode.WorkspaceFolder | undefined,
+    configuration: vscode.DebugConfiguration,
+  ): vscode.DebugConfiguration | undefined {
+    if (!this.diagnostics.preflightLaunch(configuration)) {
+      return undefined;
+    }
     return configuration;
   }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  registerDeviceAssist(context, () => adapterPath(context.extensionPath));
   const client = new DataClient();
+  const diagnostics = new DiagnosticsManager(context, () => adapterPath(context.extensionPath), client);
+  const report = (error: unknown, source = "Command"): void => {
+    void diagnostics.reportError(error, source);
+  };
+
+  registerDeviceAssist(context, () => adapterPath(context.extensionPath), report);
   const status = new StatusBar(client);
   const liveWatch = new LiveWatch(client);
   const timeline = new BackendPanel("Timeline", BACKEND_URL);
   const rttPanel = new BackendPanel("RTT", RTT_URL);
-  const rttTerminal = new RttTerminal(client);
+  const rttTerminal = new RttTerminal(client, report);
   const timelineButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
   timelineButton.text = "$(graph-line) Timeline";
   timelineButton.tooltip = "Open the Haltd Timeline";
@@ -481,17 +519,23 @@ export function activate(context: vscode.ExtensionContext): void {
       await tree.reveal(added, { select: true, focus: false });
     }
   };
-  const takeover = new WatchTakeover((item) => addFromDebugger(item).catch(report));
-  const output = vscode.window.createOutputChannel("Haltd");
+  const takeover = new WatchTakeover((item) => addFromDebugger(item).catch((e) => report(e, "Add to Watch")));
 
   const syncWatches = () => {
     if (client.connected) {
-      liveWatch.sync().catch(report);
+      liveWatch.sync().catch((e) => report(e, "Live Watch Sync"));
     }
   };
-  client.on("open", syncWatches);
+  client.on("open", () => {
+    diagnostics.logInfo("WebSocket 数据通道已连接");
+    syncWatches();
+  });
+  client.on("close", (info) => {
+    diagnostics.recordWsClose(info);
+  });
 
   context.subscriptions.push(
+    diagnostics,
     status,
     tree,
     timelineButton,
@@ -510,9 +554,9 @@ export function activate(context: vscode.ExtensionContext): void {
         tasks.refresh();
       }
     }),
-    vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider()),
-    output,
-    tree.onDidCollapseElement((event) => liveWatch.collapse(event.element).catch(report)),
+    vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider(diagnostics)),
+    vscode.debug.registerDebugAdapterTrackerFactory(DEBUG_TYPE, diagnostics.createTrackerFactory()),
+    tree.onDidCollapseElement((event) => liveWatch.collapse(event.element).catch((e) => report(e, "Live Watch"))),
     vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new AdapterFactory(context.extensionPath)),
     vscode.debug.onDidStartDebugSession((session) => {
       if (session.type === DEBUG_TYPE) {
@@ -542,43 +586,43 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.event === "haltd/bound" || event.event === "haltd/reloaded") {
         syncWatches();
       } else if (event.event === "haltd/fault") {
-        void showFault(event.body, output);
+        void showFault(event.body, diagnostics);
       } else if (event.event === "haltd/cycles") {
         cyclesItem.text = describeCycles(event.body);
         cyclesItem.show();
       }
     }),
-    vscode.commands.registerCommand("haltd.buildAndReload", () => buildAndReload(status)),
+    vscode.commands.registerCommand("haltd.buildAndReload", () => buildAndReload(status, diagnostics)),
     vscode.commands.registerCommand("haltd.refreshPeripherals", () => peripherals.refresh()),
     vscode.commands.registerCommand("haltd.refreshTasks", () => tasks.refresh()),
     vscode.commands.registerCommand("haltd.readRegister", (node: PeripheralNode) => {
       if (node.kind === "register") {
-        peripherals.readRegister(node).catch(report);
+        peripherals.readRegister(node).catch((e) => report(e, "Read Peripheral Register"));
       }
     }),
     vscode.commands.registerCommand("haltd.writePeripheral", (node: PeripheralNode) => {
       if (node.kind !== "peripheral") {
-        peripherals.write(node).catch(report);
+        peripherals.write(node).catch((e) => report(e, "Write Peripheral"));
       }
     }),
     vscode.commands.registerCommand("haltd.addToWatch", async (item?: VariableContext) => {
       const expression = await chooseExpression(item);
       if (expression) {
-        await liveWatch.add(expression).catch(report);
+        await liveWatch.add(expression).catch((e) => report(e, "Add to Watch"));
       }
     }),
     vscode.commands.registerCommand("haltd.addSelectionToWatch", () =>
-      addFromDebugger().catch(report),
+      addFromDebugger().catch((e) => report(e, "Add Selection to Watch")),
     ),
     vscode.commands.registerCommand("haltd.addToTimeline", async (item?: VariableContext | WatchInfo) => {
       if (item && "expr" in item && !item.plottable) {
-        report(new Error(`${item.name} cannot be plotted by itself`));
+        report(new Error(`${item.name} cannot be plotted by itself`), "Add to Timeline");
         return;
       }
       const fromWatch = item && "expr" in item ? item.expr : undefined;
       const expression = fromWatch ?? (await chooseExpression(item as VariableContext | undefined));
       if (expression) {
-        await addToTimelineByHss(client, expression, timeline).catch(report);
+        await addToTimelineByHss(client, expression, timeline).catch((e) => report(e, "Add to Timeline"));
       }
     }),
     vscode.commands.registerCommand("haltd.addSelectionToTimeline", async (source?: string) => {
@@ -590,7 +634,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const plottable = selected.filter((item) => item.plottable);
         const skipped = selected.filter((item) => !item.plottable);
         if (plottable.length === 0) {
-          report(new Error(`${skipped[0].name} cannot be plotted by itself`));
+          report(new Error(`${skipped[0].name} cannot be plotted by itself`), "Add Selection to Timeline");
           return;
         }
         if (skipped.length > 0) {
@@ -599,13 +643,13 @@ export function activate(context: vscode.ExtensionContext): void {
           );
         }
         for (const item of plottable) {
-          await addToTimelineByHss(client, item.expr, timeline).catch(report);
+          await addToTimelineByHss(client, item.expr, timeline).catch((e) => report(e, "Add Selection to Timeline"));
         }
         return;
       }
       const expression = await chooseExpression();
       if (expression) {
-        await addToTimelineByHss(client, expression, timeline).catch(report);
+        await addToTimelineByHss(client, expression, timeline).catch((e) => report(e, "Add Selection to Timeline"));
       }
     }),
     vscode.commands.registerCommand("haltd.removeSelectedWatch", async () => {
@@ -616,7 +660,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const ids = new Set(selected.map((item) => item.id));
       const top = selected.filter((item) => item.parent === null || !ids.has(item.parent));
       for (const item of top) {
-        await liveWatch.remove(item).catch(report);
+        await liveWatch.remove(item).catch((e) => report(e, "Remove Watch"));
       }
     }),
     vscode.commands.registerCommand("haltd.editSelectedWatch", async (trigger?: string) => {
@@ -635,7 +679,7 @@ export function activate(context: vscode.ExtensionContext): void {
         value: item.value,
       });
       if (value !== undefined) {
-        await liveWatch.write(item, value).catch(report);
+        await liveWatch.write(item, value).catch((e) => report(e, "Write Watch"));
       }
     }),
     vscode.commands.registerCommand("haltd.setSelectedWatchRate", async () => {
@@ -651,7 +695,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       for (const item of selected) {
-        await liveWatch.setRate(item, choice.rateHz).catch(report);
+        await liveWatch.setRate(item, choice.rateHz).catch((e) => report(e, "Set Watch Rate"));
       }
     }),
     vscode.commands.registerCommand("haltd.copySelectedWatch", async () => {
@@ -663,23 +707,23 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.env.clipboard.writeText(text);
     }),
     vscode.commands.registerCommand("haltd.removeWatch", (item: WatchInfo) =>
-      liveWatch.remove(item).catch(report),
+      liveWatch.remove(item).catch((e) => report(e, "Remove Watch")),
     ),
     vscode.commands.registerCommand("haltd.setWatchRate", async (item: WatchInfo) => {
       const choice = await vscode.window.showQuickPick(RATES, { placeHolder: `Refresh rate for ${item.name}` });
       if (choice) {
-        await liveWatch.setRate(item, choice.rateHz).catch(report);
+        await liveWatch.setRate(item, choice.rateHz).catch((e) => report(e, "Set Watch Rate"));
       }
     }),
     vscode.commands.registerCommand("haltd.writeWatch", async (item: WatchInfo) => {
       const value = await vscode.window.showInputBox({ prompt: `New value for ${item.name}`, value: item.value });
       if (value !== undefined) {
-        await liveWatch.write(item, value).catch(report);
+        await liveWatch.write(item, value).catch((e) => report(e, "Write Watch"));
       }
     }),
-    vscode.commands.registerCommand("haltd.openTimeline", () => timeline.show().catch(report)),
+    vscode.commands.registerCommand("haltd.openTimeline", () => timeline.show().catch((e) => report(e, "Open Timeline"))),
     vscode.commands.registerCommand("haltd.openRttTerminal", () => rttTerminal.show()),
-    vscode.commands.registerCommand("haltd.openRttPanel", () => rttPanel.show().catch(report)),
+    vscode.commands.registerCommand("haltd.openRttPanel", () => rttPanel.show().catch((e) => report(e, "Open RTT Panel"))),
     vscode.commands.registerCommand("haltd.openTimelineInBrowser", () =>
       vscode.env.openExternal(vscode.Uri.parse(BACKEND_URL)),
     ),
@@ -694,18 +738,21 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         recording = !recording;
       } catch (error) {
-        report(error);
+        report(error, "Recording");
       }
     }),
     vscode.commands.registerCommand("haltd.showStats", async () => {
       try {
-        output.clear();
-        output.appendLine(JSON.stringify(await client.call("session.stats"), null, 2));
-        output.show(true);
+        const stats = await client.call("session.stats");
+        diagnostics.logInfo(`Session stats:\n${JSON.stringify(stats, null, 2)}`);
+        diagnostics.outputChannel.show(true);
       } catch (error) {
-        report(error);
+        report(error, "Show Statistics");
       }
     }),
+    vscode.commands.registerCommand("haltd.collectDiagnostics", () =>
+      diagnostics.openDiagnosticsReport().catch((e) => report(e, "Collect Diagnostics")),
+    ),
   );
 }
 

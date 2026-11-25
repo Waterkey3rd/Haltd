@@ -2,7 +2,7 @@
   "name": "haltd-embedded",
   "displayName": "Haltd Embedded",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "WaterKeyqwq",
   "license": "MIT",
   "repository": {
@@ -271,6 +271,10 @@
         "title": "Haltd: Show Statistics"
       },
       {
+        "command": "haltd.collectDiagnostics",
+        "title": "Haltd: Collect Diagnostics"
+      },
+      {
         "command": "haltd.openRttTerminal",
         "title": "Haltd: Open RTT Terminal",
         "icon": "$(terminal)"
@@ -336,22 +340,22 @@
       },
       {
         "command": "haltd.addSelectionToWatch",
+        "key": "ctrl+h",
+        "mac": "cmd+h",
+        "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
+      },
+      {
+        "command": "haltd.addSelectionToTimeline",
+        "args": "editor",
         "key": "ctrl+g",
         "mac": "cmd+g",
         "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
       },
       {
         "command": "haltd.addSelectionToTimeline",
-        "args": "editor",
-        "key": "ctrl+h",
-        "mac": "cmd+h",
-        "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
-      },
-      {
-        "command": "haltd.addSelectionToTimeline",
         "args": "liveWatch",
-        "key": "ctrl+h",
-        "mac": "cmd+h",
+        "key": "ctrl+g",
+        "mac": "cmd+g",
         "when": "inDebugMode && debugType == 'haltd' && focusedView == 'haltd.liveWatch'"
       },
       {
@@ -402,6 +406,19 @@
           "type": "boolean",
           "default": true,
           "description": "Hide the built-in Watch view during Haltd sessions, since Add to Watch goes to Live Watch instead."
+        },
+        "haltd.rtos.threadView": {
+          "type": "string",
+          "enum": [
+            "currentOnly",
+            "currentFirst"
+          ],
+          "default": "currentOnly",
+          "enumDescriptions": [
+            "Show only the currently executing CPU/task context in Call Stack (SEGGER Ozone style; all tasks remain in the FreeRTOS Tasks panel).",
+            "Put the currently executing task first, followed by all other FreeRTOS tasks."
+          ],
+          "description": "How FreeRTOS tasks are presented in the Debug Call Stack view."
         }
       }
     },

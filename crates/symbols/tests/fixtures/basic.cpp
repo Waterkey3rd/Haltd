@@ -103,9 +103,38 @@ KEEP volatile int g_input = 3;
     return bump() + x;
 }
 
+extern "C" KEEP [[gnu::noinline]] void c_switch_context() {
+    g_counter = g_counter + 1;
+}
+
+extern "C" KEEP [[gnu::naked]] void sim_pendsv_handler() {
+    __asm__ volatile(
+        "mrs r0, psp\n"
+        "stmdb r0!, {r4-r11, r14}\n"
+        "stmdb sp!, {r0, r3}\n"
+        "bl c_switch_context\n"
+        "ldmia sp!, {r0, r3}\n"
+        "ldmia r0!, {r4-r11, r14}\n"
+        "bx r14\n"
+    );
+}
+
+extern "C" KEEP [[gnu::naked]] void sim_naked_caller() {
+    __asm__ volatile(
+        "push {r4, lr}\n"
+        "sub sp, #8\n"
+        "bl c_switch_context\n"
+        "add sp, #8\n"
+        "pop {r4, pc}\n"
+    );
+}
+
 extern "C" KEEP void entry() {
     with_frame(2);
     uses_inline(4);
+    if (g_input == -999) {
+        sim_naked_caller();
+    }
     __asm__ volatile("" : : "r"(&fw::hidden));
     while (true) {
     }

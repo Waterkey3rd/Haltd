@@ -5,12 +5,13 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use engine::rtos::freertos::{FreeRtos, TaskState};
 use probe_api::{
-    AccessWidth, BpKind, ConnectCfg, Interface, Probe, ProbeInfo, Progress, Reg, ResetKind,
-    TargetInfo, DEFAULT_SPEED_KHZ,
+    AccessWidth, BpKind, ConnectCfg, Interface, Probe, ProbeExt, ProbeInfo, Progress, Reg,
+    ResetKind, TargetInfo, DEFAULT_SPEED_KHZ,
 };
 use probe_jlink::{list_devices, JLink, JLinkOptions};
 use symbols::{
     CoreRegisters, FormatOptions, FrameKind, LoadOptions, MemoryReader, StackFrame, SymbolDb,
+    UnwindStopReason,
 };
 
 const BREAKPOINT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -35,6 +36,9 @@ enum Command {
         /// Query only the probe; do not attempt to attach to a target.
         #[arg(long)]
         no_target: bool,
+        /// Save a JSON snapshot of core registers, SCS state, and MSP/PSP stack RAM.
+        #[arg(long, value_name = "FILE")]
+        dump_stack: Option<PathBuf>,
     },
     /// Program an ELF or BIN file, rewriting only changed flash sectors.
     Flash {
@@ -76,6 +80,9 @@ enum Command {
         /// Run to a hardware breakpoint on this function first; implies --halt.
         #[arg(long, value_name = "FUNCTION")]
         break_at: Option<String>,
+        /// Save a JSON snapshot of core registers, SCS state, MSP/PSP RAM, and unwound stack; implies --halt.
+        #[arg(long, value_name = "FILE")]
+        dump_stack: Option<PathBuf>,
         #[command(flatten)]
         connection: Connection,
     },
@@ -202,7 +209,8 @@ fn main() -> Result<()> {
         Command::Info {
             connection,
             no_target,
-        } => info(&connection, no_target),
+            dump_stack,
+        } => info(&connection, no_target, dump_stack.as_deref()),
         Command::Flash {
             file,
             connection,
@@ -223,12 +231,14 @@ fn main() -> Result<()> {
             halt,
             backtrace,
             break_at,
+            dump_stack,
             connection,
         } => tasks(
             &elf,
-            halt || backtrace || break_at.is_some(),
+            halt || backtrace || break_at.is_some() || dump_stack.is_some(),
             backtrace,
             break_at.as_deref(),
+            dump_stack.as_deref(),
             &connection,
         ),
         Command::Serve {
@@ -275,7 +285,7 @@ fn print_target(target: &TargetInfo) {
     );
 }
 
-fn info(connection: &Connection, no_target: bool) -> Result<()> {
+fn info(connection: &Connection, no_target: bool, dump_stack: Option<&Path>) -> Result<()> {
     let mut probe = connection.open_probe()?;
     print_probe(&probe.info());
     if no_target {
@@ -284,7 +294,13 @@ fn info(connection: &Connection, no_target: bool) -> Result<()> {
     // Reaching the probe but not the target is a useful result by itself, so
     // this is reported rather than failing the whole command.
     match probe.connect(&connection.config()) {
-        Ok(target) => print_target(&target),
+        Ok(target) => {
+            print_target(&target);
+            if let Some(path) = dump_stack {
+                write_stack_dump(&mut probe, path, None)?;
+                println!("wrote stack dump to {}", path.display());
+            }
+        }
         Err(error) => println!("Target\n  not connected: {error}"),
     }
     Ok(())
@@ -368,8 +384,12 @@ fn current_registers(probe: &mut dyn Probe) -> Result<CoreRegisters> {
 fn print_backtrace(frames: &[StackFrame]) {
     for (depth, frame) in frames.iter().enumerate() {
         match frame.kind {
-            FrameKind::Exception { number } => {
-                println!("    #{depth:<2} <exception {number}> sp={:#010x}", frame.sp);
+            FrameKind::Exception { number, heuristic } => {
+                let tag = if heuristic { " (heuristic)" } else { "" };
+                println!(
+                    "    #{depth:<2} <exception {number}{tag}> sp={:#010x}",
+                    frame.sp
+                );
             }
             FrameKind::Code => println!(
                 "    #{depth:<2} {:#010x} {} sp={:#010x}",
@@ -379,6 +399,88 @@ fn print_backtrace(frames: &[StackFrame]) {
             ),
         }
     }
+}
+
+fn dump_stack_window(probe: &mut dyn Probe, center: u32) -> serde_json::Value {
+    let start = center.saturating_sub(64) & !3;
+    let words: Vec<serde_json::Value> = (0..64)
+        .filter_map(|i| {
+            let addr = start.saturating_add(i * 4);
+            probe.read_u32(addr).ok().map(|val| {
+                serde_json::json!({
+                    "addr": format!("{addr:#010x}"),
+                    "value": format!("{val:#010x}"),
+                })
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "center": format!("{center:#010x}"),
+        "start": format!("{start:#010x}"),
+        "words": words,
+    })
+}
+
+fn write_stack_dump(
+    probe: &mut dyn Probe,
+    path: &Path,
+    unwind: Option<(&[StackFrame], &UnwindStopReason)>,
+) -> Result<()> {
+    let was_halted = probe.is_halted()?;
+    if !was_halted {
+        probe.halt()?;
+    }
+    let result = (|| -> Result<()> {
+        let regs = current_registers(probe)?;
+        let icsr = probe.read_u32(0xE000_ED04).ok();
+        let fpccr = probe.read_u32(0xE000_EF34).ok();
+        let dhcsr = probe.read_u32(0xE000_EDF0).ok();
+        let dfsr = probe.read_u32(0xE000_ED30).ok();
+        let msp_dump = dump_stack_window(probe, regs.msp);
+        let psp_dump = dump_stack_window(probe, regs.psp);
+        let reg_hex: Vec<String> = regs.r.iter().map(|v| format!("{v:#010x}")).collect();
+        let frames_json: Option<serde_json::Value> = unwind.map(|(frames, stop)| {
+            let list: Vec<serde_json::Value> = frames
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "pc": format!("{:#010x}", f.pc),
+                        "sp": format!("{:#010x}", f.sp),
+                        "function": f.function,
+                        "kind": format!("{:?}", f.kind),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "stopReason": format!("{stop:?}"),
+                "frames": list,
+            })
+        });
+        let payload = serde_json::json!({
+            "registers": {
+                "r": reg_hex,
+                "xpsr": format!("{:#010x}", regs.xpsr),
+                "msp": format!("{:#010x}", regs.msp),
+                "psp": format!("{:#010x}", regs.psp),
+            },
+            "scs": {
+                "icsr": icsr.map(|v| format!("{v:#010x}")),
+                "fpccr": fpccr.map(|v| format!("{v:#010x}")),
+                "dhcsr": dhcsr.map(|v| format!("{v:#010x}")),
+                "dfsr": dfsr.map(|v| format!("{v:#010x}")),
+            },
+            "mspStack": msp_dump,
+            "pspStack": psp_dump,
+            "unwind": frames_json,
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&payload)?)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        Ok(())
+    })();
+    if !was_halted {
+        let _ = probe.go();
+    }
+    result
 }
 
 fn print_tasks(
@@ -452,6 +554,7 @@ fn tasks(
     halt: bool,
     backtrace: bool,
     break_at: Option<&str>,
+    dump_stack: Option<&Path>,
     connection: &Connection,
 ) -> Result<()> {
     let db = SymbolDb::load(elf, &LoadOptions::default())
@@ -466,7 +569,17 @@ fn tasks(
         Some(function) => run_to(&mut probe, &db, function),
         None => Ok(()),
     }
-    .and_then(|()| print_tasks(&db, &rtos, &mut probe, backtrace));
+    .and_then(|()| {
+        print_tasks(&db, &rtos, &mut probe, backtrace)?;
+        if let Some(path) = dump_stack {
+            let regs = current_registers(&mut probe)?;
+            let (frames, stop_reason) =
+                db.unwind_detailed(&regs, &mut ProbeMemory(&mut probe), 64)?;
+            write_stack_dump(&mut probe, path, Some((&frames, &stop_reason)))?;
+            println!("wrote stack dump to {}", path.display());
+        }
+        Ok(())
+    });
     if resume {
         probe.go()?;
     }

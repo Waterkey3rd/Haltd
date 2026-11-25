@@ -45,7 +45,7 @@ Core daily debugging workflows are ready to serve as a primary debug environment
 - **HardFault Interception & Decoding**: halts on fault entry, decodes `CFSR` / `HFSR` / `MMFAR` / `BFAR` / `AFSR`, and unwinds past `<exception N>` straight to the offending source line.
 - **FreeRTOS Awareness**: reads TCB and task list layouts directly from DWARF (CM3 / CM4F) with no hardcoded offsets; displays task states, priorities, stack high-water marks, and per-task call stacks.
 - **Live Watch & Timeline**:
-  - **Live Watch**: read and write global/static variables, structs, and bitfields at 0–5 Hz via AHB-AP without halting the CPU, with Ozone-style shortcuts (`Ctrl+G` add to Live Watch, `Ctrl+H` add to Timeline, etc.).
+  - **Live Watch**: read and write global/static variables, structs, and bitfields at 0–5 Hz via AHB-AP without halting the CPU, with Ozone-style shortcuts (`Ctrl+G` add to Timeline, `Ctrl+H` add to Live Watch, etc.).
   - **Timeline (HSS / Polling / RTT)**: up to 1 kHz HSS sampling (overflow falls back to polling) rendered in an Ozone Timeline / Data Graph-inspired multi-track oscilloscope UI unifying HSS and RTT signals, with hover value boxes, sample/delta cursors, drag-and-drop track grouping, dark/light themes, `.hlrec` recording, and CSV/PNG export.
 - **RTT Terminal & Structured Decoding**: besides ANSI text, regex, `.haltd/rtt.yaml`, Lua, and SystemView, supports zero-config auto-decoding from ELF struct types and `key=value` text with automatic Timeline plotting (configurable in `launch.json`).
 - **VS Code Device Selection Assist**: provides J-Link device completion, core/Flash/RAM + built-in profile hover info, unknown-device warnings in `launch.json`, and `Haltd: Select Device`.
