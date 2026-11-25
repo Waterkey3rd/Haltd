@@ -2,12 +2,13 @@
   "name": "haltd-embedded",
   "displayName": "Haltd Embedded",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "WaterKeyqwq",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Waterkey3rd/Haltd.git"
+    "url": "https://github.com/Waterkey3rd/Haltd.git",
+    "directory": "vscode-ext"
   },
   "homepage": "https://github.com/Waterkey3rd/Haltd#readme",
   "bugs": {
@@ -25,7 +26,8 @@
     "onDebugResolve:haltd",
     "onLanguage:jsonc",
     "workspaceContains:.vscode/launch.json",
-    "onCommand:haltd.selectDevice"
+    "onCommand:haltd.selectDevice",
+    "onView:haltd.liveWatch"
   ],
   "contributes": {
     "breakpoints": [
@@ -230,13 +232,18 @@
         "title": "Haltd: Build & Reload"
       },
       {
+        "command": "haltd.openLiveWatch",
+        "title": "Haltd: Open Live Watch",
+        "icon": "$(eye)"
+      },
+      {
         "command": "haltd.addToWatch",
         "title": "Add to Live Watch",
         "icon": "$(add)"
       },
       {
         "command": "haltd.popOutLiveWatch",
-        "title": "Pop Out to Editor Tab",
+        "title": "Haltd: Pop Out Live Watch to Editor Tab",
         "icon": "$(link-external)"
       },
       {
@@ -246,7 +253,7 @@
       },
       {
         "command": "haltd.configureWatchColumns",
-        "title": "Configure Live Watch Columns",
+        "title": "Haltd: Configure Live Watch Columns",
         "icon": "$(layout)"
       },
       {
@@ -377,14 +384,12 @@
           "items": {
             "type": "string",
             "enum": [
-              "hex",
               "type",
               "address",
               "rate"
             ]
           },
           "default": [
-            "hex",
             "type",
             "address",
             "rate"
@@ -397,6 +402,11 @@
           "minimum": 0,
           "maximum": 10000,
           "description": "Duration in milliseconds for Live Watch value change highlighting to cool down while running (0 disables fade)."
+        },
+        "haltd.liveWatch.openOnDebugStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically reveal the Live Watch panel when a Haltd debug session starts."
         }
       }
     },

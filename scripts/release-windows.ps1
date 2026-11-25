@@ -41,6 +41,7 @@ Copy-Item "docs\usage.md" "$output\README.md"
 
 $vsix = "$output\haltd-$version-win32-x64.vsix"
 Invoke-Step "vscode-ext" "npx.cmd" @("--yes", "@vscode/vsce@3", "package", "--target", "win32-x64",
+    "--baseImagesUrl", "https://raw.githubusercontent.com/Waterkey3rd/Haltd/main/vscode-ext",
     "--no-dependencies", "--out", $vsix)
 
 Compress-Archive -Path $output -DestinationPath "release\$name.zip"

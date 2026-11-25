@@ -242,7 +242,7 @@ fn run_controller(stream: TcpStream, shared: &Shared) -> io::Result<()> {
         }
     }
     *shared.session.lock().expect("session lock") = dap.into_session();
-    let _ = closer.shutdown(Shutdown::Both);
+    let _ = closer.shutdown(Shutdown::Write);
     Ok(())
 }
 

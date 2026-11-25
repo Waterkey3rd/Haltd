@@ -46,17 +46,23 @@ export function attachTrackInteractions(
     | { mode: "pin"; id: number }
     | null = null;
   let wheelTravel = 0;
-
-  const isNearCursor = (clientX: number, cursorVal: number | null): boolean => {
-    if (cursorVal === null) return false;
-    const rect = over.getBoundingClientRect();
-    const px = plot.valToPos(cursorVal, "x", false);
-    return Math.abs(clientX - rect.left - px) <= 6;
+  let currentCursor = "default";
+  const setCursor = (next: string) => {
+    if (currentCursor !== next) {
+      currentCursor = next;
+      over.style.cursor = next;
+    }
   };
 
-  const findNearPin = (clientX: number): Pin | undefined => {
+  const isNearCursor = (clientX: number, rectLeft: number, cursorVal: number | null): boolean => {
+    if (cursorVal === null) return false;
+    const px = plot.valToPos(cursorVal, "x", false);
+    return Math.abs(clientX - rectLeft - px) <= 6;
+  };
+
+  const findNearPin = (clientX: number, rectLeft: number): Pin | undefined => {
     for (let i = state.pins.length - 1; i >= 0; i--) {
-      if (isNearCursor(clientX, state.pins[i].t)) {
+      if (isNearCursor(clientX, rectLeft, state.pins[i].t)) {
         return state.pins[i];
       }
     }
@@ -140,7 +146,7 @@ export function attachTrackInteractions(
           panX: false,
           panY: false,
         };
-        over.style.cursor = "grabbing";
+        setCursor("grabbing");
         return;
       }
       if (event.button !== 0) return;
@@ -155,23 +161,23 @@ export function attachTrackInteractions(
 
       if (event.shiftKey) {
         drag = { mode: "pan-y", y: event.clientY, yMin, yMax };
-        over.style.cursor = "ns-resize";
+        setCursor("ns-resize");
         return;
       }
 
-      if (isNearCursor(event.clientX, state.cursorB)) {
+      if (isNearCursor(event.clientX, rect.left, state.cursorB)) {
         drag = { mode: "cursor-b" };
         return;
       }
-      if (isNearCursor(event.clientX, state.cursorA)) {
+      if (isNearCursor(event.clientX, rect.left, state.cursorA)) {
         drag = { mode: "cursor-a" };
         return;
       }
-      if (isNearCursor(event.clientX, state.sampleCursor)) {
+      if (isNearCursor(event.clientX, rect.left, state.sampleCursor)) {
         drag = { mode: "cursor-s" };
         return;
       }
-      const hitPin = findNearPin(event.clientX);
+      const hitPin = findNearPin(event.clientX, rect.left);
       if (hitPin) {
         drag = { mode: "pin", id: hitPin.id };
         return;
@@ -188,7 +194,7 @@ export function attachTrackInteractions(
         panX: false,
         panY: false,
       };
-      over.style.cursor = "grabbing";
+      setCursor("grabbing");
     },
     { signal },
   );
@@ -211,16 +217,16 @@ export function attachTrackInteractions(
 
       if (!drag) {
         if (
-          isNearCursor(event.clientX, state.cursorA) ||
-          isNearCursor(event.clientX, state.cursorB) ||
-          isNearCursor(event.clientX, state.sampleCursor) ||
-          findNearPin(event.clientX) !== undefined
+          isNearCursor(event.clientX, rect.left, state.cursorA) ||
+          isNearCursor(event.clientX, rect.left, state.cursorB) ||
+          isNearCursor(event.clientX, rect.left, state.sampleCursor) ||
+          findNearPin(event.clientX, rect.left) !== undefined
         ) {
-          over.style.cursor = "ew-resize";
+          setCursor("ew-resize");
         } else if (event.ctrlKey || event.metaKey) {
-          over.style.cursor = "crosshair";
+          setCursor("crosshair");
         } else {
-          over.style.cursor = "default";
+          setCursor("default");
         }
         callbacks.onRedrawOverlays();
       }
@@ -263,7 +269,7 @@ export function attachTrackInteractions(
         max > min ? pxToTime(relX, rect.width, min, max) : plot.posToVal(relX, "x");
       const signalMatch: SeriesInfo | undefined =
         track.members.find((m) => m.seriesId === state.selectedSeriesId) ?? track.members[0];
-      const nearPin = findNearPin(event.clientX);
+      const nearPin = findNearPin(event.clientX, rect.left);
       callbacks.onContextMenu({
         clientX: event.clientX,
         clientY: event.clientY,
@@ -315,7 +321,7 @@ export function attachTrackInteractions(
       if (drag.mode === "box") {
         const x1 = relX * (devicePixelRatio || 1) + plot.bbox.left;
         state.boxSelect = { groupName, x0: drag.x0, x1 };
-        plot.redraw(false);
+        callbacks.onRedrawOverlays();
         return;
       }
       if (drag.mode === "pan-y") {
@@ -351,6 +357,7 @@ export function attachTrackInteractions(
           callbacks.onStopFollowing();
           state.viewEnd =
             drag.end - (dx / Math.max(1, over.clientWidth)) * spanSeconds(state.division);
+          callbacks.onRefresh();
         }
       }
     },
@@ -361,7 +368,7 @@ export function attachTrackInteractions(
     "mouseup",
     (event) => {
       if (!drag) return;
-      over.style.cursor = "default";
+      setCursor("default");
       if (drag.mode === "box" && state.boxSelect) {
         const dpr = devicePixelRatio || 1;
         const p0 = (Math.min(state.boxSelect.x0, state.boxSelect.x1) - plot.bbox.left) / dpr;
@@ -372,7 +379,7 @@ export function attachTrackInteractions(
           const t1 = plot.posToVal(p1, "x");
           callbacks.onZoomToRange(t0, t1);
         } else {
-          plot.redraw(false);
+          callbacks.onRedrawOverlays();
         }
         drag = null;
         return;

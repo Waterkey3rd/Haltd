@@ -1,11 +1,12 @@
 import type { SeriesInfo } from "../client";
-import { computeSeriesStatsFromColumns, formatNumber, formatSeconds } from "./math";
+import { formatNumber, formatSeconds, lastValueFromColumns } from "./math";
 import {
   colorOf,
   isSeriesVisible,
   legendReadoutTime,
   toHexColor,
   valueAt,
+  type LegendSignalDom,
   type TimelineState,
 } from "./state";
 
@@ -131,19 +132,20 @@ export function renderTrackLegendSignals(
   state: TimelineState,
   callbacks: LegendCallbacks,
 ): {
+  legendSignals: Map<number, LegendSignalDom>;
   legendValues: Map<number, HTMLElement>;
   legendCards: Map<number, HTMLElement>;
 } {
   const list = document.createElement("div");
   list.className = "track-signal-list";
+  const legendSignals = new Map<number, LegendSignalDom>();
   const legendValues = new Map<number, HTMLElement>();
   const legendCards = new Map<number, HTMLElement>();
 
   const filter = state.seriesFilter.trim().toLowerCase();
 
   for (const item of members) {
-    const idx = state.series.indexOf(item);
-    const color = colorOf(state, item, idx);
+    const color = colorOf(state, item);
     const visible = isSeriesVisible(state, item);
     const selected = state.selectedSeriesId === item.seriesId;
 
@@ -160,7 +162,9 @@ export function renderTrackLegendSignals(
       }
     }
     row.draggable = true;
-    row.title = item.error ? `Error: ${item.error}\nExpr: ${item.root}` : `${item.root}\nDrag to move to another track`;
+    row.title = item.error
+      ? `Error: ${item.error}\nExpr: ${item.root}`
+      : `${item.root}\nDrag to move to another track`;
 
     row.addEventListener("click", () => {
       callbacks.onSelectSignal(item, trackName);
@@ -219,7 +223,8 @@ export function renderTrackLegendSignals(
 
     const soloBtn = document.createElement("button");
     soloBtn.type = "button";
-    soloBtn.className = "mini-icon-btn solo-btn" + (state.soloSeriesId === item.seriesId ? " active" : "");
+    soloBtn.className =
+      "mini-icon-btn solo-btn" + (state.soloSeriesId === item.seriesId ? " active" : "");
     soloBtn.textContent = "S";
     soloBtn.title = "Solo signal (S)";
     soloBtn.onclick = (e) => {
@@ -243,19 +248,33 @@ export function renderTrackLegendSignals(
 
     row.append(visToggle, swatch, nameEl, badge, valEl, actions);
     legendCards.set(item.seriesId, row);
+    legendSignals.set(item.seriesId, {
+      row,
+      checkbox: visToggle,
+      swatch,
+      soloBtn,
+      valueEl: valEl,
+      lastText: "—",
+    });
     list.append(row);
   }
 
   legendEl.append(list);
-  return { legendValues, legendCards };
+  return { legendSignals, legendValues, legendCards };
 }
 
+let cachedHoverEl: HTMLElement | null = null;
+let lastHoverText = "";
+
 export function updateLegendReadouts(state: TimelineState): void {
-  const hoverEl = document.getElementById("hover-readout");
+  if (!cachedHoverEl) {
+    cachedHoverEl = document.getElementById("hover-readout");
+  }
   const tReadout = legendReadoutTime(state);
-  if (hoverEl) {
+  if (cachedHoverEl) {
+    let text = "";
     if (state.hoverTime !== null) {
-      let text = `Hover t = ${state.hoverTime.toFixed(4)} s`;
+      text = `Hover t = ${state.hoverTime.toFixed(4)} s`;
       if (state.sampleCursor !== null) {
         const dt = state.hoverTime - state.sampleCursor;
         text += `  Δt = ${formatSeconds(dt)}`;
@@ -271,92 +290,130 @@ export function updateLegendReadouts(state: TimelineState): void {
           }
         }
       }
-      hoverEl.textContent = text;
     } else if (state.sampleCursor !== null) {
-      hoverEl.textContent = `Sample S = ${state.sampleCursor.toFixed(4)} s`;
-    } else {
-      hoverEl.textContent = "";
+      text = `Sample S = ${state.sampleCursor.toFixed(4)} s`;
+    }
+    if (text !== lastHoverText) {
+      lastHoverText = text;
+      cachedHoverEl.textContent = text;
     }
   }
 
-  for (const item of state.series) {
-    let val: number | null = null;
-    if (tReadout !== null) {
-      val = valueAt(state, item, tReadout);
-    } else if (state.lastColumns) {
-      val = computeSeriesStatsFromColumns(state.lastColumns.result.series.get(item.seriesId)).last;
-    }
-    const formatted = formatNumber(val, 6);
-    for (const track of state.tracks) {
-      const cell = track.legendValues.get(item.seriesId);
-      if (cell) {
-        cell.textContent = formatted;
+  const seriesCols = state.lastColumns?.result.series;
+  for (const track of state.tracks) {
+    for (const item of track.members) {
+      const sigDom = track.legendSignals.get(item.seriesId);
+      if (!sigDom) continue;
+      let val: number | null = null;
+      if (tReadout !== null) {
+        val = valueAt(state, item, tReadout);
+      } else if (seriesCols) {
+        val = lastValueFromColumns(seriesCols.get(item.seriesId));
+      }
+      const formatted = formatNumber(val, 6);
+      if (formatted !== sigDom.lastText) {
+        sigDom.lastText = formatted;
+        sigDom.valueEl.textContent = formatted;
       }
     }
   }
 }
+
+let rttStructureKey = "";
+const rttValueEls = new Map<string, HTMLElement>();
 
 export function renderRttSignalsDrawer(
   state: TimelineState,
   callbacks: LegendCallbacks,
 ): void {
   const countBadge = document.getElementById("rtt-badge-count");
-  const listEl = document.getElementById("rtt-signal-list");
-  if (countBadge) {
-    countBadge.textContent = String(state.rttSignals.length);
+  const countText = String(state.rttSignals.length);
+  if (countBadge && countBadge.textContent !== countText) {
+    countBadge.textContent = countText;
   }
+
+  const listEl = document.getElementById("rtt-signal-list");
   if (!listEl) return;
 
   if (state.rttSignals.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "drawer-empty";
-    empty.textContent = "No decoded RTT signals yet.";
-    listEl.replaceChildren(empty);
+    if (rttStructureKey !== "__empty__") {
+      rttStructureKey = "__empty__";
+      rttValueEls.clear();
+      const empty = document.createElement("div");
+      empty.className = "drawer-empty";
+      empty.textContent = "No decoded RTT signals yet.";
+      listEl.replaceChildren(empty);
+    }
     return;
   }
 
-  listEl.replaceChildren(
-    ...state.rttSignals.map((sig) => {
-      const row = document.createElement("div");
-      row.className = "rtt-sig-row";
-      row.draggable = true;
-      row.title = "Drag onto a track (or blank area) to plot, or click + Plot";
+  const nextKey = state.rttSignals
+    .map((sig) => `${sig.name}:${sig.seriesId ?? ""}`)
+    .join("|");
 
-      row.addEventListener("dragstart", (event) => {
-        state.dragging = { kind: "rtt", signalName: sig.name };
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "copyMove";
-          event.dataTransfer.setData("text/plain", `rtt:${sig.name}`);
-        }
-        callbacks.onDragStateChange(true);
-      });
-      row.addEventListener("dragend", () => {
-        state.dragging = null;
-        callbacks.onDragStateChange(false);
-      });
+  if (rttStructureKey !== nextKey) {
+    rttStructureKey = nextKey;
+    rttValueEls.clear();
+    listEl.replaceChildren(
+      ...state.rttSignals.map((sig) => {
+        const row = document.createElement("div");
+        row.className = "rtt-sig-row";
+        row.draggable = true;
+        row.title = "Drag onto a track (or blank area) to plot, or click + Plot";
 
-      const nameEl = document.createElement("span");
-      nameEl.className = "mono rtt-sig-name";
-      nameEl.textContent = sig.name;
+        row.addEventListener("dragstart", (event) => {
+          state.dragging = { kind: "rtt", signalName: sig.name };
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "copyMove";
+            event.dataTransfer.setData("text/plain", `rtt:${sig.name}`);
+          }
+          callbacks.onDragStateChange(true);
+        });
+        row.addEventListener("dragend", () => {
+          state.dragging = null;
+          callbacks.onDragStateChange(false);
+        });
 
-      const valEl = document.createElement("span");
-      valEl.className = "mono rtt-sig-val";
-      valEl.textContent = sig.value !== null ? formatNumber(sig.value, 5) : "—";
+        const nameEl = document.createElement("span");
+        nameEl.className = "mono rtt-sig-name";
+        nameEl.textContent = sig.name;
 
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "mini-btn";
-      btn.textContent = sig.seriesId === null ? "+ Plot" : "Remove";
-      btn.onclick = () => {
-        if (sig.seriesId === null) {
-          callbacks.onPlotRttSignal(sig.name, null);
-        } else {
-          callbacks.onRemoveRttSeries(sig.seriesId);
-        }
-      };
+        const valEl = document.createElement("span");
+        valEl.className = "mono rtt-sig-val";
+        valEl.textContent = sig.value !== null ? formatNumber(sig.value, 5) : "—";
+        rttValueEls.set(sig.name, valEl);
 
-      row.append(nameEl, valEl, btn);
-      return row;
-    }),
-  );
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "mini-btn";
+        btn.textContent = sig.seriesId === null ? "+ Plot" : "Remove";
+        btn.onclick = () => {
+          if (sig.seriesId === null) {
+            callbacks.onPlotRttSignal(sig.name, null);
+          } else {
+            callbacks.onRemoveRttSeries(sig.seriesId);
+          }
+        };
+
+        row.append(nameEl, valEl, btn);
+        return row;
+      }),
+    );
+    return;
+  }
+
+  const drawer = document.getElementById("bottom-drawer");
+  const rttPane = document.getElementById("drawer-rtt");
+  if (!drawer || drawer.hidden || !rttPane || rttPane.hidden) {
+    return;
+  }
+
+  for (const sig of state.rttSignals) {
+    const valEl = rttValueEls.get(sig.name);
+    if (!valEl) continue;
+    const text = sig.value !== null ? formatNumber(sig.value, 5) : "—";
+    if (valEl.textContent !== text) {
+      valEl.textContent = text;
+    }
+  }
 }

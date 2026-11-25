@@ -582,6 +582,8 @@ export class DiagnosticsManager implements vscode.Disposable {
     return {
       createDebugAdapterTracker: (session) => {
         this.logInfo(`开始调试会话 "${session.name}" (${session.configuration.request ?? "launch"})`);
+        let shuttingDown = false;
+        let exitedCleanly = false;
         return {
           onWillReceiveMessage: (message: unknown) => {
             if (!message || typeof message !== "object") {
@@ -589,6 +591,9 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
             const msg = message as { type?: string; command?: string; arguments?: Record<string, unknown> };
             if (msg.type === "request" && msg.command) {
+              if (msg.command === "terminate" || msg.command === "disconnect") {
+                shuttingDown = true;
+              }
               if ((msg.command === "launch" || msg.command === "attach") && msg.arguments) {
                 this.lastLaunchConfig = sanitizeConfig(msg.arguments);
               }
@@ -603,11 +608,15 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
             const msg = message as {
               type?: string;
+              event?: string;
               command?: string;
               success?: boolean;
               message?: string;
               body?: { haltd?: unknown };
             };
+            if (msg.type === "event" && msg.event === "terminated") {
+              shuttingDown = true;
+            }
             if (msg.type === "response" && msg.success === false) {
               const command = msg.command ?? "unknown";
               const diag = isHaltdDiagnostic(msg.body?.haltd)
@@ -629,11 +638,18 @@ export class DiagnosticsManager implements vscode.Disposable {
             }
           },
           onError: (error: Error) => {
+            if (shuttingDown || exitedCleanly) {
+              this.pushLog("DEBUG", `Debug adapter pipe closed during shutdown: ${error.message}`);
+              return;
+            }
             this.logError(`Debug adapter transport error: ${error.message}`);
             void this.reportError(error, "DebugAdapter");
           },
           onExit: (code: number | undefined, signal: string | undefined) => {
             this.logInfo(`Debug adapter exited (code=${code ?? "null"}, signal=${signal ?? "none"})`);
+            if ((code === undefined || code === 0) && !signal) {
+              exitedCleanly = true;
+            }
             if ((code !== undefined && code !== 0) || signal) {
               const diag = adapterExitDiagnostic(code, signal, this.getAdapterPath());
               this.recordDiagnostic("DebugAdapter Exit", diag);

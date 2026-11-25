@@ -13,6 +13,7 @@ import {
   type WatchColumnKey,
   type WatchFormat,
   type WatchRowNode,
+  type WatchValuePatch,
   type WatchpointAccess,
   type WebviewToHostMessage,
 } from "./shared/liveWatchProtocol";
@@ -81,7 +82,7 @@ function isWatchFormat(value: unknown): value is WatchFormat {
 }
 
 function isColumnKey(value: unknown): value is WatchColumnKey {
-  return value === "hex" || value === "type" || value === "address" || value === "rate";
+  return value === "type" || value === "address" || value === "rate";
 }
 
 function formatMemoryDump(baseAddrStr: string, base64Data: string): string {
@@ -318,6 +319,22 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     };
   }
 
+  private toValuePatch(node: InternalNode, now: number): WatchValuePatch {
+    const elapsedMs = node.lastChangedAtMs !== null ? Math.max(0, now - node.lastChangedAtMs) : null;
+    return {
+      id: node.info.id,
+      value: node.info.value,
+      rawHex: node.info.rawHex,
+      address: node.info.address,
+      error: node.info.error,
+      prevValue: node.prevValue,
+      prevRawHex: node.prevRawHex,
+      lastChangedAtMs: node.lastChangedAtMs,
+      elapsedMs,
+      changedOnStop: node.changedOnStop,
+    };
+  }
+
   private orderedRows(): WatchRowNode[] {
     const now = Date.now();
     const out: WatchRowNode[] = [];
@@ -358,6 +375,10 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     return list;
   }
 
+  private visibleSurfaces(): Surface[] {
+    return this.activeSurfaces().filter((surface) => surface.isVisible());
+  }
+
   private sendTo(webview: vscode.Webview, message: HostToWebviewMessage): void {
     void webview.postMessage(message);
   }
@@ -368,7 +389,18 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     }
   }
 
+  private broadcastVisible(message: HostToWebviewMessage, exclude?: vscode.Webview): void {
+    for (const surface of this.visibleSurfaces()) {
+      if (surface.webview !== exclude) {
+        this.sendTo(surface.webview, message);
+      }
+    }
+  }
+
   private sendSnapshot(webview?: vscode.Webview): void {
+    if (!webview && this.visibleSurfaces().length === 0) {
+      return;
+    }
     const msg: HostToWebviewMessage = {
       type: "snapshot",
       rows: this.orderedRows(),
@@ -381,7 +413,7 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     if (webview) {
       this.sendTo(webview, msg);
     } else {
-      this.broadcast(msg);
+      this.broadcastVisible(msg);
     }
   }
 
@@ -417,8 +449,14 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       node.info.error = error;
       this.dirty.add(id);
     }
-    if (this.dirty.size > 0 && !this.timer) {
-      this.timer = setTimeout(() => this.flush(), UPDATE_COALESCE_MS);
+    if (this.dirty.size > 0) {
+      if (this.visibleSurfaces().length === 0) {
+        this.dirty.clear();
+        return;
+      }
+      if (!this.timer) {
+        this.timer = setTimeout(() => this.flush(), UPDATE_COALESCE_MS);
+      }
     }
   }
 
@@ -427,17 +465,21 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     if (this.dirty.size === 0) {
       return;
     }
+    if (this.visibleSurfaces().length === 0) {
+      this.dirty.clear();
+      return;
+    }
     const now = Date.now();
-    const updates: WatchRowNode[] = [];
+    const updates: WatchValuePatch[] = [];
     for (const id of this.dirty) {
       const node = this.nodes.get(id);
       if (node) {
-        updates.push(this.toRow(node, now));
+        updates.push(this.toValuePatch(node, now));
       }
     }
     this.dirty.clear();
     if (updates.length > 0) {
-      this.broadcast({
+      this.broadcastVisible({
         type: "patch",
         updates,
         runState: this.runState,
@@ -453,7 +495,12 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       for (const node of this.nodes.values()) {
         node.changedOnStop = false;
       }
-      this.sendSnapshot();
+      this.broadcastVisible({
+        type: "state",
+        runState: this.runState,
+        connected: this.client.connected,
+        freshnessMs: this.freshnessMs(),
+      });
       return;
     }
     if (nextState === "disconnected") {
@@ -465,7 +512,7 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       this.sendSnapshot();
       return;
     }
-    this.broadcast({
+    this.broadcastVisible({
       type: "state",
       runState: this.runState,
       connected: this.client.connected,
@@ -486,7 +533,12 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       for (const wp of reply.watchpoints ?? []) {
         this.watchpointsByAddr.set(wp.address.toLowerCase(), wp.access);
       }
-      this.sendSnapshot();
+      this.broadcastVisible({
+        type: "metaPatch",
+        rows: this.orderedRows().filter((r) => r.address !== null),
+        runState: this.runState,
+        connected: this.client.connected,
+      });
     } catch {
       // Ignore if session is busy or ending
     }
@@ -762,6 +814,8 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
   }
 
   async setRate(ids: number[], rateHz: number): Promise<void> {
+    const now = Date.now();
+    const updatedRows: WatchRowNode[] = [];
     for (const id of ids) {
       const node = this.nodes.get(id);
       if (!node) {
@@ -776,6 +830,7 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
           return;
         }
         curr.info.rateHz = rateHz;
+        updatedRows.push(this.toRow(curr, now));
         for (const childId of this.children.get(currId) ?? []) {
           applySubtree(childId);
         }
@@ -783,7 +838,14 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       applySubtree(id);
     }
     this.saveState();
-    this.sendSnapshot();
+    if (updatedRows.length > 0) {
+      this.broadcastVisible({
+        type: "metaPatch",
+        rows: updatedRows,
+        runState: this.runState,
+        connected: this.client.connected,
+      });
+    }
   }
 
   setFormat(id: number, format: WatchFormat): void {
@@ -798,9 +860,9 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       this.formats.set(node.key, format);
     }
     this.saveState();
-    this.broadcast({
-      type: "patch",
-      updates: [this.toRow(node, Date.now())],
+    this.broadcastVisible({
+      type: "metaPatch",
+      rows: [this.toRow(node, Date.now())],
       runState: this.runState,
       connected: this.client.connected,
     });
@@ -823,7 +885,6 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
 
   async configureColumnsPicker(): Promise<void> {
     const labels: Record<WatchColumnKey, string> = {
-      hex: "Hex / Format",
       type: "Type",
       address: "Address",
       rate: "Refresh Rate",
@@ -865,6 +926,38 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     this.broadcast({ type: "focusAddInput" });
   }
 
+  async revealPanel(preserveFocus = false): Promise<void> {
+    if (this.panel && this.panel.visible) {
+      this.panel.reveal(undefined, preserveFocus);
+      this.sendSnapshot(this.panel.webview);
+      return;
+    }
+    if (this.view) {
+      this.view.show(preserveFocus);
+      this.sendSnapshot(this.view.webview);
+      return;
+    }
+    await vscode.commands.executeCommand("haltd.liveWatch.focus");
+  }
+
+  revealOnDebugStart(): void {
+    const autoOpen = vscode.workspace.getConfiguration("haltd").get<boolean>("liveWatch.openOnDebugStart", true);
+    if (!autoOpen || vscode.debug.activeDebugSession?.type !== DEBUG_TYPE) {
+      return;
+    }
+    if (this.panel) {
+      this.panel.reveal(undefined, true);
+      this.sendSnapshot(this.panel.webview);
+      return;
+    }
+    if (this.view) {
+      this.view.show(true);
+      this.sendSnapshot(this.view.webview);
+    } else {
+      void vscode.commands.executeCommand("haltd.liveWatch.focus").then(undefined, () => undefined);
+    }
+  }
+
   async popOut(): Promise<void> {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Beside);
@@ -882,7 +975,6 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       },
     );
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, "resources", "livewatch.svg");
-    panel.webview.html = this.buildHtml(panel.webview, "panel");
     this.panel = panel;
     panel.webview.onDidReceiveMessage((msg: WebviewToHostMessage) => {
       void this.handleMessage(msg, panel.webview);
@@ -897,6 +989,7 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
         this.panel = undefined;
       }
     });
+    panel.webview.html = this.buildHtml(panel.webview, "panel");
   }
 
   async dockToPanel(): Promise<void> {
@@ -916,7 +1009,6 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "dist")],
     };
-    webviewView.webview.html = this.buildHtml(webviewView.webview, "panelView");
     webviewView.webview.onDidReceiveMessage((msg: WebviewToHostMessage) => {
       void this.handleMessage(msg, webviewView.webview);
     });
@@ -930,6 +1022,8 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
         this.view = undefined;
       }
     });
+    webviewView.webview.html = this.buildHtml(webviewView.webview, "panelView");
+    this.sendSnapshot(webviewView.webview);
   }
 
   private async handleMessage(msg: WebviewToHostMessage, sender: vscode.Webview): Promise<void> {
@@ -971,7 +1065,7 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
         case "setColumnWidths":
           this.columnWidths = { ...DEFAULT_COLUMN_WIDTHS, ...msg.widths };
           this.saveState();
-          this.broadcast({ type: "columns", columns: this.visibleColumns, widths: this.columnWidths });
+          this.broadcastVisible({ type: "columnWidths", widths: this.columnWidths }, sender);
           break;
         case "complete": {
           if (!this.client.connected) {
@@ -1073,7 +1167,12 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     for (const wp of reply.watchpoints ?? []) {
       this.watchpointsByAddr.set(wp.address.toLowerCase(), wp.access);
     }
-    this.sendSnapshot();
+    this.broadcastVisible({
+      type: "metaPatch",
+      rows: this.orderedRows().filter((r) => r.address !== null),
+      runState: this.runState,
+      connected: this.client.connected,
+    });
   }
 
   private buildHtml(webview: vscode.Webview, surfaceKind: "panelView" | "panel"): string {
@@ -1082,7 +1181,7 @@ export class LiveWatchController implements vscode.WebviewViewProvider, vscode.D
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "liveWatchApp.css"));
     const csp = [
       "default-src 'none'",
-      `style-src ${webview.cspSource}`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
       `script-src 'nonce-${nonce}'`,
       `img-src ${webview.cspSource}`,
     ].join("; ");

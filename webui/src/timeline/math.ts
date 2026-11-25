@@ -182,26 +182,74 @@ export function formatFrequency(deltaSeconds: number): string {
 }
 
 export function valueAtColumns(
-  xs: number[],
+  xs: ArrayLike<number>,
   data: SeriesColumnData | undefined,
   seconds: number,
 ): number | null {
-  if (!data || xs.length === 0) {
+  const len = xs.length;
+  if (!data || len === 0) {
     return null;
   }
-  const step = xs.length > 1 ? xs[1] - xs[0] : 1;
+  const step = len > 1 ? xs[1] - xs[0] : 1;
   if (step === 0) {
     return null;
   }
-  const column = Math.min(xs.length - 1, Math.max(0, Math.round((seconds - xs[0]) / step)));
-  for (let distance = 0; distance < xs.length; distance++) {
-    for (const index of [column - distance, column + distance]) {
-      if (index >= 0 && index < xs.length && !Number.isNaN(data.min[index]) && !Number.isNaN(data.max[index])) {
-        return (data.min[index] + data.max[index]) / 2;
+  const column = Math.min(len - 1, Math.max(0, Math.round((seconds - xs[0]) / step)));
+  const minArr = data.min;
+  const maxArr = data.max;
+  const lo0 = minArr[column];
+  const hi0 = maxArr[column];
+  if (lo0 === lo0 && hi0 === hi0) {
+    return (lo0 + hi0) * 0.5;
+  }
+  for (let distance = 1; distance < len; distance++) {
+    const left = column - distance;
+    if (left >= 0) {
+      const lo = minArr[left];
+      const hi = maxArr[left];
+      if (lo === lo && hi === hi) {
+        return (lo + hi) * 0.5;
       }
+    }
+    const right = column + distance;
+    if (right < len) {
+      const lo = minArr[right];
+      const hi = maxArr[right];
+      if (lo === lo && hi === hi) {
+        return (lo + hi) * 0.5;
+      }
+    }
+    if (left < 0 && right >= len) {
+      break;
     }
   }
   return null;
+}
+
+export function lastValueFromColumns(data: SeriesColumnData | undefined): number | null {
+  if (!data) {
+    return null;
+  }
+  const minArr = data.min;
+  const maxArr = data.max;
+  for (let i = minArr.length - 1; i >= 0; i--) {
+    const lo = minArr[i];
+    const hi = maxArr[i];
+    if (lo === lo && hi === hi) {
+      return (lo + hi) * 0.5;
+    }
+  }
+  return null;
+}
+
+export function hasAnyNaN(data: Float64Array): boolean {
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (v !== v) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function computeSeriesStatsFromColumns(data: SeriesColumnData | undefined): SeriesStats {

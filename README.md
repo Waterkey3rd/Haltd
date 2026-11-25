@@ -45,7 +45,7 @@
 - **HardFault 自动拦截与译码**：发生异常时在入口第一时间暂停，自动解析 `CFSR` / `HFSR` / `MMFAR` / `BFAR` / `AFSR`，并在调用栈中跨过 `<exception N>` 直接定位到出错代码行。
 - **FreeRTOS 感知**：直接从 DWARF 信息读取 TCB 与任务链表布局（支持 CM3 / CM4F），无需硬编码偏移，可查看任务状态、优先级、剩余栈高水位及各任务独立调用栈。
 - **不停机变量与波形采样**：
-  - **Live Watch**：默认停靠底部 Panel（支持标题栏 **Pop out** 弹出为独立编辑区标签页并与源码分栏），采用 Ozone 风格多列树表分列展示变量名、当前值、Hex/格式、类型、地址与速率（支持列显隐配置、拖拽调宽与 `0–20 Hz` 独立调频，默认 `5 Hz`），支持值变动双模式新鲜度着色、按行切换显示格式、ELF 全局符号补全、动态指针/数组与算术表达式监视，以及右键设 DWT 硬件观察点与打开内存视图，保留 Ozone 风格快捷键（`Ctrl+G` 加入 Timeline、`Ctrl+H` 加入 Live Watch 等）。
+  - **Live Watch**：默认停靠底部 Panel（支持标题栏 **Pop out** 弹出为独立编辑区标签页并与源码分栏），采用 Ozone 风格多列树表分列展示变量名、当前值（紧跟可点击的 `auto`/`dec`/`hex` 格式字样）、类型、地址与速率（支持列显隐配置、拖拽调宽与 `0–20 Hz` 独立调频，默认 `5 Hz`），支持值变动双模式字符新鲜度着色、ELF 全局符号补全、动态指针/数组与算术表达式监视，以及右键设 DWT 硬件观察点与打开内存视图，保留 Ozone 风格快捷键（`Ctrl+G` 加入 Timeline、`Ctrl+H` 加入 Live Watch 等）。
   - **Timeline（HSS / 轮询 / RTT）**：最高 1 kHz 高速采样（超出探针 HSS 带宽预算的信号自动降级为轮询），采用仿 Ozone Timeline / Data Graph 的多轨道同步示波器 UI，同时承载 HSS 与 RTT 波形、鼠标缩放/游标、拖拽分组、工作区**预设组**（`.haltd/timeline-presets.json`，一键覆盖或 `+` 追加复用）、深浅色主题、`.hlrec` 录制计时进度条、以及智能 CSV/PNG 导出（默认优先导出 Cursor `A..B` 区间、支持 Zero-Order Hold 齐次导出与录制后直出 `.hlrec -> CSV`）。
 - **RTT 终端与结构化解码**：除文本终端、正则、`rtt.yaml`、Lua 与 SystemView 外，支持按通道名自动匹配 ELF 结构体与文本 `key=value` 数值并自动加入 Timeline（可在 `launch.json` 配置）。
 - **VS Code 芯片选型辅助**：在 `launch.json` 中为 `device` 提供 J-Link 器件自动补全、内核/Flash/RAM 与内置 profile 悬停提示、未知器件警告及 `Haltd: Select Device` 命令。

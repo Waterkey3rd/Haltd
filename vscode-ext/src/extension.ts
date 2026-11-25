@@ -596,6 +596,10 @@ export function activate(context: vscode.ExtensionContext): void {
     onError: report,
   });
   const rttTerminal = new RttTerminal(client, report);
+  const liveWatchButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+  liveWatchButton.text = "$(eye) Live Watch";
+  liveWatchButton.tooltip = "Open the Haltd Live Watch panel";
+  liveWatchButton.command = "haltd.openLiveWatch";
   const timelineButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
   timelineButton.text = "$(graph-line) Timeline";
   timelineButton.tooltip = "Open the Haltd Timeline";
@@ -643,13 +647,19 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       },
       onDidSendMessage: (message: unknown) => {
-        const msg = message as { type?: string; event?: string };
+        const msg = message as { type?: string; event?: string; command?: string; success?: boolean };
         if (msg?.type === "event") {
           if (msg.event === "stopped") {
             liveWatch.setRunState("halted");
           } else if (msg.event === "continued") {
             liveWatch.setRunState("running");
           }
+        } else if (
+          msg?.type === "response" &&
+          msg.command === "configurationDone" &&
+          msg.success !== false
+        ) {
+          setTimeout(() => liveWatch.revealOnDebugStart(), 120);
         }
       },
     }),
@@ -659,6 +669,7 @@ export function activate(context: vscode.ExtensionContext): void {
     diagnostics,
     status,
     liveWatch,
+    liveWatchButton,
     timelineButton,
     rttButton,
     takeover,
@@ -685,6 +696,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.debug.onDidStartDebugSession((session) => {
       if (session.type === DEBUG_TYPE) {
         status.connected(session);
+        liveWatchButton.show();
         timelineButton.show();
         rttButton.show();
         client.start();
@@ -697,6 +709,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.debug.onDidTerminateDebugSession((session) => {
       if (session.type === DEBUG_TYPE) {
         status.hide();
+        liveWatchButton.hide();
         timelineButton.hide();
         rttButton.hide();
         takeover.dispose();
@@ -711,6 +724,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.debug.onDidReceiveDebugSessionCustomEvent((event) => {
       if (event.event === "haltd/bound" || event.event === "haltd/reloaded") {
         syncWatches();
+        if (event.event === "haltd/bound") {
+          liveWatch.revealOnDebugStart();
+        }
       } else if (event.event === "haltd/fault") {
         void showFault(event.body, diagnostics);
       } else if (event.event === "haltd/cycles") {
@@ -753,6 +769,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("haltd.addSelectionToWatch", () =>
       addFromDebugger().catch((e) => report(e, "Add Selection to Watch")),
+    ),
+    vscode.commands.registerCommand("haltd.openLiveWatch", () =>
+      liveWatch.revealPanel(false).catch((e) => report(e, "Open Live Watch")),
     ),
     vscode.commands.registerCommand("haltd.popOutLiveWatch", () =>
       liveWatch.popOut().catch((e) => report(e, "Pop Out Live Watch")),

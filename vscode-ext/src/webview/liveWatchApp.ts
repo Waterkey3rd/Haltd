@@ -21,22 +21,28 @@ declare function acquireVsCodeApi(): {
 
 const vscode = acquireVsCodeApi();
 
+const ROW_HEIGHT_PX = 24;
+const VIEWPORT_OVERSCAN_PX = 96;
+
 const COLUMN_LABELS: Record<WatchColumnKey, string> = {
-  hex: "Hex / Format",
   type: "Type",
   address: "Address",
   rate: "Rate",
 };
 
 const FORMAT_OPTIONS: Array<{ key: WatchFormat; short: string; label: string }> = [
-  { key: "default", short: "AUTO", label: "Default" },
-  { key: "dec", short: "DEC", label: "Signed Decimal" },
-  { key: "uint", short: "UINT", label: "Unsigned Decimal" },
-  { key: "hex", short: "HEX", label: "Hexadecimal" },
-  { key: "bin", short: "BIN", label: "Binary (0b)" },
-  { key: "float", short: "FLT", label: "IEEE-754 Float" },
-  { key: "char", short: "CHR", label: "ASCII Char" },
+  { key: "default", short: "auto", label: "Default" },
+  { key: "dec", short: "dec", label: "Signed Decimal" },
+  { key: "uint", short: "uint", label: "Unsigned Decimal" },
+  { key: "hex", short: "hex", label: "Hexadecimal" },
+  { key: "bin", short: "bin", label: "Binary (0b)" },
+  { key: "float", short: "flt", label: "IEEE-754 Float" },
+  { key: "char", short: "chr", label: "ASCII Char" },
 ];
+
+const FORMAT_SHORT_BY_KEY = new Map<WatchFormat, string>(
+  FORMAT_OPTIONS.map((opt) => [opt.key, opt.short]),
+);
 
 const RATE_OPTIONS = [
   { value: 0, label: "Stop" },
@@ -46,6 +52,10 @@ const RATE_OPTIONS = [
   { value: 10, label: "10 Hz" },
   { value: 20, label: "20 Hz" },
 ];
+
+// Reusable scratch buffer to avoid per-cell allocations during IEEE-754 formatting.
+const SCALAR_BUF = new ArrayBuffer(8);
+const SCALAR_VIEW = new DataView(SCALAR_BUF);
 
 function svgChevron(expanded: boolean): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -71,7 +81,10 @@ function svgPlus(): SVGSVGElement {
   svg.setAttribute("viewBox", "0 0 16 16");
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("fill", "currentColor");
-  path.setAttribute("d", "M8 2.5a.6.6 0 0 1 .6.6v4.3h4.3a.6.6 0 0 1 0 1.2H8.6v4.3a.6.6 0 0 1-1.2 0V8.6H3.1a.6.6 0 0 1 0-1.2h4.3V3.1a.6.6 0 0 1 .6-.6z");
+  path.setAttribute(
+    "d",
+    "M8 2.5a.6.6 0 0 1 .6.6v4.3h4.3a.6.6 0 0 1 0 1.2H8.6v4.3a.6.6 0 0 1-1.2 0V8.6H3.1a.6.6 0 0 1 0-1.2h4.3V3.1a.6.6 0 0 1 .6-.6z",
+  );
   svg.append(path);
   return svg;
 }
@@ -99,7 +112,10 @@ function svgMemory(): SVGSVGElement {
   svg.setAttribute("viewBox", "0 0 16 16");
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("fill", "currentColor");
-  path.setAttribute("d", "M3.5 3h9A1.5 1.5 0 0 1 14 4.5v7a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5v-7A1.5 1.5 0 0 1 3.5 3zm0 1.2a.3.3 0 0 0-.3.3v7a.3.3 0 0 0 .3.3h9a.3.3 0 0 0 .3-.3v-7a.3.3 0 0 0-.3-.3h-9zM5 6h2v1.4H5V6zm4 0h2v1.4H9V6zm-4 3h2v1.4H5V9zm4 0h2v1.4H9V9z");
+  path.setAttribute(
+    "d",
+    "M3.5 3h9A1.5 1.5 0 0 1 14 4.5v7a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5v-7A1.5 1.5 0 0 1 3.5 3zm0 1.2a.3.3 0 0 0-.3.3v7a.3.3 0 0 0 .3.3h9a.3.3 0 0 0 .3-.3v-7a.3.3 0 0 0-.3-.3h-9zM5 6h2v1.4H5V6zm4 0h2v1.4H9V6zm-4 3h2v1.4H5V9zm4 0h2v1.4H9V9z",
+  );
   svg.append(path);
   return svg;
 }
@@ -111,10 +127,87 @@ function svgCopy(): SVGSVGElement {
   svg.setAttribute("viewBox", "0 0 16 16");
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("fill", "currentColor");
-  path.setAttribute("d", "M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11H11v1.5A1.5 1.5 0 0 1 9.5 14h-6A1.5 1.5 0 0 1 2 12.5v-7A1.5 1.5 0 0 1 3.5 4H5V2.5zm1.2 1.5H9.5A1.5 1.5 0 0 1 11 5.5v4.3h1.5a.3.3 0 0 0 .3-.3v-7a.3.3 0 0 0-.3-.3h-6a.3.3 0 0 0-.3.3V4zM3.5 5.2a.3.3 0 0 0-.3.3v7a.3.3 0 0 0 .3.3h6a.3.3 0 0 0 .3-.3v-7a.3.3 0 0 0-.3-.3h-6z");
+  path.setAttribute(
+    "d",
+    "M5 2.5A1.5 1.5 0 0 1 6.5 1h6A1.5 1.5 0 0 1 14 2.5v7A1.5 1.5 0 0 1 12.5 11H11v1.5A1.5 1.5 0 0 1 9.5 14h-6A1.5 1.5 0 0 1 2 12.5v-7A1.5 1.5 0 0 1 3.5 4H5V2.5zm1.2 1.5H9.5A1.5 1.5 0 0 1 11 5.5v4.3h1.5a.3.3 0 0 0 .3-.3v-7a.3.3 0 0 0-.3-.3h-6a.3.3 0 0 0-.3.3V4zM3.5 5.2a.3.3 0 0 0-.3.3v7a.3.3 0 0 0 .3.3h6a.3.3 0 0 0 .3-.3v-7a.3.3 0 0 0-.3-.3h-6z",
+  );
   svg.append(path);
   return svg;
 }
+
+const CHEVRON_DOWN_SVG = svgChevron(true);
+const CHEVRON_RIGHT_SVG = svgChevron(false);
+
+const TOGGLE_BTN_DOWN_TPL = (() => {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "lw-toggle-btn";
+  btn.dataset.action = "toggle";
+  btn.append(CHEVRON_DOWN_SVG.cloneNode(true));
+  return btn;
+})();
+
+const TOGGLE_BTN_RIGHT_TPL = (() => {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "lw-toggle-btn";
+  btn.dataset.action = "toggle";
+  btn.append(CHEVRON_RIGHT_SVG.cloneNode(true));
+  return btn;
+})();
+
+const TOGGLE_SPACER_TPL = (() => {
+  const sp = document.createElement("span");
+  sp.className = "lw-toggle-spacer";
+  return sp;
+})();
+
+const WP_DOT_TPL = (() => {
+  const dot = document.createElement("span");
+  dot.className = "lw-wp-dot";
+  return dot;
+})();
+
+const WAVE_HOVER_TPL = (() => {
+  const wrap = document.createElement("span");
+  wrap.className = "lw-hover-actions";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "lw-mini-icon-btn";
+  btn.dataset.action = "plot";
+  btn.title = "Add to Timeline (Ctrl+G)";
+  btn.append(svgWaveform());
+  wrap.append(btn);
+  return wrap;
+})();
+
+const ADDR_HOVER_TPL = (() => {
+  const wrap = document.createElement("span");
+  wrap.className = "lw-hover-actions";
+  const mem = document.createElement("button");
+  mem.type = "button";
+  mem.className = "lw-mini-icon-btn";
+  mem.dataset.action = "memory";
+  mem.title = "View in Memory";
+  mem.append(svgMemory());
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "lw-mini-icon-btn";
+  copy.dataset.action = "copy-addr";
+  copy.title = "Copy address";
+  copy.append(svgCopy());
+  wrap.append(mem, copy);
+  return wrap;
+})();
+
+const RATE_SELECT_TPL = (() => {
+  const sel = document.createElement("select");
+  sel.className = "lw-rate-select";
+  for (const opt of RATE_OPTIONS) {
+    sel.append(new Option(opt.label, String(opt.value)));
+  }
+  return sel;
+})();
 
 function parseBitWidth(row: WatchRowNode): number {
   if (row.bitRange) {
@@ -171,17 +264,13 @@ function formatScalarValue(row: WatchRowNode): string {
       return groupBinary(uval.toString(2).padStart(bits, "0"));
     case "float": {
       if (bits <= 32) {
-        const buf = new ArrayBuffer(4);
-        const view = new DataView(buf);
-        view.setUint32(0, Number(uval & 0xffff_ffffn), true);
-        const f = view.getFloat32(0, true);
+        SCALAR_VIEW.setUint32(0, Number(uval & 0xffff_ffffn), true);
+        const f = SCALAR_VIEW.getFloat32(0, true);
         return Number.isFinite(f) ? String(Number(f.toPrecision(7))) : String(f);
       }
-      const buf = new ArrayBuffer(8);
-      const view = new DataView(buf);
-      view.setBigUint64(0, uval, true);
-      const d = view.getFloat64(0, true);
-      return Number.isFinite(d) ? String(d) : String(d);
+      SCALAR_VIEW.setBigUint64(0, uval, true);
+      const d = SCALAR_VIEW.getFloat64(0, true);
+      return String(d);
     }
     case "char": {
       const byteCount = Math.max(1, Math.min(8, Math.ceil(bits / 8)));
@@ -212,7 +301,9 @@ function formatTooltip(row: WatchRowNode): string {
       row.lastChangedAtMs !== null
         ? ` (${((Date.now() - row.lastChangedAtMs) / 1000).toFixed(1)}s ago)`
         : "";
-    lines.push(`Prev: ${row.prevValue}${row.prevRawHex ? ` (${row.prevRawHex})` : ""} -> Now: ${row.value}${ago}`);
+    lines.push(
+      `Prev: ${row.prevValue}${row.prevRawHex ? ` (${row.prevRawHex})` : ""} -> Now: ${row.value}${ago}`,
+    );
   }
   if (row.error) lines.push(`Error: ${row.error}`);
   return lines.join("\n");
@@ -220,13 +311,36 @@ function formatTooltip(row: WatchRowNode): string {
 
 interface RowDom {
   el: HTMLElement;
+  nameCell: HTMLElement;
+  toggleSlot: HTMLElement;
+  wpDot: HTMLElement | null;
+  nameSpan: HTMLElement;
+  waveActs: HTMLElement | null;
   valCell: HTMLElement;
   valText: HTMLElement;
-  hexText: HTMLElement | null;
-  addrText: HTMLElement | null;
+  fmtBtn: HTMLButtonElement;
+  typeSpan: HTMLElement | null;
+  addrCell: HTMLElement | null;
+  addrSpan: HTMLElement | null;
+  addrHover: HTMLElement | null;
   rateSelect: HTMLSelectElement | null;
-  fmtBtn: HTMLButtonElement | null;
   toggleAlt: boolean;
+  lastDepth: number;
+  lastParentIsNull: boolean;
+  lastExpandable: boolean;
+  lastExpanded: boolean;
+  lastWatchpoint: WatchpointAccess | null;
+  lastName: string;
+  lastPlottable: boolean;
+  lastWritable: boolean;
+  lastError: string | null;
+  lastText: string;
+  lastHasRaw: boolean;
+  lastFmt: WatchFormat;
+  lastTypeText: string;
+  lastAddr: string | null;
+  lastAddrText: string;
+  lastRate: number;
 }
 
 class LiveWatchApp {
@@ -240,6 +354,8 @@ class LiveWatchApp {
 
   private selectedIds = new Set<number>();
   private focusedId: number | null = null;
+  private renderedSelectedIds = new Set<number>();
+  private renderedFocusedId: number | null = null;
   private filterText = "";
   private filterVisible = false;
   private editing: { id: number; field: "value" | "expr" } | null = null;
@@ -251,9 +367,24 @@ class LiveWatchApp {
   private errorMessage: string | null = null;
   private errorTimer: number | undefined;
   private dragRootId: number | null = null;
+  private dragOverRowEl: HTMLElement | null = null;
 
   private readonly rowDoms = new Map<number, RowDom>();
+  private renderedColumnsKey = "";
+  private visibleOrder: WatchRowNode[] = [];
+  private readonly visibleIndexById = new Map<number, number>();
   private contextMenu: HTMLElement | null = null;
+
+  private rafPending = false;
+  private statusDirty = false;
+  private gridColsDirty = false;
+  private bodyDirty = false;
+  private freshnessAllDirty = false;
+  private pendingRevealId: number | null = null;
+  private readonly dirtyRowIds = new Set<number>();
+  private readonly freshRowIds = new Set<number>();
+  private lastBannerKey = "";
+  private lastStale = false;
 
   private statusBanner!: HTMLElement;
   private filterBar!: HTMLElement;
@@ -284,7 +415,8 @@ class LiveWatchApp {
     this.filterInput.placeholder = "Filter expressions or types (Esc to close)…";
     this.filterInput.addEventListener("input", () => {
       this.filterText = this.filterInput.value;
-      this.renderBody();
+      this.bodyDirty = true;
+      this.scheduleRender();
     });
     this.filterInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
@@ -293,7 +425,8 @@ class LiveWatchApp {
         this.filterInput.value = "";
         this.filterVisible = false;
         this.filterBar.hidden = true;
-        this.renderBody();
+        this.bodyDirty = true;
+        this.scheduleRender();
         this.tableWrap.focus();
       }
     });
@@ -332,8 +465,191 @@ class LiveWatchApp {
     root.append(this.statusBanner, this.filterBar, this.tableWrap, this.compPopup);
 
     this.wireAddInput();
+    this.wireBodyDelegation();
     this.applyGridColumns();
     this.renderHeader();
+  }
+
+  private rowFromTarget(target: EventTarget | null): { rowEl: HTMLElement; row: WatchRowNode } | null {
+    if (!(target instanceof Element)) return null;
+    const rowEl = target.closest<HTMLElement>(".lw-row");
+    const rawId = rowEl?.dataset.id;
+    if (!rowEl || !rawId) return null;
+    const row = this.byId.get(Number(rawId));
+    return row ? { rowEl, row } : null;
+  }
+
+  private wireBodyDelegation(): void {
+    this.bodyEl.addEventListener("click", (e) => {
+      const target = e.target as Element | null;
+      if (target?.closest(".lw-rate-select, .lw-inline-input")) {
+        return;
+      }
+      const hit = this.rowFromTarget(target);
+      if (!hit) return;
+      const { row } = hit;
+
+      const actEl = target?.closest<HTMLElement>("[data-action]");
+      if (actEl) {
+        e.stopPropagation();
+        switch (actEl.dataset.action) {
+          case "toggle":
+            vscode.postMessage({ type: row.expanded ? "collapse" : "expand", id: row.id });
+            break;
+          case "plot":
+            vscode.postMessage({ type: "addToTimeline", exprs: [row.expr] });
+            break;
+          case "format": {
+            const idx = FORMAT_OPTIONS.findIndex((f) => f.key === row.format);
+            const next = FORMAT_OPTIONS[(idx + 1) % FORMAT_OPTIONS.length].key;
+            vscode.postMessage({ type: "setFormat", id: row.id, format: next });
+            break;
+          }
+          case "memory":
+            if (row.address) {
+              vscode.postMessage({ type: "viewMemory", address: row.address, name: row.expr });
+            }
+            break;
+          case "copy-addr":
+            if (row.address) {
+              vscode.postMessage({ type: "copy", text: row.address });
+            }
+            break;
+        }
+        return;
+      }
+
+      this.tableWrap.focus();
+      if (e.ctrlKey || e.metaKey) {
+        if (this.selectedIds.has(row.id)) this.selectedIds.delete(row.id);
+        else this.selectedIds.add(row.id);
+      } else {
+        this.selectedIds = new Set([row.id]);
+      }
+      this.focusedId = row.id;
+      this.updateSelectionStyles();
+    });
+
+    this.bodyEl.addEventListener("dblclick", (e) => {
+      const target = e.target as Element | null;
+      if (target?.closest(".lw-fmt-tag, [data-action], .lw-rate-select, .lw-inline-input")) {
+        return;
+      }
+      const hit = this.rowFromTarget(target);
+      if (!hit) return;
+      const { row } = hit;
+
+      if (target?.closest(".lw-cell-value")) {
+        if (row.writable) {
+          e.stopPropagation();
+          this.startInlineEdit(row.id, "value");
+        }
+        return;
+      }
+      if (target?.closest(".lw-cell-name") && row.parent === null) {
+        e.stopPropagation();
+        this.startInlineEdit(row.id, "expr");
+      }
+    });
+
+    this.bodyEl.addEventListener("contextmenu", (e) => {
+      const hit = this.rowFromTarget(e.target);
+      if (!hit) return;
+      e.preventDefault();
+      const { row } = hit;
+      if (!this.selectedIds.has(row.id)) {
+        this.selectedIds = new Set([row.id]);
+        this.focusedId = row.id;
+        this.updateSelectionStyles();
+      }
+      this.showRowContextMenu(row, e.clientX, e.clientY);
+    });
+
+    this.bodyEl.addEventListener("change", (e) => {
+      const target = e.target;
+      if (!(target instanceof HTMLSelectElement) || !target.classList.contains("lw-rate-select")) {
+        return;
+      }
+      const hit = this.rowFromTarget(target);
+      if (!hit) return;
+      const hz = Number(target.value);
+      vscode.postMessage({ type: "setRate", ids: [hit.row.id], rateHz: hz });
+    });
+
+    this.bodyEl.addEventListener("mouseover", (e) => {
+      const target = e.target as Element | null;
+      const cell = target?.closest<HTMLElement>(".lw-cell-name, .lw-cell-value");
+      if (!cell) return;
+      const hit = this.rowFromTarget(cell);
+      if (!hit) return;
+      const tip = formatTooltip(hit.row);
+      if (cell.title !== tip) {
+        cell.title = tip;
+      }
+    });
+
+    this.bodyEl.addEventListener("dragstart", (e) => {
+      const hit = this.rowFromTarget(e.target);
+      if (!hit || hit.row.parent !== null) {
+        e.preventDefault();
+        return;
+      }
+      this.dragRootId = hit.row.id;
+      e.dataTransfer?.setData("text/plain", String(hit.row.id));
+    });
+
+    this.bodyEl.addEventListener("dragover", (e) => {
+      const hit = this.rowFromTarget(e.target);
+      if (!hit || hit.row.parent !== null || this.dragRootId === null || this.dragRootId === hit.row.id) {
+        return;
+      }
+      e.preventDefault();
+      if (this.dragOverRowEl && this.dragOverRowEl !== hit.rowEl) {
+        this.dragOverRowEl.classList.remove("is-drop-above");
+      }
+      this.dragOverRowEl = hit.rowEl;
+      hit.rowEl.classList.add("is-drop-above");
+    });
+
+    this.bodyEl.addEventListener("dragleave", (e) => {
+      if (!this.dragOverRowEl) return;
+      const hit = this.rowFromTarget(e.target);
+      if (hit && hit.rowEl === this.dragOverRowEl && !hit.rowEl.contains(e.relatedTarget as Node | null)) {
+        hit.rowEl.classList.remove("is-drop-above");
+        this.dragOverRowEl = null;
+      }
+    });
+
+    this.bodyEl.addEventListener("drop", (e) => {
+      if (this.dragOverRowEl) {
+        this.dragOverRowEl.classList.remove("is-drop-above");
+        this.dragOverRowEl = null;
+      }
+      const hit = this.rowFromTarget(e.target);
+      if (!hit || hit.row.parent !== null || this.dragRootId === null || this.dragRootId === hit.row.id) {
+        this.dragRootId = null;
+        return;
+      }
+      e.preventDefault();
+      const targetId = hit.row.id;
+      const fromId = this.dragRootId;
+      this.dragRootId = null;
+      const roots = this.rows.filter((r) => r.parent === null).map((r) => r.id);
+      const fromIdx = roots.indexOf(fromId);
+      const toIdx = roots.indexOf(targetId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const [moved] = roots.splice(fromIdx, 1);
+      roots.splice(toIdx, 0, moved);
+      vscode.postMessage({ type: "reorder", rootIds: roots });
+    });
+
+    this.bodyEl.addEventListener("dragend", () => {
+      this.dragRootId = null;
+      if (this.dragOverRowEl) {
+        this.dragOverRowEl.classList.remove("is-drop-above");
+        this.dragOverRowEl = null;
+      }
+    });
   }
 
   private wireAddInput(): void {
@@ -376,7 +692,11 @@ class LiveWatchApp {
       }
       if (e.key === "Enter") {
         e.preventDefault();
-        if (!this.compPopup.hidden && this.compActiveIndex >= 0 && this.completions[this.compActiveIndex]) {
+        if (
+          !this.compPopup.hidden &&
+          this.compActiveIndex >= 0 &&
+          this.completions[this.compActiveIndex]
+        ) {
           this.addInput.value = this.completions[this.compActiveIndex].name;
           this.hideCompletions();
           return;
@@ -425,7 +745,10 @@ class LiveWatchApp {
 
   private onTableKeyDown(e: KeyboardEvent): void {
     const target = e.target as HTMLElement | null;
-    if (target && (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA")) {
+    if (
+      target &&
+      (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA")
+    ) {
       return;
     }
     if (this.editing) {
@@ -433,8 +756,9 @@ class LiveWatchApp {
     }
 
     const mod = e.ctrlKey || e.metaKey;
-    const visibleRows = this.filteredRows();
-    const curIdx = this.focusedId !== null ? visibleRows.findIndex((r) => r.id === this.focusedId) : -1;
+    const visibleRows = this.bodyDirty ? this.filteredRows() : this.visibleOrder;
+    const curIdx =
+      this.focusedId !== null ? visibleRows.findIndex((r) => r.id === this.focusedId) : -1;
     const focused = curIdx >= 0 ? visibleRows[curIdx] : undefined;
 
     if (mod && e.key.toLowerCase() === "f") {
@@ -456,7 +780,8 @@ class LiveWatchApp {
       if (visibleRows.length === 0) return;
       e.preventDefault();
       const delta = e.key === "ArrowDown" ? 1 : -1;
-      const nextIdx = curIdx < 0 ? 0 : Math.max(0, Math.min(visibleRows.length - 1, curIdx + delta));
+      const nextIdx =
+        curIdx < 0 ? 0 : Math.max(0, Math.min(visibleRows.length - 1, curIdx + delta));
       const nextRow = visibleRows[nextIdx];
       if (!e.shiftKey) {
         this.selectedIds.clear();
@@ -537,9 +862,79 @@ class LiveWatchApp {
     }
   }
 
+  private scheduleRender(): void {
+    if (this.rafPending) {
+      return;
+    }
+    this.rafPending = true;
+    requestAnimationFrame(() => this.flushRender());
+  }
+
+  private flushRender(): void {
+    this.rafPending = false;
+
+    if (this.gridColsDirty) {
+      this.gridColsDirty = false;
+      this.applyGridColumns();
+    }
+    if (this.statusDirty) {
+      this.statusDirty = false;
+      this.renderStatusBanner();
+    }
+
+    const needViewport = this.bodyDirty || this.dirtyRowIds.size > 0 || this.freshnessAllDirty;
+    const scrollTop = needViewport ? this.tableWrap.scrollTop : 0;
+    const viewHeight = needViewport ? this.tableWrap.clientHeight : 0;
+
+    if (this.bodyDirty) {
+      this.bodyDirty = false;
+      this.dirtyRowIds.clear();
+      this.reconcileBody(scrollTop, viewHeight);
+      this.freshRowIds.clear();
+      this.freshnessAllDirty = false;
+    } else {
+      if (this.dirtyRowIds.size > 0) {
+        for (const id of this.dirtyRowIds) {
+          const row = this.byId.get(id);
+          const dom = this.rowDoms.get(id);
+          if (row && dom) {
+            const triggerFresh = this.freshRowIds.has(id);
+            const near = this.isRowNearViewport(id, scrollTop, viewHeight);
+            this.updateRowDom(row, dom, triggerFresh, near);
+          }
+        }
+        this.dirtyRowIds.clear();
+        this.freshRowIds.clear();
+      }
+      if (this.freshnessAllDirty) {
+        this.freshnessAllDirty = false;
+        for (const row of this.visibleOrder) {
+          const dom = this.rowDoms.get(row.id);
+          if (dom) {
+            const near = this.isRowNearViewport(row.id, scrollTop, viewHeight);
+            this.updateRowFreshness(row, dom, near);
+          }
+        }
+      }
+    }
+
+    if (this.pendingRevealId !== null) {
+      const revealId = this.pendingRevealId;
+      this.pendingRevealId = null;
+      const dom = this.rowDoms.get(revealId);
+      if (dom) {
+        dom.el.scrollIntoView({ block: "nearest" });
+        dom.el.classList.remove("is-reveal-flash");
+        void dom.el.offsetWidth;
+        dom.el.classList.add("is-reveal-flash");
+      }
+    }
+  }
+
   private onHostMessage(msg: HostToWebviewMessage): void {
     switch (msg.type) {
-      case "snapshot":
+      case "snapshot": {
+        const colsChanged = msg.columns.join(",") !== this.columns.join(",");
         this.rows = msg.rows;
         this.byId = new Map(msg.rows.map((r) => [r.id, r]));
         this.columns = msg.columns;
@@ -548,54 +943,90 @@ class LiveWatchApp {
         this.runState = msg.runState;
         this.connected = msg.connected;
         this.applyFreshnessVar();
-        this.applyGridColumns();
-        this.renderHeader();
-        this.renderStatusBanner();
-        this.renderBody();
+        if (colsChanged) {
+          this.renderHeader();
+        }
+        this.gridColsDirty = true;
+        this.statusDirty = true;
+        this.bodyDirty = true;
+        this.scheduleRender();
         break;
+      }
       case "patch":
         this.runState = msg.runState;
         this.connected = msg.connected;
-        this.renderStatusBanner();
-        for (const updated of msg.updates) {
-          const idx = this.rows.findIndex((r) => r.id === updated.id);
-          if (idx >= 0) {
-            this.rows[idx] = updated;
+        this.statusDirty = true;
+        for (const u of msg.updates) {
+          const row = this.byId.get(u.id);
+          if (!row) continue;
+          const valueChanged =
+            row.value !== u.value || row.rawHex !== u.rawHex || row.error !== u.error;
+          row.value = u.value;
+          row.rawHex = u.rawHex;
+          row.address = u.address;
+          row.error = u.error;
+          row.prevValue = u.prevValue;
+          row.prevRawHex = u.prevRawHex;
+          row.lastChangedAtMs = u.lastChangedAtMs;
+          row.elapsedMs = u.elapsedMs;
+          row.changedOnStop = u.changedOnStop;
+          this.dirtyRowIds.add(u.id);
+          if (valueChanged || u.changedOnStop) {
+            this.freshRowIds.add(u.id);
           }
-          this.byId.set(updated.id, updated);
-          this.updateRowDom(updated);
         }
+        this.scheduleRender();
+        break;
+      case "metaPatch":
+        this.runState = msg.runState;
+        this.connected = msg.connected;
+        this.statusDirty = true;
+        for (const updated of msg.rows) {
+          const existing = this.byId.get(updated.id);
+          if (existing) {
+            Object.assign(existing, updated);
+            this.dirtyRowIds.add(updated.id);
+            if (updated.changedOnStop) {
+              this.freshRowIds.add(updated.id);
+            }
+          }
+        }
+        this.scheduleRender();
         break;
       case "state":
         this.runState = msg.runState;
         this.connected = msg.connected;
         this.freshnessMs = msg.freshnessMs;
-        this.applyFreshnessVar();
-        this.renderStatusBanner();
-        for (const row of this.rows) {
-          this.updateRowFreshness(row, this.rowDoms.get(row.id));
+        if (msg.runState === "running") {
+          for (const row of this.rows) {
+            row.changedOnStop = false;
+          }
         }
+        this.applyFreshnessVar();
+        this.statusDirty = true;
+        this.freshnessAllDirty = true;
+        this.scheduleRender();
         break;
       case "columns":
         this.columns = msg.columns;
         this.widths = msg.widths;
-        this.applyGridColumns();
         this.renderHeader();
-        this.renderBody();
+        this.gridColsDirty = true;
+        this.bodyDirty = true;
+        this.scheduleRender();
         break;
-      case "revealRow": {
+      case "columnWidths":
+        this.widths = msg.widths;
+        this.gridColsDirty = true;
+        this.scheduleRender();
+        break;
+      case "revealRow":
         this.selectedIds = new Set([msg.id]);
         this.focusedId = msg.id;
         this.updateSelectionStyles();
-        const dom = this.rowDoms.get(msg.id);
-        if (dom) {
-          dom.el.scrollIntoView({ block: "nearest" });
-          dom.el.classList.remove("is-reveal-flash");
-          void dom.el.offsetWidth;
-          dom.el.classList.add("is-reveal-flash");
-        }
+        this.pendingRevealId = msg.id;
+        this.scheduleRender();
         break;
-      }
       case "focusAddInput":
         this.addInput.focus();
         this.addInput.select();
@@ -609,13 +1040,15 @@ class LiveWatchApp {
         break;
       case "actionError":
         this.errorMessage = msg.message;
-        this.renderStatusBanner();
+        this.statusDirty = true;
+        this.scheduleRender();
         if (this.errorTimer !== undefined) {
           window.clearTimeout(this.errorTimer);
         }
         this.errorTimer = window.setTimeout(() => {
           this.errorMessage = null;
-          this.renderStatusBanner();
+          this.statusDirty = true;
+          this.scheduleRender();
         }, 4000);
         break;
     }
@@ -644,18 +1077,31 @@ class LiveWatchApp {
   }
 
   private renderStatusBanner(): void {
+    const mode = this.errorMessage
+      ? `err:${this.errorMessage}`
+      : !this.connected
+        ? "disc"
+        : "ok";
+    if (this.lastStale !== !this.connected) {
+      this.lastStale = !this.connected;
+      this.bodyEl.classList.toggle("is-stale", this.lastStale);
+    }
+    if (mode === this.lastBannerKey) {
+      return;
+    }
+    this.lastBannerKey = mode;
+
     if (this.errorMessage) {
       this.statusBanner.hidden = false;
       this.statusBanner.className = "lw-status-banner is-error";
       this.statusBanner.textContent = this.errorMessage;
-      this.bodyEl.classList.toggle("is-stale", !this.connected);
       return;
     }
     this.statusBanner.className = "lw-status-banner";
-    this.bodyEl.classList.toggle("is-stale", !this.connected);
     if (!this.connected) {
       this.statusBanner.hidden = false;
-      this.statusBanner.textContent = "Disconnected · Showing cached watch list (start debugging to stream live values)";
+      this.statusBanner.textContent =
+        "Disconnected · Showing cached watch list (start debugging to stream live values)";
     } else {
       this.statusBanner.hidden = true;
       this.statusBanner.textContent = "";
@@ -667,7 +1113,6 @@ class LiveWatchApp {
     const labels: Record<"name" | "value" | WatchColumnKey, string> = {
       name: "Expression",
       value: "Value",
-      hex: "Hex / Format",
       type: "Type",
       address: "Address",
       rate: "Rate",
@@ -695,7 +1140,8 @@ class LiveWatchApp {
         const onMove = (me: MouseEvent) => {
           const nextW = Math.max(54, Math.min(520, Math.round(startW + (me.clientX - startX))));
           this.widths[col] = nextW;
-          this.applyGridColumns();
+          this.gridColsDirty = true;
+          this.scheduleRender();
         };
         const onUp = () => {
           resizer.classList.remove("is-dragging");
@@ -718,14 +1164,26 @@ class LiveWatchApp {
     if (!needle) {
       return this.rows;
     }
-    const matchingRoots = new Set<number>();
+    const rootCache = new Map<number, number>();
     const rootOf = (row: WatchRowNode): number => {
+      const cached = rootCache.get(row.id);
+      if (cached !== undefined) {
+        return cached;
+      }
       let cur: WatchRowNode | undefined = row;
       while (cur && cur.parent !== null) {
+        const parentCached = rootCache.get(cur.parent);
+        if (parentCached !== undefined) {
+          rootCache.set(row.id, parentCached);
+          return parentCached;
+        }
         cur = this.byId.get(cur.parent);
       }
-      return cur?.id ?? row.id;
+      const rootId = cur?.id ?? row.id;
+      rootCache.set(row.id, rootId);
+      return rootId;
     };
+    const matchingRoots = new Set<number>();
     for (const row of this.rows) {
       const hay = `${row.name} ${row.expr} ${row.type} ${row.value}`.toLowerCase();
       if (hay.includes(needle)) {
@@ -735,132 +1193,107 @@ class LiveWatchApp {
     return this.rows.filter((r) => matchingRoots.has(rootOf(r)));
   }
 
-  private renderBody(): void {
-    this.rowDoms.clear();
-    const visible = this.filteredRows();
-    const elements: HTMLElement[] = [];
-    for (const row of visible) {
-      const dom = this.createRowDom(row);
-      this.rowDoms.set(row.id, dom);
-      elements.push(dom.el);
+  private isRowNearViewport(id: number, scrollTop: number, viewHeight: number): boolean {
+    if (viewHeight <= 0) {
+      return true;
     }
-    this.bodyEl.replaceChildren(...elements);
+    const idx = this.visibleIndexById.get(id);
+    if (idx === undefined) {
+      return false;
+    }
+    const rowTop = idx * ROW_HEIGHT_PX;
+    return (
+      rowTop + ROW_HEIGHT_PX >= scrollTop - VIEWPORT_OVERSCAN_PX &&
+      rowTop <= scrollTop + viewHeight + VIEWPORT_OVERSCAN_PX
+    );
+  }
+
+  private reconcileBody(scrollTop: number, viewHeight: number): void {
+    const colsKey = this.columns.join(",");
+    if (this.renderedColumnsKey !== colsKey) {
+      this.renderedColumnsKey = colsKey;
+      this.rowDoms.clear();
+      this.renderedSelectedIds.clear();
+      this.renderedFocusedId = null;
+      this.bodyEl.replaceChildren();
+    }
+
+    const visible = this.filteredRows();
+    this.visibleOrder = visible;
+    this.visibleIndexById.clear();
+    for (let i = 0; i < visible.length; i++) {
+      this.visibleIndexById.set(visible[i].id, i);
+    }
+
+    for (const [id, dom] of this.rowDoms.entries()) {
+      if (!this.visibleIndexById.has(id)) {
+        dom.el.remove();
+        this.rowDoms.delete(id);
+        this.renderedSelectedIds.delete(id);
+        if (this.renderedFocusedId === id) {
+          this.renderedFocusedId = null;
+        }
+      }
+    }
+
+    for (let i = 0; i < visible.length; i++) {
+      const row = visible[i];
+      const near = this.isRowNearViewport(row.id, scrollTop, viewHeight);
+      let dom = this.rowDoms.get(row.id);
+      if (!dom) {
+        dom = this.createRowDom(row, near);
+        this.rowDoms.set(row.id, dom);
+      } else {
+        const triggerFresh = this.freshRowIds.has(row.id) || this.freshnessAllDirty;
+        this.updateRowDom(row, dom, triggerFresh, near, true);
+      }
+      if (this.bodyEl.children[i] !== dom.el) {
+        this.bodyEl.insertBefore(dom.el, this.bodyEl.children[i] ?? null);
+      }
+    }
+
     this.updateSelectionStyles();
   }
 
-  private createRowDom(row: WatchRowNode): RowDom {
+  private createRowDom(row: WatchRowNode, nearViewport: boolean): RowDom {
     const el = document.createElement("div");
     el.className = "lw-row";
     el.dataset.id = String(row.id);
-
-    if (row.parent === null) {
+    const parentIsNull = row.parent === null;
+    if (parentIsNull) {
       el.draggable = true;
-      el.addEventListener("dragstart", (e) => {
-        this.dragRootId = row.id;
-        e.dataTransfer?.setData("text/plain", String(row.id));
-      });
-      el.addEventListener("dragover", (e) => {
-        if (this.dragRootId !== null && this.dragRootId !== row.id) {
-          e.preventDefault();
-          el.classList.add("is-drop-above");
-        }
-      });
-      el.addEventListener("dragleave", () => el.classList.remove("is-drop-above"));
-      el.addEventListener("drop", (e) => {
-        e.preventDefault();
-        el.classList.remove("is-drop-above");
-        if (this.dragRootId === null || this.dragRootId === row.id) return;
-        const roots = this.rows.filter((r) => r.parent === null).map((r) => r.id);
-        const fromIdx = roots.indexOf(this.dragRootId);
-        const toIdx = roots.indexOf(row.id);
-        this.dragRootId = null;
-        if (fromIdx < 0 || toIdx < 0) return;
-        const [moved] = roots.splice(fromIdx, 1);
-        roots.splice(toIdx, 0, moved);
-        vscode.postMessage({ type: "reorder", rootIds: roots });
-      });
-      el.addEventListener("dragend", () => {
-        this.dragRootId = null;
-      });
     }
-
-    el.addEventListener("click", (e) => {
-      this.tableWrap.focus();
-      if (e.ctrlKey || e.metaKey) {
-        if (this.selectedIds.has(row.id)) this.selectedIds.delete(row.id);
-        else this.selectedIds.add(row.id);
-      } else {
-        this.selectedIds = new Set([row.id]);
-      }
-      this.focusedId = row.id;
-      this.updateSelectionStyles();
-    });
-
-    el.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      if (!this.selectedIds.has(row.id)) {
-        this.selectedIds = new Set([row.id]);
-        this.focusedId = row.id;
-        this.updateSelectionStyles();
-      }
-      this.showRowContextMenu(row, e.clientX, e.clientY);
-    });
 
     // 1. Expression cell
     const nameCell = document.createElement("div");
     nameCell.className = "lw-cell lw-cell-name";
     nameCell.style.paddingLeft = `${7 + row.depth * 14}px`;
 
-    if (row.expandable) {
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "lw-toggle-btn";
-      toggle.append(svgChevron(row.expanded));
-      toggle.addEventListener("click", (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: row.expanded ? "collapse" : "expand", id: row.id });
-      });
-      nameCell.append(toggle);
-    } else {
-      const sp = document.createElement("span");
-      sp.className = "lw-toggle-spacer";
-      nameCell.append(sp);
-    }
+    const toggleSlot = (
+      row.expandable
+        ? row.expanded
+          ? TOGGLE_BTN_DOWN_TPL
+          : TOGGLE_BTN_RIGHT_TPL
+        : TOGGLE_SPACER_TPL
+    ).cloneNode(true) as HTMLElement;
+    nameCell.append(toggleSlot);
 
+    let wpDot: HTMLElement | null = null;
     if (row.watchpoint) {
-      const wp = document.createElement("span");
-      wp.className = "lw-wp-dot";
-      wp.title = `Hardware data breakpoint (${row.watchpoint})`;
-      nameCell.append(wp);
+      wpDot = WP_DOT_TPL.cloneNode(true) as HTMLElement;
+      wpDot.title = `Hardware data breakpoint (${row.watchpoint})`;
+      nameCell.append(wpDot);
     }
 
     const nameSpan = document.createElement("span");
     nameSpan.className = "lw-text-trunc lw-mono";
     nameSpan.textContent = row.name;
-    nameSpan.title = formatTooltip(row);
     nameCell.append(nameSpan);
 
+    let waveActs: HTMLElement | null = null;
     if (row.plottable) {
-      const hoverActs = document.createElement("span");
-      hoverActs.className = "lw-hover-actions";
-      const waveBtn = document.createElement("button");
-      waveBtn.type = "button";
-      waveBtn.className = "lw-mini-icon-btn";
-      waveBtn.title = "Add to Timeline (Ctrl+G)";
-      waveBtn.append(svgWaveform());
-      waveBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: "addToTimeline", exprs: [row.expr] });
-      });
-      hoverActs.append(waveBtn);
-      nameCell.append(hoverActs);
-    }
-
-    if (row.parent === null) {
-      nameCell.addEventListener("dblclick", (e) => {
-        e.stopPropagation();
-        this.startInlineEdit(row.id, "expr");
-      });
+      waveActs = WAVE_HOVER_TPL.cloneNode(true) as HTMLElement;
+      nameCell.append(waveActs);
     }
 
     // 2. Value cell
@@ -870,175 +1303,295 @@ class LiveWatchApp {
     if (row.error) valCell.classList.add("is-error");
 
     const valText = document.createElement("span");
-    valText.className = "lw-text-trunc lw-mono lw-val-text";
-    valText.textContent = formatScalarValue(row);
-    valCell.title = formatTooltip(row);
-    valCell.append(valText);
+    valText.className = "lw-mono lw-val-text";
+    const formattedText = formatScalarValue(row);
+    valText.textContent = formattedText;
 
-    if (row.writable) {
-      valCell.addEventListener("dblclick", (e) => {
-        e.stopPropagation();
-        this.startInlineEdit(row.id, "value");
-      });
-    }
+    const fmtBtn = document.createElement("button");
+    fmtBtn.type = "button";
+    fmtBtn.className = "lw-fmt-tag";
+    fmtBtn.dataset.action = "format";
+    fmtBtn.textContent = FORMAT_SHORT_BY_KEY.get(row.format) ?? "auto";
+    fmtBtn.hidden = !row.rawHex;
+    fmtBtn.title = "Click to cycle display format (or right-click row)";
 
+    valCell.append(valText, fmtBtn);
     el.append(nameCell, valCell);
 
-    let hexText: HTMLElement | null = null;
-    let fmtBtn: HTMLButtonElement | null = null;
-    let addrText: HTMLElement | null = null;
+    let typeSpan: HTMLElement | null = null;
+    let addrCell: HTMLElement | null = null;
+    let addrSpan: HTMLElement | null = null;
+    let addrHover: HTMLElement | null = null;
     let rateSelect: HTMLSelectElement | null = null;
 
+    const typeText = row.type ? `${row.type}${row.bitRange ? ` ${row.bitRange}` : ""}` : "—";
+    const addrText = row.address ? `${row.address}${row.bitRange ?? ""}` : "—";
+
     for (const col of this.columns) {
-      if (col === "hex") {
-        const cell = document.createElement("div");
-        cell.className = "lw-cell lw-cell-hex";
-        hexText = document.createElement("span");
-        hexText.className = "lw-text-trunc lw-mono";
-        hexText.textContent = row.rawHex ?? "—";
-        hexText.title = row.rawHex ?? "No scalar hex representation";
-        cell.append(hexText);
-        if (row.rawHex) {
-          const fmtOpt = FORMAT_OPTIONS.find((f) => f.key === row.format) ?? FORMAT_OPTIONS[0];
-          fmtBtn = document.createElement("button");
-          fmtBtn.type = "button";
-          fmtBtn.className = "lw-fmt-pill";
-          fmtBtn.textContent = fmtOpt.short;
-          fmtBtn.title = "Cycle display format (or right-click row)";
-          fmtBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            const idx = FORMAT_OPTIONS.findIndex((f) => f.key === (this.byId.get(row.id)?.format ?? "default"));
-            const next = FORMAT_OPTIONS[(idx + 1) % FORMAT_OPTIONS.length].key;
-            vscode.postMessage({ type: "setFormat", id: row.id, format: next });
-          });
-          cell.append(fmtBtn);
-        }
-        el.append(cell);
-      } else if (col === "type") {
+      if (col === "type") {
         const cell = document.createElement("div");
         cell.className = "lw-cell lw-cell-type";
-        const span = document.createElement("span");
-        span.className = "lw-text-trunc lw-mono";
-        span.textContent = row.type ? `${row.type}${row.bitRange ? ` ${row.bitRange}` : ""}` : "—";
-        span.title = span.textContent;
-        cell.append(span);
+        typeSpan = document.createElement("span");
+        typeSpan.className = "lw-text-trunc lw-mono";
+        typeSpan.textContent = typeText;
+        typeSpan.title = typeText;
+        cell.append(typeSpan);
         el.append(cell);
       } else if (col === "address") {
-        const cell = document.createElement("div");
-        cell.className = "lw-cell lw-cell-addr";
-        addrText = document.createElement("span");
-        addrText.className = "lw-text-trunc lw-mono";
-        addrText.textContent = row.address ? `${row.address}${row.bitRange ?? ""}` : "—";
-        addrText.title = addrText.textContent;
-        cell.append(addrText);
+        addrCell = document.createElement("div");
+        addrCell.className = "lw-cell lw-cell-addr";
+        addrSpan = document.createElement("span");
+        addrSpan.className = "lw-text-trunc lw-mono";
+        addrSpan.textContent = addrText;
+        addrSpan.title = addrText;
+        addrCell.append(addrSpan);
         if (row.address) {
-          const addrVal = row.address;
-          const hover = document.createElement("span");
-          hover.className = "lw-hover-actions";
-          const memBtn = document.createElement("button");
-          memBtn.type = "button";
-          memBtn.className = "lw-mini-icon-btn";
-          memBtn.title = "View in Memory";
-          memBtn.append(svgMemory());
-          memBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            vscode.postMessage({ type: "viewMemory", address: addrVal, name: row.expr });
-          });
-          const copyBtn = document.createElement("button");
-          copyBtn.type = "button";
-          copyBtn.className = "lw-mini-icon-btn";
-          copyBtn.title = "Copy address";
-          copyBtn.append(svgCopy());
-          copyBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            vscode.postMessage({ type: "copy", text: addrVal });
-          });
-          hover.append(memBtn, copyBtn);
-          cell.append(hover);
+          addrHover = ADDR_HOVER_TPL.cloneNode(true) as HTMLElement;
+          addrCell.append(addrHover);
         }
-        el.append(cell);
+        el.append(addrCell);
       } else if (col === "rate") {
         const cell = document.createElement("div");
         cell.className = "lw-cell lw-cell-rate";
-        rateSelect = document.createElement("select");
-        rateSelect.className = "lw-rate-select";
-        for (const opt of RATE_OPTIONS) {
-          const o = new Option(opt.label, String(opt.value));
-          rateSelect.append(o);
-        }
+        rateSelect = RATE_SELECT_TPL.cloneNode(true) as HTMLSelectElement;
         rateSelect.value = String(row.rateHz);
-        rateSelect.addEventListener("click", (e) => e.stopPropagation());
-        rateSelect.addEventListener("change", () => {
-          const hz = Number(rateSelect?.value ?? 5);
-          vscode.postMessage({ type: "setRate", ids: [row.id], rateHz: hz });
-        });
         cell.append(rateSelect);
         el.append(cell);
       }
     }
 
-    const dom: RowDom = { el, valCell, valText, hexText, addrText, rateSelect, fmtBtn, toggleAlt: false };
-    this.updateRowFreshness(row, dom);
+    const dom: RowDom = {
+      el,
+      nameCell,
+      toggleSlot,
+      wpDot,
+      nameSpan,
+      waveActs,
+      valCell,
+      valText,
+      fmtBtn,
+      typeSpan,
+      addrCell,
+      addrSpan,
+      addrHover,
+      rateSelect,
+      toggleAlt: false,
+      lastDepth: row.depth,
+      lastParentIsNull: parentIsNull,
+      lastExpandable: row.expandable,
+      lastExpanded: row.expanded,
+      lastWatchpoint: row.watchpoint,
+      lastName: row.name,
+      lastPlottable: row.plottable,
+      lastWritable: row.writable,
+      lastError: row.error,
+      lastText: formattedText,
+      lastHasRaw: Boolean(row.rawHex),
+      lastFmt: row.format,
+      lastTypeText: typeText,
+      lastAddr: row.address,
+      lastAddrText: addrText,
+      lastRate: row.rateHz,
+    };
+    this.updateRowFreshness(row, dom, nearViewport);
     return dom;
   }
 
-  private updateRowDom(row: WatchRowNode): void {
-    const dom = this.rowDoms.get(row.id);
-    if (!dom) {
-      return;
+  private updateRowDom(
+    row: WatchRowNode,
+    dom: RowDom,
+    triggerFresh: boolean,
+    nearViewport: boolean,
+    syncStructure = false,
+  ): void {
+    const editingThis = this.editing?.id === row.id ? this.editing.field : null;
+
+    if (syncStructure) {
+      const parentIsNull = row.parent === null;
+      if (parentIsNull !== dom.lastParentIsNull) {
+        dom.lastParentIsNull = parentIsNull;
+        dom.el.draggable = parentIsNull;
+      }
+
+      if (editingThis !== "expr") {
+        if (row.depth !== dom.lastDepth) {
+          dom.lastDepth = row.depth;
+          dom.nameCell.style.paddingLeft = `${7 + row.depth * 14}px`;
+        }
+        if (row.expandable !== dom.lastExpandable || row.expanded !== dom.lastExpanded) {
+          if (row.expandable && !dom.lastExpandable) {
+            const nextSlot = (
+              row.expanded ? TOGGLE_BTN_DOWN_TPL : TOGGLE_BTN_RIGHT_TPL
+            ).cloneNode(true) as HTMLElement;
+            dom.toggleSlot.replaceWith(nextSlot);
+            dom.toggleSlot = nextSlot;
+          } else if (!row.expandable && dom.lastExpandable) {
+            const nextSlot = TOGGLE_SPACER_TPL.cloneNode(true) as HTMLElement;
+            dom.toggleSlot.replaceWith(nextSlot);
+            dom.toggleSlot = nextSlot;
+          } else if (row.expandable && row.expanded !== dom.lastExpanded) {
+            dom.toggleSlot.replaceChildren(
+              (row.expanded ? CHEVRON_DOWN_SVG : CHEVRON_RIGHT_SVG).cloneNode(true),
+            );
+          }
+          dom.lastExpandable = row.expandable;
+          dom.lastExpanded = row.expanded;
+        }
+        if (row.name !== dom.lastName) {
+          dom.lastName = row.name;
+          dom.nameSpan.textContent = row.name;
+        }
+        if (row.plottable !== dom.lastPlottable) {
+          dom.lastPlottable = row.plottable;
+          if (row.plottable && !dom.waveActs) {
+            dom.waveActs = WAVE_HOVER_TPL.cloneNode(true) as HTMLElement;
+            dom.nameCell.append(dom.waveActs);
+          } else if (!row.plottable && dom.waveActs) {
+            dom.waveActs.remove();
+            dom.waveActs = null;
+          }
+        }
+      }
     }
-    if (this.editing && this.editing.id === row.id && this.editing.field === "value") {
-      return;
+
+    if (editingThis !== "expr" && row.watchpoint !== dom.lastWatchpoint) {
+      dom.lastWatchpoint = row.watchpoint;
+      if (row.watchpoint) {
+        if (!dom.wpDot) {
+          dom.wpDot = WP_DOT_TPL.cloneNode(true) as HTMLElement;
+          dom.nameCell.insertBefore(dom.wpDot, dom.nameSpan);
+        }
+        dom.wpDot.title = `Hardware data breakpoint (${row.watchpoint})`;
+      } else if (dom.wpDot) {
+        dom.wpDot.remove();
+        dom.wpDot = null;
+      }
     }
-    dom.valCell.classList.toggle("is-error", Boolean(row.error));
-    dom.valText.textContent = formatScalarValue(row);
-    dom.valCell.title = formatTooltip(row);
-    if (dom.hexText) {
-      dom.hexText.textContent = row.rawHex ?? "—";
+
+    let valueMutated = false;
+    if (editingThis !== "value") {
+      if (row.writable !== dom.lastWritable) {
+        dom.lastWritable = row.writable;
+        dom.valCell.classList.toggle("is-writable", row.writable);
+      }
+      if (Boolean(row.error) !== Boolean(dom.lastError)) {
+        dom.valCell.classList.toggle("is-error", Boolean(row.error));
+      }
+      if (row.error !== dom.lastError) {
+        dom.lastError = row.error;
+        valueMutated = true;
+      }
+
+      const nextText = formatScalarValue(row);
+      if (nextText !== dom.lastText) {
+        dom.lastText = nextText;
+        dom.valText.textContent = nextText;
+        valueMutated = true;
+      }
+
+      const hasRaw = Boolean(row.rawHex);
+      if (hasRaw !== dom.lastHasRaw) {
+        dom.lastHasRaw = hasRaw;
+        dom.fmtBtn.hidden = !hasRaw;
+      }
+      if (row.format !== dom.lastFmt) {
+        dom.lastFmt = row.format;
+        dom.fmtBtn.textContent = FORMAT_SHORT_BY_KEY.get(row.format) ?? "auto";
+      }
+
+      if (triggerFresh || (syncStructure && valueMutated)) {
+        this.updateRowFreshness(row, dom, nearViewport);
+      }
     }
-    if (dom.fmtBtn) {
-      const fmtOpt = FORMAT_OPTIONS.find((f) => f.key === row.format) ?? FORMAT_OPTIONS[0];
-      dom.fmtBtn.textContent = fmtOpt.short;
+
+    if (dom.typeSpan) {
+      const typeText = row.type ? `${row.type}${row.bitRange ? ` ${row.bitRange}` : ""}` : "—";
+      if (typeText !== dom.lastTypeText) {
+        dom.lastTypeText = typeText;
+        dom.typeSpan.textContent = typeText;
+        dom.typeSpan.title = typeText;
+      }
     }
-    if (dom.addrText) {
-      dom.addrText.textContent = row.address ? `${row.address}${row.bitRange ?? ""}` : "—";
+
+    if (dom.addrCell && dom.addrSpan) {
+      const addrText = row.address ? `${row.address}${row.bitRange ?? ""}` : "—";
+      if (addrText !== dom.lastAddrText) {
+        dom.lastAddrText = addrText;
+        dom.addrSpan.textContent = addrText;
+        dom.addrSpan.title = addrText;
+      }
+      if (Boolean(row.address) !== Boolean(dom.lastAddr)) {
+        if (row.address && !dom.addrHover) {
+          dom.addrHover = ADDR_HOVER_TPL.cloneNode(true) as HTMLElement;
+          dom.addrCell.append(dom.addrHover);
+        } else if (!row.address && dom.addrHover) {
+          dom.addrHover.remove();
+          dom.addrHover = null;
+        }
+      }
+      dom.lastAddr = row.address;
     }
-    if (dom.rateSelect) {
+
+    if (dom.rateSelect && row.rateHz !== dom.lastRate) {
+      dom.lastRate = row.rateHz;
       dom.rateSelect.value = String(row.rateHz);
     }
-    this.updateRowFreshness(row, dom);
   }
 
-  private updateRowFreshness(row: WatchRowNode, dom: RowDom | undefined): void {
-    if (!dom) return;
-    const cell = dom.valCell;
-    cell.classList.remove("is-fresh-a", "is-fresh-b", "is-stop-changed");
-    cell.style.animationDelay = "";
-
+  private updateRowFreshness(row: WatchRowNode, dom: RowDom, nearViewport: boolean): void {
+    const textEl = dom.valText;
     if (!this.connected || row.error) {
+      textEl.classList.remove("is-fresh-a", "is-fresh-b", "is-stop-changed");
+      if (textEl.style.animationDelay) textEl.style.animationDelay = "";
       return;
     }
     if (this.runState === "halted" && row.changedOnStop) {
-      cell.classList.add("is-stop-changed");
+      textEl.classList.remove("is-fresh-a", "is-fresh-b");
+      if (textEl.style.animationDelay) textEl.style.animationDelay = "";
+      textEl.classList.add("is-stop-changed");
       return;
     }
-    if (this.freshnessMs <= 0 || row.lastChangedAtMs === null) {
+    textEl.classList.remove("is-stop-changed");
+
+    if (!nearViewport || this.freshnessMs <= 0 || row.lastChangedAtMs === null) {
+      textEl.classList.remove("is-fresh-a", "is-fresh-b");
+      if (textEl.style.animationDelay) textEl.style.animationDelay = "";
       return;
     }
-    const elapsed = row.elapsedMs !== null ? row.elapsedMs : Math.max(0, Date.now() - row.lastChangedAtMs);
+    const elapsed =
+      row.elapsedMs !== null ? row.elapsedMs : Math.max(0, Date.now() - row.lastChangedAtMs);
     if (elapsed >= this.freshnessMs) {
+      textEl.classList.remove("is-fresh-a", "is-fresh-b");
+      if (textEl.style.animationDelay) textEl.style.animationDelay = "";
       return;
     }
     dom.toggleAlt = !dom.toggleAlt;
-    cell.classList.add(dom.toggleAlt ? "is-fresh-a" : "is-fresh-b");
-    cell.style.animationDelay = `-${Math.round(elapsed)}ms`;
+    textEl.classList.remove("is-fresh-a", "is-fresh-b");
+    textEl.classList.add(dom.toggleAlt ? "is-fresh-a" : "is-fresh-b");
+    textEl.style.animationDelay = `-${Math.round(elapsed)}ms`;
   }
 
   private updateSelectionStyles(): void {
-    for (const [id, dom] of this.rowDoms.entries()) {
-      dom.el.classList.toggle("is-selected", this.selectedIds.has(id));
-      dom.el.classList.toggle("is-focused", this.focusedId === id);
+    for (const prevId of this.renderedSelectedIds) {
+      if (!this.selectedIds.has(prevId)) {
+        this.rowDoms.get(prevId)?.el.classList.remove("is-selected");
+      }
     }
+    for (const nextId of this.selectedIds) {
+      const dom = this.rowDoms.get(nextId);
+      if (dom) {
+        dom.el.classList.add("is-selected");
+      }
+    }
+    this.renderedSelectedIds = new Set(this.selectedIds);
+
+    if (this.renderedFocusedId !== null && this.renderedFocusedId !== this.focusedId) {
+      this.rowDoms.get(this.renderedFocusedId)?.el.classList.remove("is-focused");
+    }
+    if (this.focusedId !== null) {
+      this.rowDoms.get(this.focusedId)?.el.classList.add("is-focused");
+    }
+    this.renderedFocusedId = this.focusedId;
   }
 
   private startInlineEdit(id: number, field: "value" | "expr"): void {
@@ -1049,11 +1602,7 @@ class LiveWatchApp {
     if (field === "expr" && row.parent !== null) return;
 
     this.editing = { id, field };
-    const hostCell = field === "value" ? dom.valCell : dom.el.querySelector<HTMLElement>(".lw-cell-name");
-    if (!hostCell) {
-      this.editing = null;
-      return;
-    }
+    const hostCell = field === "value" ? dom.valCell : dom.nameCell;
 
     const prevChildren = [...hostCell.childNodes];
     const input = document.createElement("input");
@@ -1080,7 +1629,10 @@ class LiveWatchApp {
         }
       } else {
         const latest = this.byId.get(id);
-        if (latest) this.updateRowDom(latest);
+        const latestDom = this.rowDoms.get(id);
+        if (latest && latestDom) {
+          this.updateRowDom(latest, latestDom, false, true, true);
+        }
       }
     };
 
@@ -1283,7 +1835,9 @@ class LiveWatchApp {
       }
       if (row.address) {
         const addr = row.address;
-        this.addCtxItem(menu, "Copy Address", "", () => vscode.postMessage({ type: "copy", text: addr }));
+        this.addCtxItem(menu, "Copy Address", "", () =>
+          vscode.postMessage({ type: "copy", text: addr }),
+        );
       }
 
       this.addCtxSep(menu);

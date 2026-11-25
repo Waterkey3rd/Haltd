@@ -24,6 +24,9 @@ export interface ToolbarCallbacks {
   resizeAll: () => void;
   clearCursors: () => void;
   zoomToRange: (a: number, b: number) => void;
+  onFilterChanged: () => void;
+  onAppearanceChanged: () => void;
+  onDrawerOpened: (tab: "rtt" | "cursors") => void;
   onOpenExport?: () => void;
   onRateChanged?: () => void;
   onRecordingStopped?: (info: {
@@ -246,6 +249,7 @@ export function exportPngSnapshot(state: TimelineState): void {
     ctx.fillText(`${g.name}: ${memberSummary}`, pad, y + Math.round(14 * dpr));
     y += trackTitleH;
     ctx.drawImage(g.plot.ctx.canvas, pad, y);
+    ctx.drawImage(g.overlayCanvas, pad, y);
     y += g.plot.ctx.canvas.height + Math.round(8 * dpr);
   }
 
@@ -480,7 +484,7 @@ export function wireToolbar(
   byId("toggle-band")?.addEventListener("click", () => {
     state.showBands = !state.showBands;
     byId("toggle-band")?.setAttribute("aria-pressed", String(state.showBands));
-    callbacks.rebuild();
+    callbacks.onAppearanceChanged();
   });
   byId("record")?.addEventListener("click", async () => {
     const measureEl = byId("measure");
@@ -526,17 +530,17 @@ export function wireToolbar(
   // Filter & batch visibility
   byId<HTMLInputElement>("series-filter")?.addEventListener("input", (event) => {
     state.seriesFilter = (event.target as HTMLInputElement).value;
-    callbacks.rebuild();
+    callbacks.onFilterChanged();
   });
   byId("btn-show-all")?.addEventListener("click", () => {
     state.soloSeriesId = null;
     state.hidden.clear();
-    callbacks.rebuild();
+    callbacks.onAppearanceChanged();
   });
   byId("btn-hide-all")?.addEventListener("click", () => {
     state.soloSeriesId = null;
     state.series.forEach((s) => state.hidden.add(s.seriesId));
-    callbacks.rebuild();
+    callbacks.onAppearanceChanged();
   });
   byId("btn-clear-all")?.addEventListener("click", async () => {
     state.soloSeriesId = null;
@@ -578,6 +582,7 @@ export function wireToolbar(
         curPane.hidden = tab !== "cursors";
         rttTab.setAttribute("aria-pressed", String(tab === "rtt"));
         curTab.setAttribute("aria-pressed", String(tab === "cursors"));
+        callbacks.onDrawerOpened(tab);
       }
     }
     callbacks.resizeAll();

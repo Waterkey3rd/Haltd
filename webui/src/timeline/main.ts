@@ -27,6 +27,7 @@ import { renderRttSignalsDrawer, updateLegendReadouts, type LegendCallbacks } fr
 import { fitTimeRange, FOLLOW_LAG_S, spanSeconds, stepDivision } from "./math";
 import { attachOverviewScrubber, drawOverview } from "./overview";
 import { PresetController } from "./presets";
+import { RenderScheduler } from "./scheduler";
 import {
   addPin,
   clearAllPins,
@@ -36,6 +37,7 @@ import {
   nextCustomTrackName,
   nowSeconds,
   removePin,
+  setSeriesList,
   type RttSignalInfo,
 } from "./state";
 import {
@@ -51,16 +53,18 @@ import {
   type RateReply,
 } from "./toolbar";
 import {
+  applyCachedWaveforms,
+  applySeriesFilter,
   applyTrackYScale,
   drawQueryResult,
   rebuildTracks,
   redrawAllOverlays,
   resizeAllTracks,
   syncTrackYControls,
+  syncTracksAppearance,
   updateTrackSelectionHighlight,
 } from "./tracks";
 
-const REFRESH_MS = 33;
 const STATUS_MS = 1000;
 const NS = 1e9;
 
@@ -78,7 +82,7 @@ function setMeasureText(text: string): void {
 
 async function loadSeries(): Promise<void> {
   const reply = await client.call<{ series: SeriesInfo[] }>("timeline.list");
-  state.series = reply.series;
+  setSeriesList(state, reply.series);
   try {
     const rttReply = await client.call<{ signals: RttSignalInfo[] }>("rtt.signals");
     state.rttSignals = rttReply.signals ?? [];
@@ -89,12 +93,19 @@ async function loadSeries(): Promise<void> {
   rebuild();
 }
 
-async function refresh(): Promise<void> {
+function hasLiveSources(): boolean {
+  return (
+    state.tracks.length > 0 &&
+    state.series.some((s) => s.actualMode !== "off" && s.actualMode !== "none")
+  );
+}
+
+async function executeQuery(): Promise<void> {
   state.querying = true;
   try {
     const ids = state.tracks.flatMap((t) => t.members.map((m) => m.seriesId));
     const width = state.tracks[0]?.plot.bbox.width
-      ? Math.round(state.tracks[0].plot.bbox.width / devicePixelRatio)
+      ? Math.round(state.tracks[0].plot.bbox.width / (devicePixelRatio || 1))
       : 0;
     if (ids.length > 0 && width > 0) {
       const end = state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd;
@@ -110,9 +121,36 @@ async function refresh(): Promise<void> {
       drawOverview(state);
     }
   } catch {
-    // Reconnecting; the next frame tries again.
+    // Reconnecting; next wake/tick retries.
   } finally {
     state.querying = false;
+  }
+}
+
+const scheduler = new RenderScheduler({
+  isHidden: () => document.hidden,
+  shouldFollowLive: () => state.followLive && hasLiveSources(),
+  advanceLiveClock: () => {
+    state.viewEnd = nowSeconds(state) - FOLLOW_LAG_S;
+  },
+  runQuery: () => executeQuery(),
+  applyLayout: () => resizeAllTracks(state),
+  redrawWaveforms: () => applyCachedWaveforms(state),
+  redrawOverlays: () => redrawAllOverlays(state),
+  updateReadouts: () => updateLegendReadouts(state),
+  updateInspector: () => updateCursorInspector(state),
+});
+
+function requestRefresh(): void {
+  scheduler.invalidate("query", "overlays");
+}
+
+async function refresh(): Promise<void> {
+  if (!scheduler.isQueryInFlight()) {
+    await executeQuery();
+    scheduler.wake();
+  } else {
+    scheduler.invalidate("query", "overlays");
   }
 }
 
@@ -122,7 +160,7 @@ function zoomToRange(tA: number, tB: number): void {
   state.division = fitted.division;
   state.viewEnd = fitted.viewEnd;
   syncDivisionControls(state);
-  void refresh();
+  requestRefresh();
 }
 
 function fitAllHistory(): void {
@@ -136,9 +174,7 @@ function clearCursors(): void {
   state.cursorB = null;
   state.sampleCursor = null;
   state.sampleCursorPinned = false;
-  updateLegendReadouts(state);
-  updateCursorInspector(state);
-  redrawAllOverlays(state);
+  scheduler.invalidate("readouts", "inspector", "overlays");
 }
 
 function autoScaleTrackY(trackName: string): void {
@@ -147,7 +183,11 @@ function autoScaleTrackY(trackName: string): void {
   const cfg = getGroupYScale(state, trackName);
   cfg.auto = true;
   syncTrackYControls(state, track);
-  void refresh();
+  if (state.lastColumns) {
+    scheduler.invalidate("waveforms");
+  } else {
+    requestRefresh();
+  }
 }
 
 async function moveSeriesToTrack(seriesId: number, targetTrack: string | null): Promise<void> {
@@ -193,12 +233,14 @@ function toggleSignalHide(item: SeriesInfo): void {
   } else {
     state.hidden.add(item.seriesId);
   }
-  rebuild();
+  syncTracksAppearance(state);
+  presetController?.syncDirtyIndicator();
 }
 
 function toggleSignalSolo(item: SeriesInfo): void {
   state.soloSeriesId = state.soloSeriesId === item.seriesId ? null : item.seriesId;
-  rebuild();
+  syncTracksAppearance(state);
+  presetController?.syncDirtyIndicator();
 }
 
 async function removeSignal(item: SeriesInfo): Promise<void> {
@@ -227,7 +269,8 @@ function pickColorForSignal(item: SeriesInfo): void {
       // Ignore
     }
     picker.remove();
-    rebuild();
+    syncTracksAppearance(state);
+    presetController?.syncDirtyIndicator();
   };
   picker.onblur = () => picker.remove();
   picker.click();
@@ -238,37 +281,29 @@ const contextMenuActions: ContextMenuActions = {
   autoScaleTrackY: (trackName) => autoScaleTrackY(trackName),
   placeCursorA: (time) => {
     state.cursorA = time;
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   },
   placeCursorB: (time) => {
     state.cursorB = time;
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   },
   placeSampleCursor: (time) => {
     state.sampleCursor = time;
     state.sampleCursorPinned = true;
-    updateLegendReadouts(state);
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   },
   addPin: (time) => {
     addPin(state, time);
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   },
   removePin: (id) => {
     if (removePin(state, id)) {
-      updateCursorInspector(state);
-      redrawAllOverlays(state);
+      scheduler.invalidate("readouts", "inspector", "overlays");
     }
   },
   clearPins: () => {
     clearAllPins(state);
-    updateLegendReadouts(state);
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   },
   clearCursors: () => clearCursors(),
   changeSignalColor: (item) => pickColorForSignal(item),
@@ -297,7 +332,8 @@ const legendCallbacks: LegendCallbacks = {
     } catch {
       // Ignore
     }
-    rebuild();
+    syncTracksAppearance(state);
+    presetController?.syncDirtyIndicator();
   },
   onToggleSolo: (item) => toggleSignalSolo(item),
   onRemoveSignal: (item) => void removeSignal(item),
@@ -313,7 +349,9 @@ const legendCallbacks: LegendCallbacks = {
       cfg.auto = true;
     }
     syncTrackYControls(state, track);
-    if (state.lastColumns) drawQueryResult(state, state.lastColumns.result);
+    if (state.lastColumns) {
+      scheduler.invalidate("waveforms");
+    }
     presetController?.syncDirtyIndicator();
   },
   onManualYRange: (trackName, min, max) => {
@@ -371,19 +409,17 @@ const interactionCallbacks = {
   onStopFollowing: () => stopFollowing(state),
   onRefresh: () => {
     syncDivisionControls(state);
-    void refresh();
+    requestRefresh();
   },
-  onRedrawOverlays: () => redrawAllOverlays(state),
-  onUpdateReadouts: () => updateLegendReadouts(state),
-  onUpdateMeasure: () => updateCursorInspector(state),
+  onRedrawOverlays: () => scheduler.invalidate("overlays"),
+  onUpdateReadouts: () => scheduler.invalidate("readouts"),
+  onUpdateMeasure: () => scheduler.invalidate("inspector"),
   onApplyTrackY: (track: (typeof state.tracks)[number]) => applyTrackYScale(state, track),
   onZoomToRange: (t0: number, t1: number) => zoomToRange(t0, t1),
   onPlaceSampleCursor: (time: number) => {
     state.sampleCursor = time;
     state.sampleCursorPinned = true;
-    updateLegendReadouts(state);
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   },
   onContextMenu: (req: Parameters<typeof showContextMenu>[1]) => {
     showContextMenu(state, req, contextMenuActions);
@@ -396,6 +432,7 @@ function rebuild(): void {
   updateSuggestions(state);
   presetController?.syncDirtyIndicator();
   presetController?.renderEmptyQuickLaunch();
+  scheduler.wake();
 }
 
 function applyEvent(event: TimelineEvent): void {
@@ -418,7 +455,7 @@ function applyEvent(event: TimelineEvent): void {
   updateEventsUi(state, (ev) => {
     stopFollowing(state);
     state.viewEnd = ev.t + spanSeconds(state.division) * 0.5;
-    void refresh();
+    requestRefresh();
   });
 }
 
@@ -436,6 +473,7 @@ interface RecordingInfoReply {
 }
 
 async function refreshStatus(): Promise<void> {
+  if (document.hidden) return;
   try {
     const status = await client.call<{
       nowNs: number;
@@ -562,9 +600,7 @@ for (const zone of [newTrackDrop, tracksScroll]) {
 const sharedAxisCanvas = document.getElementById("shared-axis-canvas") as HTMLCanvasElement | null;
 if (sharedAxisCanvas) {
   attachSharedAxisInteractions(sharedAxisCanvas, state, () => {
-    updateLegendReadouts(state);
-    updateCursorInspector(state);
-    redrawAllOverlays(state);
+    scheduler.invalidate("readouts", "inspector", "overlays");
   });
 }
 
@@ -572,7 +608,7 @@ attachOverviewScrubber(state, (center) => {
   stopFollowing(state);
   state.viewEnd = center + spanSeconds(state.division) * 0.5;
   syncFollowButton(state);
-  void refresh();
+  requestRefresh();
 });
 
 // Wire client, theme, toolbar, context menu, keyboard
@@ -615,9 +651,21 @@ wireToolbar(client, state, themeManager, {
   refresh,
   rebuild,
   fitAllHistory,
-  resizeAll: () => resizeAllTracks(state),
+  resizeAll: () => scheduler.invalidate("layout"),
   clearCursors,
   zoomToRange,
+  onFilterChanged: () => applySeriesFilter(state),
+  onAppearanceChanged: () => {
+    syncTracksAppearance(state);
+    presetController?.syncDirtyIndicator();
+  },
+  onDrawerOpened: (tab) => {
+    if (tab === "cursors") {
+      scheduler.invalidate("inspector");
+    } else {
+      renderRttSignalsDrawer(state, legendCallbacks);
+    }
+  },
   onOpenExport: () => exportUi?.openPopover(),
   onRateChanged: () => presetController?.syncDirtyIndicator(),
   onRecordingStopped: () => exportUi?.showRecordingBanner(),
@@ -656,47 +704,48 @@ window.addEventListener("keydown", (event) => {
       stopFollowing(state);
       state.viewEnd -= state.division;
       syncFollowButton(state);
-      void refresh();
+      requestRefresh();
       break;
     case "panRightDiv":
       stopFollowing(state);
       state.viewEnd = Math.min(nowSeconds(state), state.viewEnd + state.division);
       syncFollowButton(state);
-      void refresh();
+      requestRefresh();
       break;
     case "panLeftScreen":
       stopFollowing(state);
       state.viewEnd -= spanSeconds(state.division);
       syncFollowButton(state);
-      void refresh();
+      requestRefresh();
       break;
     case "panRightScreen":
       stopFollowing(state);
       state.viewEnd = Math.min(nowSeconds(state), state.viewEnd + spanSeconds(state.division));
       syncFollowButton(state);
-      void refresh();
+      requestRefresh();
       break;
     case "jumpStart":
       stopFollowing(state);
       state.viewEnd = Math.max(0, state.historyStart) + spanSeconds(state.division);
       syncFollowButton(state);
-      void refresh();
+      requestRefresh();
       break;
     case "jumpEnd":
       state.followLive = true;
       state.viewEnd = nowSeconds(state) - FOLLOW_LAG_S;
       syncFollowButton(state);
-      void refresh();
+      requestRefresh();
+      scheduler.wake();
       break;
     case "zoomIn":
       state.division = stepDivision(state.division, -1);
       syncDivisionControls(state);
-      void refresh();
+      requestRefresh();
       break;
     case "zoomOut":
       state.division = stepDivision(state.division, 1);
       syncDivisionControls(state);
-      void refresh();
+      requestRefresh();
       break;
     case "fitAll":
       fitAllHistory();
@@ -723,15 +772,13 @@ window.addEventListener("keydown", (event) => {
     case "placeCursorA":
       if (state.hoverTime !== null) {
         state.cursorA = state.hoverTime;
-        updateCursorInspector(state);
-        redrawAllOverlays(state);
+        scheduler.invalidate("readouts", "inspector", "overlays");
       }
       break;
     case "placeCursorB":
       if (state.hoverTime !== null) {
         state.cursorB = state.hoverTime;
-        updateCursorInspector(state);
-        redrawAllOverlays(state);
+        scheduler.invalidate("readouts", "inspector", "overlays");
       }
       break;
     case "clearCursors": {
@@ -778,8 +825,14 @@ window.addEventListener("keydown", (event) => {
 
 const workspaceEl = document.getElementById("tracks-workspace");
 if (workspaceEl) {
-  new ResizeObserver(() => resizeAllTracks(state)).observe(workspaceEl);
+  new ResizeObserver(() => scheduler.invalidate("layout")).observe(workspaceEl);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    scheduler.wake();
+  }
+});
 
 syncDivisionControls(state);
 updateSuggestions(state);
@@ -789,7 +842,7 @@ setInterval(() => {
   if (state.recording) syncRecordButton(state, true);
 }, 500);
 setInterval(() => {
-  if (client) {
+  if (client && !document.hidden) {
     void client
       .call<{ signals: RttSignalInfo[] }>("rtt.signals")
       .then((res) => {
@@ -799,12 +852,3 @@ setInterval(() => {
       .catch(() => undefined);
   }
 }, STATUS_MS);
-
-function frame(time: number): void {
-  if (!state.querying && time - state.lastQuery >= REFRESH_MS) {
-    state.lastQuery = time;
-    void refresh();
-  }
-  requestAnimationFrame(frame);
-}
-requestAnimationFrame(frame);

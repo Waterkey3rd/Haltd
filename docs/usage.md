@@ -128,9 +128,9 @@ code --install-extension haltd-<版本>-win32-x64.vsix
 
 ### Live Watch
 
-默认停靠于底部 **Panel**（`Haltd Live Watch` 面板，提供宽幅多列视野），可点击视图右上角 **Pop out** 按钮弹出到编辑区独立标签页（与源码左右分栏或拖到副屏，两个视图实时同步，可随时点 **Dock** 切回面板）。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `haltd.replaceWatchView: false` 关闭）。
+默认停靠于底部 **Panel**（`LIVE WATCH` 面板标签页，调试启动时自动切出；也可点击左下状态栏 `Live Watch` 按钮或执行 `Haltd: Open Live Watch` 打开），提供宽幅多列视野，并可点击视图右上角 **Pop out** 按钮弹出到编辑区独立标签页（与源码左右分栏或拖到副屏，两个视图实时同步，可随时点 **Dock** 切回面板；可用设置项 `haltd.liveWatch.openOnDebugStart` 关闭启动自动切出）。调试期间原生 Watch 视图会隐藏并将「Add to Watch」接管到 Live Watch（可通过设置项 `haltd.replaceWatchView: false` 关闭）。
 
-- **多列树形表**：分列展示 `Expression`（变量名）、`Value`（当前值）、`Hex / Format`（原始十六进制与格式切换徽标）、`Type`、`Address`（含位段信息）与 `Rate`（刷新率）。可通过表头右键菜单或设置项 `haltd.liveWatch.columns` 自定义开关列、拖拽表头分隔线调宽。
+- **多列树形表**：分列展示 `Expression`（变量名）、`Value`（当前值，行内紧随 `auto`/`dec`/`hex` 等文字描边格式标识，点击即可零延迟切换）、`Type`、`Address`（含位段信息）与 `Rate`（刷新率）。可通过表头右键菜单或设置项 `haltd.liveWatch.columns` 自定义开关 `Type` / `Address` / `Rate` 列、拖拽表头分隔线调宽。
 - **值变动新鲜度着色**：运行态数值跳变时立即亮红高亮并随时间平滑冷却（默认 `2500 ms`，可通过 `haltd.liveWatch.freshnessDurationMs` 配置；设为 `0` 关闭）；断点停机或单步后，本轮发生变化的变量保持醒目红字直至下次继续运行或单步。悬停单元格可查看「上次值 → 当前值」变化。
 - **底部快速输入与 ELF 自动补全**：底部常驻 `+ Add expression…` 输入行，输入 2 个字符起自动联想 ELF 全局/静态符号、类型与地址；支持 `0–20 Hz` 独立调频（默认 `5 Hz`，`0` 表示仅停机时刷新）。
 - **按行显示格式与原位写回**：可在行内直接切换标量显示格式（`Default` / `Dec` / `Uint` / `Hex` / `Bin` / `Float` / `Char`）；双击可写标量按行原位修改，支持 `0x`、`0b`、`_` 分隔符、字符字面量 `'A'` 与 C/C++ 枚举常量名（如 `STATE_RUN`），列表与扩展状态自动保存到 `.haltd/state.json`。

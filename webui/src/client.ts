@@ -77,6 +77,9 @@ export class Client {
   }
 
   private onText(text: string): void {
+    if (text.startsWith('{"jsonrpc":"2.0","method":')) {
+      return; // A notification this page does not use.
+    }
     const message = JSON.parse(text);
     if (message.id === undefined || message.id === null) {
       return; // A notification this page does not use.

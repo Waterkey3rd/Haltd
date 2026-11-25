@@ -1,7 +1,7 @@
 # Haltd
 
 <p align="center">
-  <img src="icon.png" alt="Haltd" width="128" />
+  <img src="resources/logo.png" alt="haltd" width="380" />
 </p>
 
 An STM32 (ARM Cortex-M) J-Link debug backend and VS Code extension built around a resident daemon + DAP + WebSocket architecture—bringing fast large-ELF symbol caching, smooth `-O2` stepping, HardFault decoding, FreeRTOS awareness, 1 kHz live waveform plotting, and structured RTT decoding directly into VS Code.
@@ -13,7 +13,7 @@ An STM32 (ARM Cortex-M) J-Link debug backend and VS Code extension built around 
 - **Source-Level Debugging (`-O2` Friendly)**: DWARF 5 `blake3`-cached symbol loading, inline virtual stack frames, `<optimized out>` reporting, conditional/hit-count breakpoints, logpoints, direct-DWT hardware watchpoints, and one-key **`F6` Build & Reload** (incremental sector flashing + automatic breakpoint/watch rebinding).
 - **HardFault Interception & Decoding**: halts on fault entry via `DEMCR` vector catch, decodes `CFSR` / `HFSR` / `MMFAR` / `BFAR` / `AFSR`, and unwinds past `<exception N>` directly to the offending source line.
 - **FreeRTOS Task Awareness**: reads TCB and task list layouts directly from DWARF (CM3 / CM4F / CM7) with no hardcoded offsets; displays task states, priorities, stack high-water marks, and per-task call stacks.
-- **Live Watch (0–20 Hz, Panel + Pop out)**: docked in the bottom Panel with a titlebar **Pop out** editor tab button; multi-column Ozone-style tree-table with configurable `Hex / Format`, `Type`, `Address`, and `Rate` columns, value freshness coloring, per-row format switching, ELF autocomplete, dynamic pointer/array & arithmetic expressions, DWT watchpoints, and `Ctrl+G` / `Ctrl+H` shortcuts.
+- **Live Watch (0–20 Hz, Panel + Pop out)**: docked in the bottom Panel with a titlebar **Pop out** editor tab button; multi-column Ozone-style tree-table with `Expression`, `Value` (plus inline clickable `auto`/`dec`/`hex` format tag), and configurable `Type`, `Address`, and `Rate` columns, text-only value freshness coloring, ELF autocomplete, dynamic pointer/array & arithmetic expressions, DWT watchpoints, and `Ctrl+G` / `Ctrl+H` shortcuts.
 - **Timeline Oscilloscope (HSS / Polling / RTT)**: up to 1 kHz HSS sampling (overflow falls back to polling) rendered in an Ozone-inspired multi-track oscilloscope panel unifying HSS and RTT signals, with `S` / `A` / `B` cursors, drag-and-drop track grouping, workspace `.haltd/timeline-presets.json` presets (replace or append), VS Code-synced themes, `.hlrec` live recording progress/banner, and smart CSV/PNG export (Cursor `A..B`, ZOH, direct `.hlrec -> CSV`).
 - **RTT Terminal & Auto-Decoding**: interactive channel 0 terminal plus zero-config auto-decoding from ELF struct types and `key=value` text, or custom `.haltd/rtt.yaml` (`text`, `text-regex`, `struct`, `lua`, `systemview`).
 - **CMSIS-SVD Peripherals View**: protects registers with read side-effects (`DR` / `RDR` / `RXDR`) from automatic reads, with field-level read-modify-write editing.

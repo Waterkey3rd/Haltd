@@ -1,8 +1,8 @@
 import uPlot from "uplot";
 import type { QueryResult, SeriesInfo } from "../client";
 import {
-  drawOverlays,
   drawSharedAxis,
+  drawTrackOverlay,
   updateCursorInspector,
 } from "./cursors";
 import { attachTrackInteractions, type InteractionCallbacks } from "./interactions";
@@ -12,7 +12,7 @@ import {
   updateLegendReadouts,
   type LegendCallbacks,
 } from "./legend";
-import { divisionSplits, formatNumber, MARKERS_AT_DIVISION } from "./math";
+import { divisionSplits, formatNumber, hasAnyNaN, MARKERS_AT_DIVISION } from "./math";
 import { drawOverview } from "./overview";
 import {
   colorOf,
@@ -24,6 +24,7 @@ import {
   MIN_TRACK_HEIGHT,
   NS,
   saveTrackHeights,
+  toHexColor,
   withAlpha,
   Y_AXIS_SIZE,
   type TimelineState,
@@ -31,6 +32,22 @@ import {
 } from "./state";
 
 let trackAbortControllers: AbortController[] = [];
+let cachedTracksScroll: HTMLElement | null = null;
+let cachedSharedAxisCanvas: HTMLCanvasElement | null = null;
+
+function getTracksScroll(): HTMLElement | null {
+  if (!cachedTracksScroll) {
+    cachedTracksScroll = document.getElementById("tracks-scroll");
+  }
+  return cachedTracksScroll;
+}
+
+function getSharedAxisCanvas(): HTMLCanvasElement | null {
+  if (!cachedSharedAxisCanvas) {
+    cachedSharedAxisCanvas = document.getElementById("shared-axis-canvas") as HTMLCanvasElement | null;
+  }
+  return cachedSharedAxisCanvas;
+}
 
 export function isHalted(state: TimelineState, seconds: number): boolean {
   for (let index = state.halts.length - 1; index >= 0; index--) {
@@ -41,13 +58,79 @@ export function isHalted(state: TimelineState, seconds: number): boolean {
   return false;
 }
 
-function toPlotValues(data: Float64Array, gaps: boolean[]): (number | null | undefined)[] {
-  const out = new Array<number | null | undefined>(data.length);
-  for (let index = 0; index < data.length; index++) {
-    const value = data[index];
-    out[index] = Number.isNaN(value) ? (gaps[index] ? null : undefined) : value;
+function populateGapMask(
+  state: TimelineState,
+  start: number,
+  end: number,
+  step: number,
+  columns: number,
+): Uint8Array | null {
+  if (columns <= 0 || state.halts.length === 0 || step <= 0) {
+    return null;
   }
-  return out;
+  let anyOverlap = false;
+  for (let i = state.halts.length - 1; i >= 0; i--) {
+    const halt = state.halts[i];
+    const hEnd = halt.to ?? Infinity;
+    if (hEnd < start) {
+      break;
+    }
+    if (halt.from <= end) {
+      anyOverlap = true;
+      break;
+    }
+  }
+  if (!anyOverlap) {
+    return null;
+  }
+  if (state.scratchGaps.length !== columns) {
+    state.scratchGaps = new Uint8Array(columns);
+  } else {
+    state.scratchGaps.fill(0);
+  }
+  const mask = state.scratchGaps;
+  for (let i = state.halts.length - 1; i >= 0; i--) {
+    const halt = state.halts[i];
+    const hEnd = halt.to ?? end;
+    if (hEnd < start) {
+      break;
+    }
+    if (halt.from > end) {
+      continue;
+    }
+    const c0 = Math.max(0, Math.ceil((halt.from - start) / step));
+    const c1 = Math.min(columns - 1, Math.floor((hEnd - start) / step));
+    if (c1 >= c0) {
+      mask.fill(1, c0, c1 + 1);
+    }
+  }
+  return mask;
+}
+
+function toSeriesArray(
+  track: TrackRow,
+  slotIndex: number,
+  data: Float64Array | undefined,
+  columns: number,
+  gaps: Uint8Array | null,
+): Float64Array | (number | null | undefined)[] {
+  if (data && !hasAnyNaN(data)) {
+    return data;
+  }
+  let scratch = track.scratchSeries[slotIndex];
+  if (!scratch || scratch.length !== columns) {
+    scratch = new Array<number | null | undefined>(columns);
+    track.scratchSeries[slotIndex] = scratch;
+  }
+  if (!data) {
+    scratch.fill(null);
+    return scratch;
+  }
+  for (let i = 0; i < columns; i++) {
+    const v = data[i];
+    scratch[i] = v === v ? v : gaps !== null && gaps[i] !== 0 ? null : undefined;
+  }
+  return scratch;
 }
 
 export function destroyTracks(state: TimelineState): void {
@@ -94,11 +177,76 @@ export function updateTrackSelectionHighlight(state: TimelineState): void {
   }
 }
 
+export function applySeriesFilter(state: TimelineState): void {
+  const filter = state.seriesFilter.trim().toLowerCase();
+  for (const track of state.tracks) {
+    for (const item of track.members) {
+      const dom = track.legendSignals.get(item.seriesId);
+      if (!dom) continue;
+      if (!filter) {
+        dom.row.classList.remove("is-filtered-out");
+      } else {
+        const hay = `${item.name} ${item.root} ${item.group ?? ""} ${item.actualMode}`.toLowerCase();
+        dom.row.classList.toggle("is-filtered-out", !hay.includes(filter));
+      }
+    }
+  }
+}
+
+export function syncTracksAppearance(state: TimelineState): void {
+  const bandAlpha = state.canvasTheme.isLight ? "24" : "33";
+  for (const track of state.tracks) {
+    track.plot.batch(() => {
+      track.plot.delBand();
+      for (let mIdx = 0; mIdx < track.members.length; mIdx++) {
+        const item = track.members[mIdx];
+        const visible = isSeriesVisible(state, item);
+        const color = colorOf(state, item);
+        const maxIdx = 1 + mIdx * 2;
+        const minIdx = maxIdx + 1;
+
+        const dom = track.legendSignals.get(item.seriesId);
+        if (dom) {
+          dom.row.classList.toggle("is-hidden", !visible);
+          dom.checkbox.checked = visible;
+          dom.checkbox.style.accentColor = color;
+          dom.swatch.value = toHexColor(color);
+          dom.soloBtn.classList.toggle("active", state.soloSeriesId === item.seriesId);
+        }
+
+        const sMax = track.plot.series[maxIdx];
+        const sMin = track.plot.series[minIdx];
+        if (sMax) {
+          sMax.show = visible;
+        }
+        if (sMin) {
+          sMin.show = visible;
+          sMin.width = state.showBands ? 1 : 1.5;
+        }
+        if (state.showBands && visible) {
+          track.plot.addBand({
+            series: [maxIdx, minIdx],
+            fill: withAlpha(color, bandAlpha),
+          });
+        }
+      }
+      track.plot.redraw(true);
+    });
+  }
+  updateLegendReadouts(state);
+  updateCursorInspector(state);
+}
+
+/**
+ * Redraws only lightweight interactive overlay canvases (crosshair, cursors, pins,
+ * shared axis, and overview) without repainting uPlot waveform paths or grids.
+ */
 export function redrawAllOverlays(state: TimelineState): void {
   for (const track of state.tracks) {
-    track.plot.redraw(false);
+    if (getGroupYScale(state, track.name).collapsed) continue;
+    drawTrackOverlay(state, track);
   }
-  const axisCanvas = document.getElementById("shared-axis-canvas") as HTMLCanvasElement | null;
+  const axisCanvas = getSharedAxisCanvas();
   if (axisCanvas) {
     drawSharedAxis(axisCanvas, state);
   }
@@ -110,44 +258,67 @@ export function resizeAllTracks(state: TimelineState): void {
     const cfg = getGroupYScale(state, track.name);
     if (cfg.collapsed) continue;
     const width = Math.max(200, track.canvasWrap.clientWidth || 600);
-    track.plot.setSize({ width, height: track.heightPx });
+    if (track.plot.width !== width || track.plot.height !== track.heightPx) {
+      track.plot.setSize({ width, height: track.heightPx });
+    } else {
+      drawTrackOverlay(state, track);
+    }
   }
-  const axisCanvas = document.getElementById("shared-axis-canvas") as HTMLCanvasElement | null;
+  const axisCanvas = getSharedAxisCanvas();
   if (axisCanvas) {
     drawSharedAxis(axisCanvas, state);
   }
   drawOverview(state);
 }
 
+export function applyCachedWaveforms(state: TimelineState): void {
+  if (state.lastColumns) {
+    drawQueryResult(state, state.lastColumns.result);
+  }
+}
+
 export function drawQueryResult(state: TimelineState, result: QueryResult): void {
-  const step = (result.t1 - result.t0) / result.columns / NS;
+  const columns = result.columns;
+  const step = columns > 0 ? (result.t1 - result.t0) / columns / NS : 0;
   const start = result.t0 / NS;
   const end = result.t1 / NS;
   if (start > 0 && (state.historyStart === 0 || start < state.historyStart)) {
     state.historyStart = start;
   }
-  const xs = Array.from({ length: result.columns }, (_, index) => start + index * step);
-  const gaps = xs.map((t) => isHalted(state, t));
+
+  if (state.scratchXs.length !== columns) {
+    state.scratchXs = new Float64Array(columns);
+  }
+  const xs = state.scratchXs;
+  for (let i = 0; i < columns; i++) {
+    xs[i] = start + i * step;
+  }
+  const gaps = populateGapMask(state, start, end, step, columns);
   state.lastColumns = { result, xs };
 
-  const tracksScroll = document.getElementById("tracks-scroll");
+  const tracksScroll = getTracksScroll();
   if (tracksScroll) {
-    tracksScroll.dataset.range = `${result.t0},${result.t1}`;
+    const rangeTag = `${result.t0},${result.t1}`;
+    if (tracksScroll.dataset.range !== rangeTag) {
+      tracksScroll.dataset.range = rangeTag;
+    }
   }
 
   for (const track of state.tracks) {
-    const arrays: (number | null | undefined)[][] = [];
-    for (const member of track.members) {
+    const aligned = new Array<Float64Array | (number | null | undefined)[]>(
+      1 + track.members.length * 2,
+    );
+    aligned[0] = xs;
+    for (let mIdx = 0; mIdx < track.members.length; mIdx++) {
+      const member = track.members[mIdx];
       const data = result.series.get(member.seriesId);
-      if (data) {
-        arrays.push(toPlotValues(data.max, gaps), toPlotValues(data.min, gaps));
-      } else {
-        const empty = new Array<null>(result.columns).fill(null);
-        arrays.push(empty, empty);
-      }
+      const maxSlot = mIdx * 2;
+      const minSlot = maxSlot + 1;
+      aligned[1 + maxSlot] = toSeriesArray(track, maxSlot, data?.max, columns, gaps);
+      aligned[1 + minSlot] = toSeriesArray(track, minSlot, data?.min, columns, gaps);
     }
     track.plot.batch(() => {
-      track.plot.setData([xs, ...arrays] as unknown as uPlot.AlignedData, false);
+      track.plot.setData(aligned as unknown as uPlot.AlignedData, false);
       track.plot.setScale("x", { min: start, max: end });
       const yCfg = getGroupYScale(state, track.name);
       if (!yCfg.auto && yCfg.max > yCfg.min) {
@@ -158,7 +329,7 @@ export function drawQueryResult(state: TimelineState, result: QueryResult): void
 
   updateLegendReadouts(state);
   updateCursorInspector(state);
-  const axisCanvas = document.getElementById("shared-axis-canvas") as HTMLCanvasElement | null;
+  const axisCanvas = getSharedAxisCanvas();
   if (axisCanvas) {
     drawSharedAxis(axisCanvas, state);
   }
@@ -223,7 +394,7 @@ export function rebuildTracks(
   } else {
     updateLegendReadouts(state);
     updateCursorInspector(state);
-    const axisCanvas = document.getElementById("shared-axis-canvas") as HTMLCanvasElement | null;
+    const axisCanvas = getSharedAxisCanvas();
     if (axisCanvas) drawSharedAxis(axisCanvas, state);
   }
 }
@@ -246,7 +417,6 @@ function buildTrackRow(
     (state.selectedTrack === name ? " is-selected" : "");
   element.dataset.track = name;
 
-  // Drag & Drop target for moving series or adding RTT signals onto this track
   element.addEventListener("dragover", (event) => {
     if (!state.dragging) return;
     event.preventDefault();
@@ -305,15 +475,15 @@ function buildTrackRow(
   const definitions: uPlot.Series[] = [{}];
   const bands: uPlot.Band[] = [];
   for (const item of members) {
-    const color = colorOf(state, item, state.series.indexOf(item));
+    const strokeColor = () => colorOf(state, item);
     const visible = isSeriesVisible(state, item);
     const base = {
-      stroke: color,
+      stroke: strokeColor,
       width: 1.5,
       show: visible,
       points: { show: false },
       spanGaps: false,
-    } as const;
+    };
     definitions.push(
       {
         ...base,
@@ -321,8 +491,8 @@ function buildTrackRow(
         points: {
           show: () => state.division <= MARKERS_AT_DIVISION,
           size: 5,
-          fill: color,
-          stroke: color,
+          fill: strokeColor,
+          stroke: strokeColor,
         },
       },
       { ...base, label: `${item.name} min`, width: state.showBands ? 1 : 1.5 },
@@ -331,22 +501,24 @@ function buildTrackRow(
       const idx = definitions.length - 2;
       bands.push({
         series: [idx, idx + 1],
-        fill: withAlpha(color, theme.isLight ? "24" : "33"),
+        fill: withAlpha(colorOf(state, item), theme.isLight ? "24" : "33"),
       });
     }
   }
 
+  const overlayCanvas = document.createElement("canvas");
+  overlayCanvas.className = "track-overlay-canvas";
+
+  let trackRef: TrackRow | null = null;
   const plotWidth = Math.max(200, canvasWrap.clientWidth || 600);
   const plot = new uPlot(
     {
       width: plotWidth,
       height: yCfg.collapsed ? 80 : heightPx,
       legend: { show: false },
+      select: { show: false, left: 0, top: 0, width: 0, height: 0 },
+      cursor: { show: false },
       padding: [6, 8, 2, 0],
-      cursor: {
-        drag: { x: false, y: false, setScale: false },
-        sync: { key: "timeline" },
-      },
       scales: {
         x: { time: false, auto: false },
         y: {
@@ -384,20 +556,32 @@ function buildTrackRow(
       ],
       series: definitions,
       bands,
-      hooks: { draw: [drawOverlays(state, name, members)] },
+      hooks: {
+        draw: [
+          () => {
+            if (trackRef) {
+              drawTrackOverlay(state, trackRef);
+            }
+          },
+        ],
+      },
     },
     [[], ...members.flatMap(() => [[], []])] as unknown as uPlot.AlignedData,
     canvasWrap,
   );
 
+  canvasWrap.append(overlayCanvas);
+
   const trackObj: TrackRow = {
     name,
     members,
     plot,
+    overlayCanvas,
     element,
     legendEl,
     plotEl,
     canvasWrap,
+    legendSignals: signalRefs.legendSignals,
     legendValues: signalRefs.legendValues,
     legendCards: signalRefs.legendCards,
     yAutoBtn: headerRefs.yAutoBtn,
@@ -405,12 +589,14 @@ function buildTrackRow(
     yMinInput: headerRefs.yMinInput,
     yMaxInput: headerRefs.yMaxInput,
     heightPx,
+    scratchSeries: new Array<(number | null | undefined)[]>(members.length * 2),
   };
+  trackRef = trackObj;
+  drawTrackOverlay(state, trackObj);
 
   const interactionAc = attachTrackInteractions(state, trackObj, interactionCallbacks);
   trackAbortControllers.push(interactionAc);
 
-  // Track height drag resizer
   const resizeAc = new AbortController();
   let resizing = false;
   let startY = 0;
@@ -436,6 +622,7 @@ function buildTrackRow(
         MIN_TRACK_HEIGHT,
         Math.min(MAX_TRACK_HEIGHT, Math.round(startH + (event.clientY - startY))),
       );
+      if (nextH === trackObj.heightPx) return;
       trackObj.heightPx = nextH;
       state.trackHeights.set(name, nextH);
       const width = Math.max(200, trackObj.canvasWrap.clientWidth || 600);

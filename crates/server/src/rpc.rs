@@ -143,6 +143,45 @@ impl Drop for ClientGuard {
     }
 }
 
+fn encode_query_frame(
+    tsdb: &Tsdb,
+    origin_ns: i64,
+    request: u32,
+    ids: &[u32],
+    t0: i64,
+    t1: i64,
+    width: usize,
+) -> Vec<u8> {
+    let (start, end) = (t0 + origin_ns, t1 + origin_ns);
+    let (mut min, mut max) = (vec![0.0f64; width], vec![0.0f64; width]);
+    let mut frame = Vec::with_capacity(32 + ids.len() * (8 + width * 16));
+    frame.extend_from_slice(&[KIND_QUERY, VERSION]);
+    frame.extend_from_slice(&(ids.len() as u16).to_le_bytes());
+    frame.extend_from_slice(&request.to_le_bytes());
+    frame.extend_from_slice(&(width as u32).to_le_bytes());
+    frame.extend_from_slice(&0u32.to_le_bytes());
+    frame.extend_from_slice(&t0.to_le_bytes());
+    frame.extend_from_slice(&t1.to_le_bytes());
+    for &id in ids {
+        match tsdb.get(id) {
+            Some(series) => series.columns(start, end, &mut min, &mut max),
+            None => {
+                min.fill(f64::NAN);
+                max.fill(f64::NAN);
+            }
+        }
+        frame.extend_from_slice(&id.to_le_bytes());
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        for value in &min {
+            frame.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in &max {
+            frame.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    frame
+}
+
 impl App {
     pub fn new(sampler: Arc<Sampler>, rtt: Arc<Rtt>, control: Arc<ControlBus>) -> Arc<Self> {
         let origin_ns = sampler.tsdb().now_ns();
@@ -203,34 +242,15 @@ impl App {
         if t1 <= t0 || width == 0 || width > MAX_COLUMNS {
             return Err(invalid("need t1 > t0 and a sensible widthPx"));
         }
-        let (start, end) = (t0 + self.origin_ns, t1 + self.origin_ns);
-        let (mut min, mut max) = (vec![0.0f64; width], vec![0.0f64; width]);
-        let mut frame = Vec::with_capacity(24 + ids.len() * (8 + width * 16));
-        frame.extend_from_slice(&[KIND_QUERY, VERSION]);
-        frame.extend_from_slice(&(ids.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&request.to_le_bytes());
-        frame.extend_from_slice(&(width as u32).to_le_bytes());
-        frame.extend_from_slice(&0u32.to_le_bytes());
-        frame.extend_from_slice(&t0.to_le_bytes());
-        frame.extend_from_slice(&t1.to_le_bytes());
-        for id in ids {
-            match self.tsdb().get(id) {
-                Some(series) => series.columns(start, end, &mut min, &mut max),
-                None => {
-                    min.fill(f64::NAN);
-                    max.fill(f64::NAN);
-                }
-            }
-            frame.extend_from_slice(&id.to_le_bytes());
-            frame.extend_from_slice(&0u32.to_le_bytes());
-            for value in &min {
-                frame.extend_from_slice(&value.to_le_bytes());
-            }
-            for value in &max {
-                frame.extend_from_slice(&value.to_le_bytes());
-            }
-        }
-        Ok(Reply::Binary(frame))
+        Ok(Reply::Binary(encode_query_frame(
+            self.tsdb(),
+            self.origin_ns,
+            request,
+            &ids,
+            t0,
+            t1,
+            width,
+        )))
     }
 
     fn record_stop(&self) -> RpcResult {
@@ -755,5 +775,34 @@ impl App {
                 "unknown method {other:?}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_frame_matches_preallocated_capacity_and_wire_layout() {
+        let db = Tsdb::default();
+        let s1 = db.create_series("a".to_owned(), None, None);
+        let s2 = db.create_series("b".to_owned(), None, None);
+        let origin = 1_000_000;
+        s1.push(origin + 100, 1.25);
+        s2.push(origin + 200, -2.5);
+
+        let width = 16;
+        let ids = [s1.id(), s2.id(), 999];
+        let frame = encode_query_frame(&db, origin, 42, &ids, 0, 1000, width);
+        let expected_len = 32 + ids.len() * (8 + width * 16);
+        assert_eq!(frame.len(), expected_len);
+        assert_eq!(frame.capacity(), expected_len);
+        assert_eq!(frame[0], KIND_QUERY);
+        assert_eq!(frame[1], VERSION);
+        assert_eq!(u16::from_le_bytes(frame[2..4].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(frame[4..8].try_into().unwrap()), 42);
+        assert_eq!(u32::from_le_bytes(frame[8..12].try_into().unwrap()), 16);
+        assert_eq!(i64::from_le_bytes(frame[16..24].try_into().unwrap()), 0);
+        assert_eq!(i64::from_le_bytes(frame[24..32].try_into().unwrap()), 1000);
     }
 }

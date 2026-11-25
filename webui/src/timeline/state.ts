@@ -37,14 +37,25 @@ export interface RttSignalInfo {
   seriesId: number | null;
 }
 
+export interface LegendSignalDom {
+  row: HTMLElement;
+  checkbox: HTMLInputElement;
+  swatch: HTMLInputElement;
+  soloBtn: HTMLButtonElement;
+  valueEl: HTMLElement;
+  lastText: string;
+}
+
 export interface TrackRow {
   name: string;
   members: SeriesInfo[];
   plot: uPlot;
+  overlayCanvas: HTMLCanvasElement;
   element: HTMLElement;
   legendEl: HTMLElement;
   plotEl: HTMLElement;
   canvasWrap: HTMLElement;
+  legendSignals: Map<number, LegendSignalDom>;
   legendValues: Map<number, HTMLElement>;
   legendCards: Map<number, HTMLElement>;
   yAutoBtn: HTMLButtonElement;
@@ -52,11 +63,13 @@ export interface TrackRow {
   yMinInput: HTMLInputElement;
   yMaxInput: HTMLInputElement;
   heightPx: number;
+  scratchSeries: (number | null | undefined)[][];
 }
 
 export interface TimelineState {
   canvasTheme: CanvasTheme;
   series: SeriesInfo[];
+  seriesIndexById: Map<number, number>;
   rttSignals: RttSignalInfo[];
   hidden: Set<number>;
   soloSeriesId: number | null;
@@ -87,7 +100,9 @@ export interface TimelineState {
   boxSelect: { groupName: string; x0: number; x1: number } | null;
   querying: boolean;
   lastQuery: number;
-  lastColumns: { result: QueryResult; xs: number[] } | null;
+  lastColumns: { result: QueryResult; xs: Float64Array } | null;
+  scratchXs: Float64Array;
+  scratchGaps: Uint8Array;
   recording: boolean;
   recordingStartedAt: number | null;
   recordingSamples: number;
@@ -166,6 +181,7 @@ export function createInitialState(canvasTheme: CanvasTheme): TimelineState {
   return {
     canvasTheme,
     series: [],
+    seriesIndexById: new Map(),
     rttSignals: [],
     hidden: new Set(),
     soloSeriesId: null,
@@ -197,6 +213,8 @@ export function createInitialState(canvasTheme: CanvasTheme): TimelineState {
     querying: false,
     lastQuery: 0,
     lastColumns: null,
+    scratchXs: new Float64Array(0),
+    scratchGaps: new Uint8Array(0),
     recording: false,
     recordingStartedAt: null,
     recordingSamples: 0,
@@ -236,9 +254,18 @@ export function getGroupYScale(state: TimelineState, name: string): YScaleConfig
   return cfg;
 }
 
-export function colorOf(state: TimelineState, item: SeriesInfo, index: number): string {
+export function setSeriesList(state: TimelineState, series: SeriesInfo[]): void {
+  state.series = series;
+  state.seriesIndexById.clear();
+  for (let i = 0; i < series.length; i++) {
+    state.seriesIndexById.set(series[i].seriesId, i);
+  }
+}
+
+export function colorOf(state: TimelineState, item: SeriesInfo, index?: number): string {
   const palette = state.canvasTheme.palette;
-  return item.color ?? palette[Math.max(0, index) % palette.length];
+  const resolved = index ?? state.seriesIndexById.get(item.seriesId) ?? 0;
+  return item.color ?? palette[Math.max(0, resolved) % palette.length];
 }
 
 export function toHexColor(color: string): string {

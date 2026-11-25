@@ -2,9 +2,18 @@ import { eventKindInfo } from "./cursors";
 import { FOLLOW_LAG_S, spanSeconds } from "./math";
 import { nowSeconds, type TimelineState } from "./state";
 
+let cachedOverviewCanvas: HTMLCanvasElement | null = null;
+let cachedRangeEl: HTMLElement | null = null;
+let lastRangeText = "";
+
 export function drawOverview(state: TimelineState): void {
-  const canvas = document.getElementById("overview-canvas") as HTMLCanvasElement | null;
-  const rangeEl = document.getElementById("overview-range");
+  if (!cachedOverviewCanvas) {
+    cachedOverviewCanvas = document.getElementById("overview-canvas") as HTMLCanvasElement | null;
+  }
+  if (!cachedRangeEl) {
+    cachedRangeEl = document.getElementById("overview-range");
+  }
+  const canvas = cachedOverviewCanvas;
   if (!canvas) return;
   const rect = canvas.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return;
@@ -99,8 +108,12 @@ export function drawOverview(state: TimelineState): void {
   ctx.lineWidth = Math.max(1, dpr);
   ctx.strokeRect(vx0 + 0.5, 0.5, Math.max(2, vx1 - vx0 - 1), h - 1);
 
-  if (rangeEl) {
-    rangeEl.textContent = `${Math.max(0, vStart).toFixed(2)} s — ${Math.max(0, vEnd).toFixed(2)} s`;
+  if (cachedRangeEl) {
+    const text = `${Math.max(0, vStart).toFixed(2)} s — ${Math.max(0, vEnd).toFixed(2)} s`;
+    if (text !== lastRangeText) {
+      lastRangeText = text;
+      cachedRangeEl.textContent = text;
+    }
   }
 }
 

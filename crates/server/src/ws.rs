@@ -112,8 +112,16 @@ fn rpc_error(id: &Value, error: RpcError) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": err_obj})
 }
 
-/// Parse and serve one request, off the async threads since it may wait on
-/// the probe. Returns None for a notification.
+fn is_fast_memory_rpc(method: &str) -> bool {
+    matches!(
+        method,
+        "timeline.query" | "events.query" | "rtt.signals" | "session.stats" | "timeline.rate"
+    )
+}
+
+/// Parse and serve one request. Pure in-memory read RPCs execute inline to
+/// avoid thread-pool scheduling jitter; methods that may block on the probe or
+/// disk run on the blocking pool. Returns None for a notification.
 async fn serve_request(
     app: Arc<App>,
     subscriptions: Subscriptions,
@@ -130,11 +138,15 @@ async fn serve_request(
     let id = request["id"].clone();
     let method = request["method"].as_str().unwrap_or("").to_owned();
     let params = request["params"].clone();
-    let served = tokio::task::spawn_blocking({
-        let id = id.clone();
-        move || app.dispatch(&method, &params, &id, &subscriptions)
-    })
-    .await;
+    let served = if is_fast_memory_rpc(&method) {
+        Ok(app.dispatch(&method, &params, &id, &subscriptions))
+    } else {
+        tokio::task::spawn_blocking({
+            let id = id.clone();
+            move || app.dispatch(&method, &params, &id, &subscriptions)
+        })
+        .await
+    };
     Some(match served {
         Ok(Ok(Reply::Json(result))) => {
             Message::text(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string())

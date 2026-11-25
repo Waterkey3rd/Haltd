@@ -8,6 +8,8 @@ import {
   formatFrequency,
   formatNumber,
   formatSeconds,
+  hasAnyNaN,
+  lastValueFromColumns,
   panViewEnd,
   panYRange,
   pxToTime,
@@ -89,7 +91,7 @@ describe("timeline math", () => {
   });
 
   it("interpolates nearest non-NaN column value and computes series stats", () => {
-    const xs = [0, 1, 2, 3];
+    const xs = new Float64Array([0, 1, 2, 3]);
     const data = {
       min: new Float64Array([1, NaN, 4, 2]),
       max: new Float64Array([3, NaN, 6, 4]),
@@ -97,6 +99,9 @@ describe("timeline math", () => {
     expect(valueAtColumns(xs, data, 0)).toBe(2);
     expect(valueAtColumns(xs, data, 2.1)).toBe(5);
     expect(valueAtColumns(xs, data, 1)).not.toBeNull();
+    expect(lastValueFromColumns(data)).toBe(3);
+    expect(hasAnyNaN(data.min)).toBe(true);
+    expect(hasAnyNaN(xs)).toBe(false);
     expect(computeSeriesStatsFromColumns(data)).toEqual({
       last: 3,
       min: 1,

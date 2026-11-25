@@ -1,4 +1,4 @@
-export type WatchColumnKey = "hex" | "type" | "address" | "rate";
+export type WatchColumnKey = "type" | "address" | "rate";
 
 export type WatchFormat = "default" | "dec" | "uint" | "hex" | "bin" | "float" | "char";
 
@@ -10,12 +10,11 @@ export type TargetRunState = "disconnected" | "running" | "halted";
 
 export type ColumnWidths = Record<"name" | "value" | WatchColumnKey, number>;
 
-export const ALL_OPTIONAL_COLUMNS: readonly WatchColumnKey[] = ["hex", "type", "address", "rate"];
+export const ALL_OPTIONAL_COLUMNS: readonly WatchColumnKey[] = ["type", "address", "rate"];
 
 export const DEFAULT_COLUMN_WIDTHS: ColumnWidths = {
   name: 220,
-  value: 150,
-  hex: 118,
+  value: 190,
   type: 130,
   address: 112,
   rate: 66,
@@ -56,6 +55,19 @@ export interface WatchRowNode {
   watchpoint: WatchpointAccess | null;
 }
 
+export interface WatchValuePatch {
+  id: number;
+  value: string;
+  rawHex: string | null;
+  address: string | null;
+  error: string | null;
+  prevValue: string | null;
+  prevRawHex: string | null;
+  lastChangedAtMs: number | null;
+  elapsedMs: number | null;
+  changedOnStop: boolean;
+}
+
 export type HostToWebviewMessage =
   | {
       type: "snapshot";
@@ -68,7 +80,13 @@ export type HostToWebviewMessage =
     }
   | {
       type: "patch";
-      updates: WatchRowNode[];
+      updates: WatchValuePatch[];
+      runState: TargetRunState;
+      connected: boolean;
+    }
+  | {
+      type: "metaPatch";
+      rows: WatchRowNode[];
       runState: TargetRunState;
       connected: boolean;
     }
@@ -81,6 +99,10 @@ export type HostToWebviewMessage =
   | {
       type: "columns";
       columns: WatchColumnKey[];
+      widths: ColumnWidths;
+    }
+  | {
+      type: "columnWidths";
       widths: ColumnWidths;
     }
   | {
