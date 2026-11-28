@@ -1,4 +1,6 @@
 import { strict as assert } from "node:assert";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import test from "node:test";
 import {
   detectDeviceHints,
@@ -49,6 +51,7 @@ test("infers ELF path and generates build task when tasks.json is absent", () =>
   });
   assert.equal(taskDecision.defaultLabel, "CMake: build");
   assert.ok(taskDecision.generatedTask?.tasksJsonContent.includes('"isDefault": true'));
+  assert.ok(taskDecision.generatedTask?.tasksJsonContent.includes('"$haltd-gcc"'));
 });
 
 test("merges Build & Debug (runToMain: true) and Attach while preserving JSONC comments", () => {
@@ -88,4 +91,28 @@ test("merges Build & Debug (runToMain: true) and Attach while preserving JSONC c
   assert.ok(merged.includes('"request": "launch"'));
   assert.ok(merged.includes('"request": "attach"'));
   assert.ok(merged.includes('"runToMain": true'));
+});
+
+test("manifest registers onDebugInitialConfigurations and omits static initialConfigurations", () => {
+  const pkgPath = [
+    path.resolve(__dirname, "../package.json"),
+    path.resolve(__dirname, "../../package.json"),
+  ].find((candidate) => fs.existsSync(candidate));
+  assert.ok(pkgPath, "expected vscode-ext/package.json to exist");
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+    name?: string;
+    activationEvents?: string[];
+    contributes?: {
+      debuggers?: Array<{
+        initialConfigurations?: unknown;
+        configurationSnippets?: unknown[];
+      }>;
+    };
+  };
+  assert.equal(pkg.name, "haltd-embedded");
+  assert.ok(pkg.activationEvents?.includes("onDebugInitialConfigurations"));
+  const dbg = pkg.contributes?.debuggers?.[0];
+  assert.ok(dbg);
+  assert.equal(dbg.initialConfigurations, undefined);
+  assert.equal(dbg.configurationSnippets?.length, 2);
 });

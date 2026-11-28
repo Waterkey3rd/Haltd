@@ -5,6 +5,13 @@ import { nowSeconds, type TimelineState } from "./state";
 let cachedOverviewCanvas: HTMLCanvasElement | null = null;
 let cachedRangeEl: HTMLElement | null = null;
 let lastRangeText = "";
+let cachedOverviewCssW = 0;
+let cachedOverviewCssH = 0;
+
+export function invalidateOverviewSizeCache(): void {
+  cachedOverviewCssW = 0;
+  cachedOverviewCssH = 0;
+}
 
 export function drawOverview(state: TimelineState): void {
   if (!cachedOverviewCanvas) {
@@ -15,12 +22,16 @@ export function drawOverview(state: TimelineState): void {
   }
   const canvas = cachedOverviewCanvas;
   if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return;
+  if (cachedOverviewCssW <= 0 || cachedOverviewCssH <= 0) {
+    const rect = canvas.getBoundingClientRect();
+    cachedOverviewCssW = rect.width;
+    cachedOverviewCssH = rect.height;
+  }
+  if (cachedOverviewCssW <= 0 || cachedOverviewCssH <= 0) return;
 
   const dpr = devicePixelRatio || 1;
-  const w = Math.round(rect.width * dpr);
-  const h = Math.round(rect.height * dpr);
+  const w = Math.round(cachedOverviewCssW * dpr);
+  const h = Math.round(cachedOverviewCssH * dpr);
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;

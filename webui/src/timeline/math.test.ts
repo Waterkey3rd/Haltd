@@ -1,19 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
   DIVISIONS,
+  computeQueryLod,
   computeSeriesStatsFromColumns,
   divisionLabels,
   divisionSplits,
   fitTimeRange,
+  formatAxisSi,
   formatFrequency,
   formatNumber,
+  formatOzoneDelta,
+  formatOzoneTime,
   formatSeconds,
+  formatSpacedNumber,
   hasAnyNaN,
+  hasMeaningfulSpread,
   lastValueFromColumns,
   panViewEnd,
   panYRange,
   pxToTime,
+  snapFollowEndNs,
   spanSeconds,
+  stabilizeAutoYRange,
   stepDivision,
   timeToPx,
   valueAtColumns,
@@ -80,10 +88,19 @@ describe("timeline math", () => {
     expect(divisionLabels(0.5, splits)).toEqual(["1.0", "1.5", "2.0", "2.5"]);
   });
 
-  it("formats numbers, durations and frequencies", () => {
+  it("formats numbers, SI ticks, spaced values, Ozone time, durations and frequencies", () => {
     expect(formatNumber(null)).toBe("—");
     expect(formatNumber(0)).toBe("0");
     expect(formatNumber(12.3456, 4)).toBe("12.35");
+    expect(formatAxisSi(3200)).toBe("3.2k");
+    expect(formatAxisSi(2000)).toBe("2k");
+    expect(formatAxisSi(-200)).toBe("-200");
+    expect(formatSpacedNumber(1460)).toBe("1 460");
+    expect(formatSpacedNumber(-67)).toBe("-67");
+    expect(formatSpacedNumber(1476.5)).toBe("1 476.5");
+    expect(formatOzoneTime(97.89)).toBe("+01:37.890 s");
+    expect(formatOzoneTime(5.125)).toBe("+5.125 s");
+    expect(formatOzoneDelta(-0.5965)).toBe("-0.596 5 s");
     expect(formatSeconds(1.25)).toBe("1.250 s");
     expect(formatSeconds(0.0045)).toBe("4.500 ms");
     expect(formatSeconds(0.00025)).toBe("250.0 µs");
@@ -108,6 +125,65 @@ describe("timeline math", () => {
       max: 6,
       avg: (2 + 5 + 3) / 3,
       pp: 5,
+    });
+  });
+
+  it("binary-searches non-uniform timestamps in raw mode", () => {
+    const xs = new Float64Array([1.0, 1.001, 1.002, 1.005]);
+    const vals = new Float64Array([10, 20, 30, 40]);
+    const data = { min: vals, max: vals };
+    expect(valueAtColumns(xs, data, 1.0002, true)).toBe(10);
+    expect(valueAtColumns(xs, data, 1.0019, true)).toBe(30);
+    expect(valueAtColumns(xs, data, 1.004, true)).toBe(40);
+  });
+
+  it("picks raw mode when sparse and caps overview columns to CSS pixel width", () => {
+    const zoomed = computeQueryLod({
+      plotCssWidth: 1800,
+      spanSec: 1,
+      maxRateHz: 1000,
+      inMotion: false,
+      hasHaltsInWindow: false,
+    });
+    expect(zoomed.maxRawPoints).toBeGreaterThanOrEqual(1000);
+    expect(zoomed.widthPx).toBe(1000);
+
+    const motionOverview = computeQueryLod({
+      plotCssWidth: 1800,
+      spanSec: 30,
+      maxRateHz: 1000,
+      inMotion: true,
+      hasHaltsInWindow: false,
+    });
+    expect(motionOverview.maxRawPoints).toBe(0);
+    expect(motionOverview.widthPx).toBe(1800);
+
+    const settledOverview = computeQueryLod({
+      plotCssWidth: 2400,
+      spanSec: 30,
+      maxRateHz: 1000,
+      inMotion: false,
+      hasHaltsInWindow: false,
+      dpr: 2,
+    });
+    expect(settledOverview.maxRawPoints).toBe(0);
+    expect(settledOverview.widthPx).toBe(1920);
+  });
+
+  it("snaps Follow end time, checks envelope spread, and stabilizes Auto Y with hysteresis", () => {
+    expect(snapFollowEndNs(5_019_999_999, 5_000_000_000, 500)).toBe(5_010_000_000);
+    expect(
+      hasMeaningfulSpread(new Float64Array([1, 2]), new Float64Array([1.01, 2.02]), 0.1),
+    ).toBe(false);
+    expect(
+      hasMeaningfulSpread(new Float64Array([1, 2]), new Float64Array([1.01, 2.5]), 0.1),
+    ).toBe(true);
+
+    const prev = { min: 2000, max: 3000 };
+    expect(stabilizeAutoYRange(prev, 2400, 2900, (a, b) => [a - 100, b + 100])).toEqual(prev);
+    expect(stabilizeAutoYRange(prev, 2400, 3100, (a, b) => [a - 100, b + 100])).toEqual({
+      min: 2300,
+      max: 3200,
     });
   });
 });

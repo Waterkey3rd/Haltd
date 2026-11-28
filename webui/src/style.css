@@ -576,6 +576,7 @@ select.off {
 #tracks-list {
   display: flex;
   flex-direction: column;
+  min-height: 100%;
 }
 
 #tracks-list[hidden] {
@@ -738,11 +739,30 @@ select.off {
 .legend-sig-name {
   flex: 1;
   min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
   font-size: 11.5px;
   color: var(--text-strong);
   overflow: hidden;
+  white-space: nowrap;
+}
+
+.legend-sig-prefix {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--muted);
+}
+
+.legend-sig-tail {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.track-rate-badge {
+  margin-left: auto;
 }
 
 .source-badge {

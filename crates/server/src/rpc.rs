@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 use rtt::Rtt;
 use sampler::{BatchSignal, Mode, Sampler};
 use serde_json::{json, Value};
-use tsdb::{export_recording_csv, export_recording_csv_bytes, CsvOptions, Recorder, Tsdb};
+use tokio::sync::Notify;
+use tsdb::{
+    export_recording_csv, export_recording_csv_bytes, CsvOptions, RawWindow, Recorder, Tsdb,
+};
 
 use crate::control::{Control, ControlBus};
 use crate::diagnose::Diagnostic;
@@ -19,7 +22,10 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const SERVER_ERROR: i64 = -32000;
 const MAX_COLUMNS: usize = 8192;
+const MAX_RAW_POINTS: usize = 24_000;
 const KIND_QUERY: u8 = 4;
+const KIND_QUERY_RAW: u8 = 5;
+const KIND_QUERY_UNCHANGED: u8 = 6;
 const VERSION: u8 = 1;
 
 pub(crate) enum Reply {
@@ -121,6 +127,7 @@ pub struct App {
     last_recording: Mutex<Option<PathBuf>>,
     origin_ns: i64,
     clients: Arc<AtomicUsize>,
+    change_notify: Arc<Notify>,
 }
 
 pub(crate) struct CsvExportRequest {
@@ -143,6 +150,91 @@ impl Drop for ClientGuard {
     }
 }
 
+fn revision_tag(tsdb: &Tsdb) -> u32 {
+    let rev = tsdb.revision() as u32;
+    if rev == 0 {
+        1
+    } else {
+        rev
+    }
+}
+
+fn encode_unchanged_frame(tsdb: &Tsdb, request: u32) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(16);
+    frame.extend_from_slice(&[KIND_QUERY_UNCHANGED, VERSION, 0, 0]);
+    frame.extend_from_slice(&request.to_le_bytes());
+    frame.extend_from_slice(&revision_tag(tsdb).to_le_bytes());
+    frame.extend_from_slice(&0u32.to_le_bytes());
+    frame
+}
+
+fn encode_raw_query_frame(
+    tsdb: &Tsdb,
+    origin_ns: i64,
+    request: u32,
+    ids: &[u32],
+    t0: i64,
+    t1: i64,
+    max_raw_points: usize,
+) -> Option<Vec<u8>> {
+    let cap = max_raw_points.min(MAX_RAW_POINTS);
+    if cap == 0 {
+        return None;
+    }
+    let (start, end) = (t0 + origin_ns, t1 + origin_ns);
+    let mut windows: Vec<Option<RawWindow>> = Vec::with_capacity(ids.len());
+    for &id in ids {
+        match tsdb.get(id) {
+            Some(series) => {
+                let win = series.raw_window(start, end, cap)?;
+                windows.push(Some(win));
+            }
+            None => windows.push(None),
+        }
+    }
+    let shared_t: Option<&[i64]> = windows
+        .iter()
+        .flatten()
+        .find(|w| !w.t.is_empty())
+        .map(|w| w.t.as_slice());
+    if let Some(ref_t) = shared_t {
+        for win in windows.iter().flatten() {
+            if !win.t.is_empty() && win.t.as_slice() != ref_t {
+                return None;
+            }
+        }
+    }
+    let n = shared_t.map_or(0, |t| t.len());
+    let non_empty_count = windows
+        .iter()
+        .filter(|w| w.as_ref().is_some_and(|raw| !raw.v.is_empty()))
+        .count();
+    let mut frame = Vec::with_capacity(32 + n * 8 + ids.len() * 8 + non_empty_count * n * 8);
+    frame.extend_from_slice(&[KIND_QUERY_RAW, VERSION]);
+    frame.extend_from_slice(&(ids.len() as u16).to_le_bytes());
+    frame.extend_from_slice(&request.to_le_bytes());
+    frame.extend_from_slice(&(n as u32).to_le_bytes());
+    frame.extend_from_slice(&revision_tag(tsdb).to_le_bytes());
+    frame.extend_from_slice(&t0.to_le_bytes());
+    frame.extend_from_slice(&t1.to_le_bytes());
+    if let Some(ts) = shared_t {
+        for &t in ts {
+            let sec = (t - origin_ns) as f64 / 1e9;
+            frame.extend_from_slice(&sec.to_le_bytes());
+        }
+    }
+    for (&id, win_opt) in ids.iter().zip(&windows) {
+        let vals = win_opt.as_ref().map(|w| w.v.as_slice()).unwrap_or(&[]);
+        let has_data = u32::from(!vals.is_empty());
+        frame.extend_from_slice(&id.to_le_bytes());
+        frame.extend_from_slice(&has_data.to_le_bytes());
+        for &v in vals {
+            frame.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    Some(frame)
+}
+
 fn encode_query_frame(
     tsdb: &Tsdb,
     origin_ns: i64,
@@ -159,7 +251,7 @@ fn encode_query_frame(
     frame.extend_from_slice(&(ids.len() as u16).to_le_bytes());
     frame.extend_from_slice(&request.to_le_bytes());
     frame.extend_from_slice(&(width as u32).to_le_bytes());
-    frame.extend_from_slice(&0u32.to_le_bytes());
+    frame.extend_from_slice(&revision_tag(tsdb).to_le_bytes());
     frame.extend_from_slice(&t0.to_le_bytes());
     frame.extend_from_slice(&t1.to_le_bytes());
     for &id in ids {
@@ -185,6 +277,11 @@ fn encode_query_frame(
 impl App {
     pub fn new(sampler: Arc<Sampler>, rtt: Arc<Rtt>, control: Arc<ControlBus>) -> Arc<Self> {
         let origin_ns = sampler.tsdb().now_ns();
+        let change_notify = Arc::new(Notify::new());
+        let notify = Arc::clone(&change_notify);
+        sampler.tsdb().on_change(Arc::new(move || {
+            notify.notify_waiters();
+        }));
         Arc::new(Self {
             sampler,
             rtt,
@@ -193,7 +290,12 @@ impl App {
             last_recording: Mutex::new(None),
             origin_ns,
             clients: Arc::default(),
+            change_notify,
         })
+    }
+
+    pub(crate) fn change_notify(&self) -> &Arc<Notify> {
+        &self.change_notify
     }
 
     pub(crate) fn client_count(&self) -> usize {
@@ -241,6 +343,19 @@ impl App {
         let width = u32_param(params, "widthPx")? as usize;
         if t1 <= t0 || width == 0 || width > MAX_COLUMNS {
             return Err(invalid("need t1 > t0 and a sensible widthPx"));
+        }
+        if let Some(prev_rev) = params["ifChangedSince"].as_u64() {
+            if (prev_rev as u32) == revision_tag(self.tsdb()) {
+                return Ok(Reply::Binary(encode_unchanged_frame(self.tsdb(), request)));
+            }
+        }
+        let max_raw = params["maxRawPoints"].as_u64().unwrap_or(0) as usize;
+        if max_raw > 0 {
+            if let Some(frame) =
+                encode_raw_query_frame(self.tsdb(), self.origin_ns, request, &ids, t0, t1, max_raw)
+            {
+                return Ok(Reply::Binary(frame));
+            }
         }
         Ok(Reply::Binary(encode_query_frame(
             self.tsdb(),
@@ -463,7 +578,13 @@ impl App {
                 status["controller"] = json!(self.control.has_controller());
                 ok(status)
             }
-            "session.stats" => ok(sampler.stats_json()),
+            "session.stats" => {
+                if params["includeCalls"].as_bool().unwrap_or(false) {
+                    ok(sampler.stats_full_json())
+                } else {
+                    ok(sampler.stats_json())
+                }
+            }
             "symbols.complete" => {
                 let query = params["query"].as_str().unwrap_or("");
                 let limit = params["limit"].as_u64().unwrap_or(40) as usize;
@@ -769,10 +890,24 @@ impl App {
             }
             "timeline.query" => self.query(params, id),
             "timeline.subscribe" => {
-                let mut subscribed = subscriptions.lock().expect("subscription lock");
-                for series in series_ids(params)? {
-                    if let Some(item) = self.tsdb().get(series) {
-                        subscribed.series.insert(series, item.total());
+                let ids = series_ids(params)?;
+                let replace = params["replace"].as_bool().unwrap_or(false);
+                let mut subscribed = subscriptions.lock().unwrap_or_else(|err| err.into_inner());
+                if replace {
+                    subscribed.series.retain(|id, _| ids.contains(id));
+                    for series in ids {
+                        if let Some(item) = self.tsdb().get(series) {
+                            subscribed
+                                .series
+                                .entry(series)
+                                .or_insert_with(|| item.total());
+                        }
+                    }
+                } else {
+                    for series in ids {
+                        if let Some(item) = self.tsdb().get(series) {
+                            subscribed.series.insert(series, item.total());
+                        }
                     }
                 }
                 ok(json!({}))
@@ -831,5 +966,136 @@ mod tests {
         assert_eq!(u32::from_le_bytes(frame[8..12].try_into().unwrap()), 16);
         assert_eq!(i64::from_le_bytes(frame[16..24].try_into().unwrap()), 0);
         assert_eq!(i64::from_le_bytes(frame[24..32].try_into().unwrap()), 1000);
+        assert_ne!(u32::from_le_bytes(frame[12..16].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn raw_and_unchanged_query_frames_encode_aligned_wire_layouts() {
+        let db = Tsdb::default();
+        let s1 = db.create_series("x".to_owned(), None, None);
+        let s2 = db.create_series("y".to_owned(), None, None);
+        let origin = 1_000_000_000;
+        for i in 0..4 {
+            let t = origin + i * 1_000_000;
+            s1.push(t, i as f64);
+            s2.push(t, (i as f64) * 10.0);
+        }
+
+        let ids = [s1.id(), s2.id(), 999];
+        let raw =
+            encode_raw_query_frame(&db, origin, 7, &ids, 0, 5_000_000, 64).expect("raw query fits");
+        assert_eq!(raw[0], KIND_QUERY_RAW);
+        assert_eq!(raw[1], VERSION);
+        assert_eq!(u16::from_le_bytes(raw[2..4].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(raw[4..8].try_into().unwrap()), 7);
+        let n = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
+        assert_eq!(n, 4);
+        assert_eq!(
+            u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+            revision_tag(&db)
+        );
+        let expected_len = 32 + n * 8 + ids.len() * 8 + 2 * n * 8;
+        assert_eq!(raw.len(), expected_len);
+
+        // Falls back to None when series timestamps differ.
+        let s3 = db.create_series("z".to_owned(), None, None);
+        s3.push(origin + 123_456, 42.0);
+        assert!(
+            encode_raw_query_frame(&db, origin, 8, &[s1.id(), s3.id()], 0, 5_000_000, 64).is_none()
+        );
+
+        let unchanged = encode_unchanged_frame(&db, 9);
+        assert_eq!(unchanged.len(), 16);
+        assert_eq!(unchanged[0], KIND_QUERY_UNCHANGED);
+        assert_eq!(u32::from_le_bytes(unchanged[4..8].try_into().unwrap()), 9);
+        assert_eq!(
+            u32::from_le_bytes(unchanged[8..12].try_into().unwrap()),
+            revision_tag(&db)
+        );
+    }
+
+    #[test]
+    fn raw_query_supports_up_to_24000_points() {
+        let db = Tsdb::default();
+        let s1 = db.create_series("a".to_owned(), None, None);
+        let s2 = db.create_series("b".to_owned(), None, None);
+        let origin = 1_000_000_000;
+        let samples1: Vec<(i64, f64)> = (0..5_000)
+            .map(|i| (origin + i * 1_000_000, i as f64))
+            .collect();
+        let samples2: Vec<(i64, f64)> = (0..5_000)
+            .map(|i| (origin + i * 1_000_000, (i as f64) * 2.0))
+            .collect();
+        s1.push_all(samples1);
+        s2.push_all(samples2);
+
+        let raw = encode_raw_query_frame(
+            &db,
+            origin,
+            11,
+            &[s1.id(), s2.id()],
+            0,
+            5_000_000_000,
+            MAX_RAW_POINTS,
+        )
+        .expect("5000 points fit under MAX_RAW_POINTS");
+        assert_eq!(raw[0], KIND_QUERY_RAW);
+        assert_eq!(u32::from_le_bytes(raw[8..12].try_into().unwrap()), 5_000);
+    }
+
+    #[test]
+    fn timeline_subscribe_replace_preserves_existing_cursors_and_prunes_removed() {
+        let tsdb = Arc::new(Tsdb::default());
+        let s1 = tsdb.create_series("s1".to_owned(), None, None);
+        let s2 = tsdb.create_series("s2".to_owned(), None, None);
+        let s3 = tsdb.create_series("s3".to_owned(), None, None);
+        s1.push(100, 1.0);
+        s2.push(100, 2.0);
+        let sampler = sampler::Sampler::new(tsdb);
+        let rtt = rtt::Rtt::new(sampler.tsdb().clone());
+        let control = ControlBus::new(Arc::new(Mutex::new(None)), sampler.clone());
+        let app = App::new(sampler, rtt, control);
+        let subs = Subscriptions::default();
+
+        // Initial replace subscription starts s1 and s2 at total() = 1.
+        assert!(app
+            .dispatch(
+                "timeline.subscribe",
+                &json!({"seriesIds": [s1.id(), s2.id()], "replace": true}),
+                &json!(1),
+                &subs,
+            )
+            .is_ok());
+        assert_eq!(subs.lock().unwrap().series.get(&s1.id()), Some(&1));
+        assert_eq!(subs.lock().unwrap().series.get(&s2.id()), Some(&1));
+
+        // New sample arrives on s1 before next replace subscribe.
+        s1.push(200, 10.0);
+        s3.push(200, 30.0);
+        assert!(app
+            .dispatch(
+                "timeline.subscribe",
+                &json!({"seriesIds": [s1.id(), s3.id()], "replace": true}),
+                &json!(2),
+                &subs,
+            )
+            .is_ok());
+        let guard = subs.lock().unwrap();
+        assert_eq!(guard.series.get(&s1.id()), Some(&1)); // kept existing cursor
+        assert_eq!(guard.series.get(&s2.id()), None); // pruned
+        assert_eq!(guard.series.get(&s3.id()), Some(&1)); // initialized at total()
+        drop(guard);
+
+        // Non-replace subscribe keeps legacy cursor reset behavior.
+        s1.push(300, 20.0);
+        assert!(app
+            .dispatch(
+                "timeline.subscribe",
+                &json!({"seriesIds": [s1.id()]}),
+                &json!(3),
+                &subs,
+            )
+            .is_ok());
+        assert_eq!(subs.lock().unwrap().series.get(&s1.id()), Some(&3));
     }
 }

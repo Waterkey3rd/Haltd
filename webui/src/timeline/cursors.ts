@@ -12,7 +12,10 @@ import {
   divisionSplits,
   formatFrequency,
   formatNumber,
+  formatOzoneDelta,
+  formatOzoneTime,
   formatSeconds,
+  formatSpacedNumber,
   pxToTime,
   spanSeconds,
   timeToPx,
@@ -22,6 +25,7 @@ import {
   isSeriesVisible,
   nowSeconds,
   valueAt,
+  Y_AXIS_SIZE,
   type TimelineState,
   type TrackRow,
 } from "./state";
@@ -100,6 +104,55 @@ function drawBadge(
   ctx.restore();
 }
 
+function drawOzoneHeaderBox(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  hoverTime: number,
+  refTime: number | null,
+  state: TimelineState,
+  plotRight: number,
+  plotTop: number,
+): number {
+  const dpr = devicePixelRatio || 1;
+  const theme = state.canvasTheme;
+  const font = `600 ${Math.round(10.5 * dpr)}px ui-monospace, monospace`;
+  const lines = [
+    `Time   ${formatOzoneTime(hoverTime)}`,
+    ...(refTime !== null ? [`Cursor ${formatOzoneDelta(hoverTime - refTime)}`] : []),
+  ];
+  ctx.save();
+  ctx.font = font;
+  const padX = 6 * dpr;
+  const padY = 4 * dpr;
+  const lineH = 14 * dpr;
+  let maxTextW = 0;
+  for (const line of lines) {
+    maxTextW = Math.max(maxTextW, measureMonoWidth(ctx, font, line));
+  }
+  const boxW = maxTextW + padX * 2;
+  const boxH = lines.length * lineH + padY * 2 - 2 * dpr;
+  const placeLeft = x + 6 * dpr + boxW > plotRight;
+  const bx = placeLeft ? Math.max(0, x - 6 * dpr - boxW) : x + 6 * dpr;
+  const by = plotTop + 3 * dpr;
+
+  ctx.fillStyle = theme.hoverBoxBg;
+  ctx.strokeStyle = theme.hoverBoxBorder;
+  ctx.lineWidth = Math.max(1, dpr * 0.9);
+  ctx.beginPath();
+  ctx.roundRect(bx, by, boxW, boxH, 3 * dpr);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = theme.hoverBoxText;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], bx + padX, by + padY + lineH * (i + 0.5) - 1 * dpr);
+  }
+  ctx.restore();
+  return by + boxH;
+}
+
 function drawHoverValueBox(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -117,24 +170,24 @@ function drawHoverValueBox(
   ctx.save();
   ctx.font = font;
   const padX = 5 * dpr;
-  const boxH = 15 * dpr;
+  const boxH = 14 * dpr;
   const textW = measureMonoWidth(ctx, font, text);
   const boxW = textW + padX * 2 + 7 * dpr;
-  const placeLeft = x + 8 * dpr + boxW > plotRight;
-  const bx = placeLeft ? x - 8 * dpr - boxW : x + 8 * dpr;
+  const placeLeft = x + 7 * dpr + boxW > plotRight;
+  const bx = placeLeft ? x - 7 * dpr - boxW : x + 7 * dpr;
   const by = Math.max(plotTop + 2 * dpr, Math.min(plotBottom - boxH - 2 * dpr, y - boxH / 2));
 
   ctx.fillStyle = theme.hoverBoxBg;
   ctx.strokeStyle = dotColor;
-  ctx.lineWidth = Math.max(1, dpr);
+  ctx.lineWidth = Math.max(1, dpr * 0.9);
   ctx.beginPath();
-  ctx.roundRect(bx, by, boxW, boxH, 3 * dpr);
+  ctx.roundRect(bx, by, boxW, boxH, 2.5 * dpr);
   ctx.fill();
   ctx.stroke();
 
   ctx.fillStyle = dotColor;
   ctx.beginPath();
-  ctx.arc(bx + 5 * dpr, by + boxH / 2, 2.5 * dpr, 0, Math.PI * 2);
+  ctx.arc(bx + 5 * dpr, by + boxH / 2, 2.3 * dpr, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.fillStyle = theme.hoverBoxText;
@@ -156,38 +209,69 @@ function drawValueBoxes(
   plotWidth: number,
   plotHeight: number,
   dotColorOverride?: string,
+  avoidTopY = plotTop,
 ): void {
   const dpr = devicePixelRatio || 1;
-  const placedY: number[] = [];
-  const minGap = 17 * dpr;
+  const plotBottom = plotTop + plotHeight;
+  const boxH = 14 * dpr;
+  const minGap = 16 * dpr;
+  const items: Array<{ py: number; boxY: number; text: string; color: string }> = [];
+
   for (const member of visibleMembers) {
     const v = valueAt(state, member, t);
     if (v === null) continue;
     const py = toY(v);
-    if (py < plotTop || py > plotTop + plotHeight) continue;
+    if (py < plotTop || py > plotBottom) continue;
     const color = colorOf(state, member);
     ctx.fillStyle = dotColorOverride ?? color;
     ctx.beginPath();
-    ctx.arc(x, py, 3.5 * dpr, 0, Math.PI * 2);
+    ctx.arc(x, py, 3 * dpr, 0, Math.PI * 2);
     ctx.fill();
+    items.push({ py, boxY: py, text: formatSpacedNumber(v, 5), color });
+  }
+  if (items.length === 0) return;
 
-    let boxY = py;
-    for (const prevY of placedY) {
-      if (Math.abs(boxY - prevY) < minGap) {
-        boxY = prevY + minGap;
+  items.sort((a, b) => a.py - b.py);
+  const minCenterY = Math.max(plotTop + boxH / 2 + 2 * dpr, avoidTopY + boxH / 2 + 3 * dpr);
+  const maxCenterY = plotBottom - boxH / 2 - 2 * dpr;
+
+  for (let i = 0; i < items.length; i++) {
+    const floor = i === 0 ? minCenterY : items[i - 1].boxY + minGap;
+    if (items[i].boxY < floor) {
+      items[i].boxY = floor;
+    }
+  }
+  if (items[items.length - 1].boxY > maxCenterY) {
+    items[items.length - 1].boxY = maxCenterY;
+    for (let i = items.length - 2; i >= 0; i--) {
+      const ceil = items[i + 1].boxY - minGap;
+      if (items[i].boxY > ceil) {
+        items[i].boxY = ceil;
       }
     }
-    placedY.push(boxY);
+    const hardFloor = plotTop + boxH / 2 + 2 * dpr;
+    if (items[0].boxY < hardFloor) {
+      items[0].boxY = hardFloor;
+      for (let i = 1; i < items.length; i++) {
+        const floor = items[i - 1].boxY + minGap;
+        if (items[i].boxY < floor) {
+          items[i].boxY = floor;
+        }
+      }
+    }
+  }
+
+  for (const item of items) {
     drawHoverValueBox(
       ctx,
       x,
-      boxY,
-      formatNumber(v, 5),
-      color,
+      item.boxY,
+      item.text,
+      item.color,
       state,
       plotLeft + plotWidth,
       plotTop,
-      plotTop + plotHeight,
+      plotBottom,
     );
   }
 }
@@ -238,6 +322,23 @@ export function drawTrackOverlay(state: TimelineState, track: TrackRow): void {
   context.beginPath();
   context.rect(left, top, width, height);
   context.clip();
+
+  // 0. Subtle Ozone-style top minor ticks along plot top edge
+  if (max > min && state.division > 0) {
+    const minorStep = state.division / 5;
+    const firstMinor = Math.ceil((min - minorStep * 1e-6) / minorStep);
+    context.strokeStyle = theme.tickStroke;
+    context.lineWidth = Math.max(1, dpr * 0.75);
+    context.beginPath();
+    for (let i = 0; i < 600; i++) {
+      const mt = (firstMinor + i) * minorStep;
+      if (mt > max + minorStep * 1e-6) break;
+      const mx = Math.round(toX(mt)) + 0.5;
+      context.moveTo(mx, top);
+      context.lineTo(mx, top + 3.5 * dpr);
+    }
+    context.stroke();
+  }
 
   // 1. Halted regions
   for (const halt of state.halts) {
@@ -361,36 +462,45 @@ export function drawTrackOverlay(state: TimelineState, track: TrackRow): void {
     }
   }
 
-  // 6. Hover Crosshair + Ozone intersection value boxes
-  if (state.hoverTime !== null && state.hoverTime >= min && state.hoverTime <= max) {
-    const hx = vline(state.hoverTime, theme.crosshair, [3 * dpr, 3 * dpr]);
-    if (hx !== null) {
-      drawValueBoxes(
-        context,
-        hx,
-        visibleMembers,
-        state.hoverTime,
-        state,
-        toY,
-        left,
-        top,
-        width,
-        height,
-      );
-      if (state.sampleCursor !== null) {
-        const dt = state.hoverTime - state.sampleCursor;
-        const align = hx + 90 * dpr > left + width ? "right" : "left";
-        drawBadge(
-          context,
-          hx,
-          top + 18 * dpr,
-          `Δt ${formatSeconds(dt)}`,
-          theme.sampleCursor,
-          "#111315",
-          align,
-        );
-      }
+  // 6. Pixel-locked Hover Crosshair + Ozone header & intersection value boxes
+  if (state.hoverRelX !== null && width > 0 && max > min) {
+    const clampedRelX = Math.max(0, Math.min(width / dpr, state.hoverRelX));
+    const hoverT = pxToTime(clampedRelX, width / dpr, min, max);
+    state.hoverTime = hoverT;
+    const hx = Math.round(left + clampedRelX * dpr) + 0.5;
+
+    context.save();
+    context.strokeStyle = theme.crosshair;
+    context.lineWidth = Math.max(1, dpr * 0.85);
+    context.beginPath();
+    context.moveTo(hx, top);
+    context.lineTo(hx, top + height);
+    context.stroke();
+    context.restore();
+
+    const firstExpanded = state.tracks[0];
+    const showHeader =
+      state.hoverTrack === track.name || (state.hoverTrack === null && firstExpanded === track);
+    let avoidTopY = top;
+    if (showHeader) {
+      const refT = state.sampleCursor ?? state.cursorA;
+      avoidTopY = drawOzoneHeaderBox(context, hx, hoverT, refT, state, left + width, top);
     }
+
+    drawValueBoxes(
+      context,
+      hx,
+      visibleMembers,
+      hoverT,
+      state,
+      toY,
+      left,
+      top,
+      width,
+      height,
+      undefined,
+      avoidTopY,
+    );
   }
 
   // 7. Measurement Cursors A & B
@@ -463,33 +573,55 @@ export interface SharedAxisMetrics {
   tEnd: number;
 }
 
+let cachedAxisCssW = 0;
+let cachedAxisCssH = 0;
+
+export function invalidateAxisSizeCache(): void {
+  cachedAxisCssW = 0;
+  cachedAxisCssH = 0;
+}
+
 export function getSharedAxisMetrics(
   canvasWidthCss: number,
   state: TimelineState,
 ): SharedAxisMetrics {
   const dpr = devicePixelRatio || 1;
   const firstPlot = state.tracks[0]?.plot;
-  const leftPx = firstPlot ? firstPlot.bbox.left / dpr : 64;
+  const leftPx = firstPlot ? firstPlot.bbox.left / dpr : Y_AXIS_SIZE;
   const plotWidthPx = firstPlot
     ? Math.max(10, firstPlot.bbox.width / dpr)
     : Math.max(10, canvasWidthCss - leftPx);
-  const tEnd = state.lastColumns
-    ? state.lastColumns.result.t1 / 1e9
-    : state.followLive
-      ? nowSeconds(state) - 0.03
-      : state.viewEnd;
-  const tStart = state.lastColumns
-    ? state.lastColumns.result.t0 / 1e9
-    : tEnd - spanSeconds(state.division);
+  const plotMin = firstPlot?.scales.x.min;
+  const plotMax = firstPlot?.scales.x.max;
+  const tEnd =
+    plotMin !== undefined && plotMax !== undefined && plotMax > plotMin
+      ? plotMax
+      : state.lastColumns
+        ? state.lastColumns.result.t1 / 1e9
+        : state.followLive
+          ? nowSeconds(state) - 0.04
+          : state.viewEnd;
+  const tStart =
+    plotMin !== undefined && plotMax !== undefined && plotMax > plotMin
+      ? plotMin
+      : state.lastColumns
+        ? state.lastColumns.result.t0 / 1e9
+        : tEnd - spanSeconds(state.division);
   return { leftPx, plotWidthPx, tStart, tEnd };
 }
 
 export function drawSharedAxis(canvas: HTMLCanvasElement, state: TimelineState): void {
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return;
+  if (cachedAxisCssW <= 0 || cachedAxisCssH <= 0) {
+    const rect = canvas.getBoundingClientRect();
+    cachedAxisCssW = rect.width;
+    cachedAxisCssH = rect.height;
+  }
+  const cssW = cachedAxisCssW;
+  const cssH = cachedAxisCssH;
+  if (cssW <= 0 || cssH <= 0) return;
   const dpr = devicePixelRatio || 1;
-  const w = Math.round(rect.width * dpr);
-  const h = Math.round(rect.height * dpr);
+  const w = Math.round(cssW * dpr);
+  const h = Math.round(cssH * dpr);
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -500,7 +632,7 @@ export function drawSharedAxis(canvas: HTMLCanvasElement, state: TimelineState):
   const theme = state.canvasTheme;
   ctx.clearRect(0, 0, w, h);
 
-  const metrics = getSharedAxisMetrics(rect.width, state);
+  const metrics = getSharedAxisMetrics(cssW, state);
   const left = metrics.leftPx * dpr;
   const plotW = metrics.plotWidthPx * dpr;
   const { tStart, tEnd } = metrics;
@@ -514,6 +646,24 @@ export function drawSharedAxis(canvas: HTMLCanvasElement, state: TimelineState):
 
   const splits = divisionSplits(state.division, tStart, tEnd);
   const labels = divisionLabels(state.division, splits);
+
+  if (state.division > 0 && tEnd > tStart) {
+    const minorStep = state.division / 5;
+    const firstMinor = Math.ceil((tStart - minorStep * 1e-6) / minorStep);
+    ctx.strokeStyle = theme.tickStroke;
+    ctx.lineWidth = Math.max(1, dpr * 0.75);
+    ctx.beginPath();
+    for (let i = 0; i < 600; i++) {
+      const mt = (firstMinor + i) * minorStep;
+      if (mt > tEnd + minorStep * 1e-6) break;
+      const mx = Math.round(left + timeToPx(mt, plotW, tStart, tEnd)) + 0.5;
+      if (mx < left || mx > left + plotW) continue;
+      ctx.moveTo(mx, 0);
+      ctx.lineTo(mx, 3 * dpr);
+    }
+    ctx.stroke();
+  }
+
   ctx.font = `${Math.round(11 * dpr)}px ui-monospace, monospace`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -522,13 +672,14 @@ export function drawSharedAxis(canvas: HTMLCanvasElement, state: TimelineState):
     const x = left + timeToPx(splits[i], plotW, tStart, tEnd);
     if (x < left - 2 || x > left + plotW + 2) continue;
     ctx.strokeStyle = theme.tickStroke;
+    ctx.lineWidth = Math.max(1, dpr);
     ctx.beginPath();
     ctx.moveTo(Math.round(x) + 0.5, 0);
-    ctx.lineTo(Math.round(x) + 0.5, 5 * dpr);
+    ctx.lineTo(Math.round(x) + 0.5, 6 * dpr);
     ctx.stroke();
 
     ctx.fillStyle = theme.axisStroke;
-    ctx.fillText(labels[i], x, 7 * dpr);
+    ctx.fillText(`${labels[i]} s`, x, 8 * dpr);
   }
 
   const drawHandle = (tVal: number | null, color: string, label: string, fillText: string) => {

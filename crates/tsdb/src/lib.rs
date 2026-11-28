@@ -17,7 +17,7 @@ pub use record::{
     export_recording_csv, export_recording_csv_bytes, read_recording, Recorder, Recording,
     RecordingStats,
 };
-pub use ring::{Chunk, Ring};
+pub use ring::{Chunk, RawWindow, Ring};
 
 /// Options controlling CSV export alignment and time column origin.
 #[derive(Clone, Copy, Debug)]
@@ -130,9 +130,45 @@ pub struct Event {
     pub detail: serde_json::Value,
 }
 
+type ChangeListener = Arc<dyn Fn() + Send + Sync>;
+
+struct ChangeHub {
+    revision: AtomicU64,
+    listeners: RwLock<Vec<ChangeListener>>,
+}
+
+impl ChangeHub {
+    fn new() -> Self {
+        Self {
+            revision: AtomicU64::new(1),
+            listeners: RwLock::new(Vec::new()),
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    fn bump(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+        let listeners = self.listeners.read().unwrap_or_else(|err| err.into_inner());
+        for listener in listeners.iter() {
+            listener();
+        }
+    }
+
+    fn subscribe(&self, listener: ChangeListener) {
+        self.listeners
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(listener);
+    }
+}
+
 pub struct Series {
     meta: RwLock<SeriesMeta>,
     data: Mutex<Ring>,
+    hub: Arc<ChangeHub>,
 }
 
 impl Series {
@@ -145,14 +181,24 @@ impl Series {
     }
 
     pub fn push(&self, t: i64, v: f64) {
-        self.data.lock().expect("ring lock").push(t, v);
+        {
+            self.data.lock().expect("ring lock").push(t, v);
+        }
+        self.hub.bump();
     }
 
     /// Append many samples under one lock, for high-rate writers.
     pub fn push_all(&self, samples: impl IntoIterator<Item = (i64, f64)>) {
-        let mut ring = self.data.lock().expect("ring lock");
-        for (t, v) in samples {
-            ring.push(t, v);
+        let grew = {
+            let mut ring = self.data.lock().expect("ring lock");
+            let before = ring.total();
+            for (t, v) in samples {
+                ring.push(t, v);
+            }
+            ring.total() > before
+        };
+        if grew {
+            self.hub.bump();
         }
     }
 
@@ -179,6 +225,13 @@ impl Series {
             .expect("ring lock")
             .columns(t0, t1, min, max);
     }
+
+    pub fn raw_window(&self, t0: i64, t1: i64, max_points: usize) -> Option<RawWindow> {
+        self.data
+            .lock()
+            .expect("ring lock")
+            .raw_window(t0, t1, max_points)
+    }
 }
 
 pub struct Tsdb {
@@ -186,6 +239,7 @@ pub struct Tsdb {
     events: Mutex<VecDeque<Event>>,
     next_id: AtomicU32,
     next_event: AtomicU64,
+    hub: Arc<ChangeHub>,
     started: Instant,
     started_unix_ns: i64,
     capacity: usize,
@@ -207,10 +261,19 @@ impl Tsdb {
             events: Mutex::new(VecDeque::new()),
             next_id: AtomicU32::new(1),
             next_event: AtomicU64::new(1),
+            hub: Arc::new(ChangeHub::new()),
             started: Instant::now(),
             started_unix_ns: unix,
             capacity,
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.hub.revision()
+    }
+
+    pub fn on_change(&self, listener: ChangeListener) {
+        self.hub.subscribe(listener);
     }
 
     /// Host timeline: nanoseconds since the Unix epoch, driven by a monotonic
@@ -234,6 +297,7 @@ impl Tsdb {
                 color,
             }),
             data: Mutex::new(Ring::new(self.capacity)),
+            hub: Arc::clone(&self.hub),
         });
         self.series
             .write()
@@ -284,11 +348,14 @@ impl Tsdb {
             kind,
             detail,
         };
-        let mut events = self.events.lock().expect("event lock");
-        if events.len() == MAX_EVENTS {
-            events.pop_front();
+        {
+            let mut events = self.events.lock().expect("event lock");
+            if events.len() == MAX_EVENTS {
+                events.pop_front();
+            }
+            events.push_back(event);
         }
-        events.push_back(event);
+        self.hub.bump();
     }
 
     /// Events with a sequence number above `after`.
@@ -484,5 +551,46 @@ mod tests {
             String::from_utf8(bytes).unwrap(),
             "t_s,a,b\n1.000000000,10,1\n2.000000000,20,1\n"
         );
+    }
+
+    #[test]
+    fn revision_increments_on_samples_and_events_and_exposes_raw_window() {
+        let db = Tsdb::default();
+        let r0 = db.revision();
+        let s = db.create_series("x".to_owned(), None, None);
+        s.push(100, 1.0);
+        let r1 = db.revision();
+        assert!(r1 > r0);
+        s.push_all([(200, 2.0), (300, 3.0)]);
+        let r2 = db.revision();
+        assert!(r2 > r1);
+        db.push_event(EventKind::Halted, json!({}));
+        assert!(db.revision() > r2);
+
+        let raw = s.raw_window(150, 250, 8).expect("raw window");
+        assert_eq!(raw.t, [100, 200, 300]);
+        assert_eq!(raw.v, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn change_listener_fires_on_push_push_all_and_events() {
+        let db = Tsdb::default();
+        let hits = Arc::new(AtomicU64::new(0));
+        let hits_cb = Arc::clone(&hits);
+        db.on_change(Arc::new(move || {
+            hits_cb.fetch_add(1, Ordering::Relaxed);
+        }));
+        let s = db.create_series("sig".to_owned(), None, None);
+        s.push(100, 1.0);
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+        s.push_all(std::iter::empty());
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+        s.push_all([(200, 2.0), (300, 3.0)]);
+        assert_eq!(hits.load(Ordering::Relaxed), 2);
+
+        db.push_event(EventKind::Halted, json!({}));
+        assert_eq!(hits.load(Ordering::Relaxed), 3);
     }
 }

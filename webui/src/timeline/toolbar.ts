@@ -63,6 +63,7 @@ export function stopFollowing(state: TimelineState): void {
     state.viewEnd = nowSeconds(state) - FOLLOW_LAG_S;
   }
   state.followLive = false;
+  state.clockPll.reset();
   syncFollowButton(state);
 }
 
@@ -444,6 +445,7 @@ export function wireToolbar(
   });
   byId("follow")?.addEventListener("click", () => {
     state.followLive = !state.followLive;
+    state.clockPll.reset();
     if (state.followLive) {
       state.viewEnd = nowSeconds(state) - FOLLOW_LAG_S;
     }
@@ -484,7 +486,7 @@ export function wireToolbar(
   byId("toggle-band")?.addEventListener("click", () => {
     state.showBands = !state.showBands;
     byId("toggle-band")?.setAttribute("aria-pressed", String(state.showBands));
-    callbacks.onAppearanceChanged();
+    callbacks.rebuild();
   });
   byId("record")?.addEventListener("click", async () => {
     const measureEl = byId("measure");

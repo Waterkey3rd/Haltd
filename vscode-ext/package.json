@@ -2,7 +2,7 @@
   "name": "haltd-embedded",
   "displayName": "Haltd Embedded",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "publisher": "WaterKeyqwq",
   "license": "MIT",
   "repository": {
@@ -23,6 +23,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onDebugInitialConfigurations",
     "onDebugResolve:haltd",
     "onLanguage:jsonc",
     "workspaceContains:.vscode/launch.json",
@@ -214,26 +215,34 @@
             }
           }
         },
-        "initialConfigurations": [
+        "configurationSnippets": [
           {
-            "type": "haltd",
-            "request": "launch",
-            "name": "Haltd: Build & Debug",
-            "device": "STM32H723VG",
-            "interface": "SWD",
-            "speed": 4000,
-            "elf": "${workspaceFolder}/build/firmware.elf",
-            "flash": "changed",
-            "runToMain": true
+            "label": "Haltd: Build & Debug",
+            "description": "Flash firmware if changed and run to main()",
+            "body": {
+              "name": "Haltd: Build & Debug",
+              "type": "haltd",
+              "request": "launch",
+              "device": "${1:STM32H723VG}",
+              "interface": "SWD",
+              "speed": 4000,
+              "elf": "^\"\\${workspaceFolder}/${2:build/firmware.elf}\"",
+              "flash": "changed",
+              "runToMain": true
+            }
           },
           {
-            "type": "haltd",
-            "request": "attach",
-            "name": "Haltd: Attach",
-            "device": "STM32H723VG",
-            "interface": "SWD",
-            "speed": 4000,
-            "elf": "${workspaceFolder}/build/firmware.elf"
+            "label": "Haltd: Attach",
+            "description": "Attach to a running target without resetting or flashing",
+            "body": {
+              "name": "Haltd: Attach",
+              "type": "haltd",
+              "request": "attach",
+              "device": "${1:STM32H723VG}",
+              "interface": "SWD",
+              "speed": 4000,
+              "elf": "^\"\\${workspaceFolder}/${2:build/firmware.elf}\""
+            }
           }
         ]
       }
@@ -588,7 +597,30 @@
           "when": "false"
         }
       ]
-    }
+    },
+    "problemPatterns": [
+      {
+        "name": "haltd-gcc-location",
+        "regexp": "^(.*?):(\\d+):(\\d+):\\s+(?:fatal\\s+)?(warning|error|note):\\s+(.*)$",
+        "file": 1,
+        "line": 2,
+        "column": 3,
+        "severity": 4,
+        "message": 5
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "haltd-gcc",
+        "label": "GCC / Clang (ARM Embedded)",
+        "owner": "haltd-gcc",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": "$haltd-gcc-location"
+      }
+    ]
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --external:bufferutil --external:utf-8-validate --outfile=dist/extension.js --sourcemap && esbuild src/webview/liveWatchApp.ts --bundle --platform=browser --format=iife --outfile=dist/liveWatchApp.js --sourcemap",

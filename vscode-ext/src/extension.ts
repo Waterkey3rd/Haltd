@@ -978,7 +978,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("haltd.showStats", async () => {
       try {
-        const stats = await client.call("session.stats");
+        const stats = await client.call("session.stats", { includeCalls: true });
         diagnostics.logInfo(`Session stats:\n${JSON.stringify(stats, null, 2)}`);
         diagnostics.outputChannel.show(true);
       } catch (error) {

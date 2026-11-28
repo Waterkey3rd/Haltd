@@ -964,6 +964,15 @@ impl Sampler {
                 })
                 .collect();
             stats["queues"] = json!(queues);
+        }
+        stats
+    }
+
+    /// Extended diagnostics statistics including underlying probe call histograms.
+    /// Blocks on the probe actor queue, so must not run directly inside an async executor.
+    pub fn stats_full_json(&self) -> serde_json::Value {
+        let mut stats = self.stats_json();
+        if let Some(bound) = self.bound() {
             let calls = bound
                 .binding
                 .handle
@@ -1029,5 +1038,96 @@ mod tests {
         sampler.timeline_clear();
         assert!(sampler.timeline_list().is_empty());
         assert!(tsdb.list().is_empty());
+    }
+
+    fn minimal_arm_elf() -> Vec<u8> {
+        let mut hdr = vec![0u8; 52];
+        hdr[0..4].copy_from_slice(b"\x7fELF");
+        hdr[4] = 1; // ELFCLASS32
+        hdr[5] = 1; // ELFDATA2LSB
+        hdr[6] = 1; // EV_CURRENT
+        hdr[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        hdr[18..20].copy_from_slice(&40u16.to_le_bytes()); // EM_ARM
+        hdr[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+        hdr[40..42].copy_from_slice(&52u16.to_le_bytes()); // e_ehsize
+        hdr
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stats_json_does_not_block_inside_tokio_runtime() {
+        let elf_path = std::env::temp_dir().join(format!(
+            "haltd-sampler-stats-test-{}.elf",
+            std::process::id()
+        ));
+        std::fs::write(&elf_path, minimal_arm_elf()).expect("write minimal ELF");
+        let db = Arc::new(
+            SymbolDb::load(
+                &elf_path,
+                &symbols::LoadOptions {
+                    cache_dir: None,
+                    no_cache: true,
+                },
+            )
+            .expect("load minimal ELF"),
+        );
+        let _ = std::fs::remove_file(&elf_path);
+
+        let actor = probe_jlink::actor::ProbeActor::spawn(Box::new(probe_mock::MockProbe::new()));
+        let handle = actor.handle();
+        let tsdb = Arc::new(Tsdb::default());
+        let sampler = Sampler::new(tsdb);
+
+        // Binding talks synchronously to the probe actor (just like DAP's dedicated thread).
+        tokio::task::spawn_blocking({
+            let sampler = sampler.clone();
+            let handle = handle.clone();
+            let elf_path = elf_path.clone();
+            move || {
+                let probe = handle
+                    .call_blocking(Priority::P0, |p| p.info())
+                    .expect("probe info");
+                sampler.bind(Binding {
+                    handle,
+                    db,
+                    device: "STM32F103C8".to_owned(),
+                    elf: elf_path,
+                    speed_khz: 4000,
+                    probe,
+                    memory: Vec::new(),
+                    visualizer_files: Vec::new(),
+                    config: SamplingConfig::default(),
+                    rtt_config: None,
+                    rtt_auto: RttAuto::default(),
+                    workspace: None,
+                });
+            }
+        })
+        .await
+        .expect("bind join");
+
+        // `stats_json` must run cleanly inline inside a Tokio worker thread without blocking/panicking.
+        let stats = tokio::spawn({
+            let sampler = sampler.clone();
+            async move { sampler.stats_json() }
+        })
+        .await
+        .expect("tokio task join");
+        assert!(stats["queues"].is_array());
+        assert!(stats["calls"].is_null());
+
+        let full = tokio::task::spawn_blocking({
+            let sampler = sampler.clone();
+            move || sampler.stats_full_json()
+        })
+        .await
+        .expect("spawn_blocking join");
+        assert!(full["calls"].is_object());
+
+        tokio::task::spawn_blocking(move || {
+            sampler.unbind();
+            let _ = actor.shutdown();
+        })
+        .await
+        .expect("unbind join");
     }
 }

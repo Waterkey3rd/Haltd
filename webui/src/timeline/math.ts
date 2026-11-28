@@ -4,7 +4,7 @@ export const DIVISIONS = [
 export const DIVISIONS_ON_SCREEN = 10;
 export const WHEEL_STEP = 60;
 export const MARKERS_AT_DIVISION = 0.02;
-export const FOLLOW_LAG_S = 0.03;
+export const FOLLOW_LAG_S = 0.04;
 
 export interface SeriesColumnData {
   min: Float64Array;
@@ -166,6 +166,82 @@ export function formatSeconds(seconds: number): string {
   return `${(seconds * 1e6).toFixed(1)} µs`;
 }
 
+/** Formats Y-axis tick values concisely with SI suffixes (Ozone style: 3.2k, 2k, -200). */
+export function formatAxisSi(val: number): string {
+  if (!Number.isFinite(val)) return "";
+  if (val === 0) return "0";
+  const abs = Math.abs(val);
+  if (abs >= 1e6) {
+    return `${Number((val / 1e6).toPrecision(4))}M`;
+  }
+  if (abs >= 1e3) {
+    return `${Number((val / 1e3).toPrecision(4))}k`;
+  }
+  if (abs < 1e-3) {
+    return val.toExponential(1);
+  }
+  return Number(val.toPrecision(4)).toString();
+}
+
+/** Formats numbers with thin-space thousands grouping (e.g. `1 460`, `-67`). */
+export function formatSpacedNumber(val: number | null | undefined, sigDigits = 5): string {
+  if (val === null || val === undefined || Number.isNaN(val) || !Number.isFinite(val)) {
+    return "—";
+  }
+  if (val === 0) return "0";
+  const abs = Math.abs(val);
+  if (abs >= 1e7 || (abs > 0 && abs < 1e-4)) {
+    return val.toExponential(3);
+  }
+  const raw = Number.isInteger(val) ? String(val) : Number(val.toPrecision(sigDigits)).toString();
+  if (raw.includes("e") || raw.includes("E")) {
+    return raw;
+  }
+  const sign = raw.startsWith("-") ? "-" : "";
+  const body = sign ? raw.slice(1) : raw;
+  const dotIdx = body.indexOf(".");
+  const intPart = dotIdx >= 0 ? body.slice(0, dotIdx) : body;
+  const fracPart = dotIdx >= 0 ? body.slice(dotIdx) : "";
+  if (intPart.length <= 3) {
+    return raw;
+  }
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return `${sign}${grouped}${fracPart}`;
+}
+
+/** Formats absolute timeline seconds in `+MM:SS.mmm s` or `+SS.mmm s`. */
+export function formatOzoneTime(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "—";
+  const sign = seconds < 0 ? "-" : "+";
+  const abs = Math.abs(seconds);
+  if (abs >= 60) {
+    const mins = Math.floor(abs / 60);
+    const rem = abs - mins * 60;
+    const whole = Math.floor(rem);
+    const ms = Math.floor((rem - whole) * 1000 + 1e-6);
+    if (ms >= 1000) {
+      return `${sign}${String(mins).padStart(2, "0")}:${String(whole + 1).padStart(2, "0")}.000 s`;
+    }
+    return `${sign}${String(mins).padStart(2, "0")}:${String(whole).padStart(2, "0")}.${String(ms).padStart(3, "0")} s`;
+  }
+  return `${sign}${abs.toFixed(3)} s`;
+}
+
+/** Formats relative cursor offset with millisecond + sub-millisecond grouping. */
+export function formatOzoneDelta(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "—";
+  const sign = seconds < 0 ? "-" : "+";
+  const abs = Math.abs(seconds);
+  if (abs < 1e-3) {
+    return `${sign}${(abs * 1e6).toFixed(1)} µs`;
+  }
+  const fixed = abs.toFixed(4);
+  const dot = fixed.indexOf(".");
+  const intPart = fixed.slice(0, dot);
+  const frac = fixed.slice(dot + 1);
+  return `${sign}${intPart}.${frac.slice(0, 3)} ${frac.slice(3)} s`;
+}
+
 export function formatFrequency(deltaSeconds: number): string {
   const abs = Math.abs(deltaSeconds);
   if (abs <= 1e-9) {
@@ -185,18 +261,41 @@ export function valueAtColumns(
   xs: ArrayLike<number>,
   data: SeriesColumnData | undefined,
   seconds: number,
+  isNonUniformXs = false,
 ): number | null {
   const len = xs.length;
   if (!data || len === 0) {
     return null;
   }
-  const step = len > 1 ? xs[1] - xs[0] : 1;
-  if (step === 0) {
-    return null;
-  }
-  const column = Math.min(len - 1, Math.max(0, Math.round((seconds - xs[0]) / step)));
   const minArr = data.min;
   const maxArr = data.max;
+  let column: number;
+  if (isNonUniformXs) {
+    if (len === 1) {
+      column = 0;
+    } else {
+      let low = 0;
+      let high = len - 1;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (xs[mid] < seconds) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      column =
+        low > 0 && Math.abs(xs[low - 1] - seconds) < Math.abs(xs[low] - seconds)
+          ? low - 1
+          : low;
+    }
+  } else {
+    const step = len > 1 ? xs[1] - xs[0] : 1;
+    if (step === 0) {
+      return null;
+    }
+    column = Math.min(len - 1, Math.max(0, Math.round((seconds - xs[0]) / step)));
+  }
   const lo0 = minArr[column];
   const hi0 = maxArr[column];
   if (lo0 === lo0 && hi0 === hi0) {
@@ -224,6 +323,76 @@ export function valueAtColumns(
     }
   }
   return null;
+}
+
+export interface QueryLodOptions {
+  plotCssWidth: number;
+  spanSec: number;
+  maxRateHz: number;
+  inMotion: boolean;
+  hasHaltsInWindow: boolean;
+  dpr?: number;
+}
+
+export function computeQueryLod(opts: QueryLodOptions): {
+  widthPx: number;
+  maxRawPoints: number;
+} {
+  const widthPx = Math.min(1920, Math.max(256, Math.round(opts.plotCssWidth)));
+  if (opts.maxRateHz > 0) {
+    const expected = Math.ceil(opts.spanSec * opts.maxRateHz);
+    const rawCutoff = Math.min(3600, Math.round(opts.plotCssWidth * 1.5));
+    const maxRawPoints =
+      !opts.hasHaltsInWindow && expected <= rawCutoff
+        ? Math.min(4096, Math.max(expected + 64, widthPx))
+        : 0;
+    return { widthPx: Math.min(widthPx, Math.max(64, expected)), maxRawPoints };
+  }
+  return { widthPx, maxRawPoints: 0 };
+}
+
+export function snapFollowEndNs(rawEndNs: number, spanNs: number, columns: number): number {
+  const stepNs = Math.max(1, Math.round(spanNs / Math.max(1, columns)));
+  return Math.floor(rawEndNs / stepNs) * stepNs;
+}
+
+export function hasMeaningfulSpread(
+  min: Float64Array,
+  max: Float64Array,
+  thresholdVal: number,
+): boolean {
+  const len = min.length;
+  for (let i = 0; i < len; i++) {
+    const diff = max[i] - min[i];
+    if (diff > thresholdVal) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function stabilizeAutoYRange(
+  prev: { min: number; max: number } | null,
+  dataMin: number,
+  dataMax: number,
+  padRange: (lo: number, hi: number) => [number, number],
+): { min: number; max: number } {
+  if (prev !== null && prev.max > prev.min) {
+    const curSpan = prev.max - prev.min;
+    const dataSpan = Math.max(0, dataMax - dataMin);
+    const margin = curSpan * 0.03;
+    const fitsInside =
+      dataMin >= prev.min + (prev.min === 0 && dataMin >= 0 ? 0 : margin) &&
+      dataMax <= prev.max - margin;
+    const notTooSmall =
+      dataSpan >= curSpan * 0.35 ||
+      (dataSpan === 0 && curSpan <= Math.max(2, Math.abs(dataMax) * 0.25));
+    if (fitsInside && notTooSmall) {
+      return prev;
+    }
+  }
+  const [nMin, nMax] = padRange(dataMin, dataMax);
+  return { min: nMin, max: nMax };
 }
 
 export function lastValueFromColumns(data: SeriesColumnData | undefined): number | null {

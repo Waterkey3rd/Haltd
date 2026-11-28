@@ -53,6 +53,13 @@ pub struct Ring {
     levels: Vec<Level>,
 }
 
+/// Raw `(t, v)` samples within a time window for zoomed-in direct rendering.
+#[derive(Debug, Default, PartialEq)]
+pub struct RawWindow {
+    pub t: Vec<i64>,
+    pub v: Vec<f64>,
+}
+
 /// Samples returned from [`Ring::read_since`].
 #[derive(Debug, Default, PartialEq)]
 pub struct Chunk {
@@ -136,7 +143,13 @@ impl Ring {
 
     /// First index in `[from, total)` with time >= `t`.
     pub fn lower_bound(&self, from: u64, t: i64) -> u64 {
-        let (mut low, mut high) = (from.max(self.first_index()), self.total);
+        self.lower_bound_in(from, self.total, t)
+    }
+
+    /// First index in `[from, high)` with time >= `t`.
+    fn lower_bound_in(&self, from: u64, high: u64, t: i64) -> u64 {
+        let mut low = from.max(self.first_index());
+        let mut high = high.min(self.total);
         while low < high {
             let middle = low + (high - low) / 2;
             if self.time_at(middle) < t {
@@ -177,12 +190,26 @@ impl Ring {
     /// Fill per-column extremes for `columns` equal time slices of `[t0, t1)`.
     /// A column with no finite sample gets NaN.
     pub fn columns(&self, t0: i64, t1: i64, min: &mut [f64], max: &mut [f64]) {
+        if min.is_empty() {
+            return;
+        }
         let columns = min.len() as i128;
         let span = i128::from(t1 - t0);
         let mut index = self.lower_bound(0, t0);
+        let limit = self.lower_bound(index, t1);
+        if index >= limit {
+            min.fill(f64::NAN);
+            max.fill(f64::NAN);
+            return;
+        }
         for column in 0..min.len() {
             let end = t0 + (span * (column as i128 + 1) / columns) as i64;
-            let next = self.lower_bound(index, end);
+            if index >= limit || self.time_at(index) >= end {
+                min[column] = f64::NAN;
+                max[column] = f64::NAN;
+                continue;
+            }
+            let next = self.lower_bound_in(index, limit, end);
             let (low, high) = if next > index {
                 self.min_max(index, next)
             } else {
@@ -192,6 +219,30 @@ impl Ring {
             max[column] = if high.is_finite() { high } else { f64::NAN };
             index = next;
         }
+    }
+
+    /// Return raw `(t, v)` samples covering `[t0, t1)` (plus 1 boundary sample
+    /// on each side when available) if at most `max_points` samples are needed.
+    pub fn raw_window(&self, t0: i64, t1: i64, max_points: usize) -> Option<RawWindow> {
+        if self.total == 0 {
+            return Some(RawWindow::default());
+        }
+        let first = self.first_index();
+        let start = self.lower_bound(first, t0);
+        let end = self.lower_bound(start, t1);
+        let left = start.saturating_sub(1).max(first);
+        let right = if end < self.total { end + 1 } else { end };
+        let len = (right - left) as usize;
+        if len > max_points {
+            return None;
+        }
+        let mut t = Vec::with_capacity(len);
+        let mut v = Vec::with_capacity(len);
+        for index in left..right {
+            t.push(self.time_at(index));
+            v.push(self.value_at(index));
+        }
+        Some(RawWindow { t, v })
     }
 
     pub fn read_since(&self, cursor: u64, limit: usize) -> Chunk {
@@ -327,5 +378,29 @@ mod tests {
         let (mut min, mut max) = ([0.0; 2], [0.0; 2]);
         ring.columns(1_000_000, 2_000_000, &mut min, &mut max);
         assert!(min[0].is_nan() && max[1].is_nan());
+    }
+
+    #[test]
+    fn columns_skips_empty_gaps_and_handles_sparse_spans() {
+        let mut ring = Ring::new(64);
+        ring.push(1_000, 5.0);
+        ring.push(9_000, 12.0);
+        let (mut min, mut max) = (vec![0.0; 10], vec![0.0; 10]);
+        ring.columns(0, 10_000, &mut min, &mut max);
+        assert_eq!(min[1], 5.0);
+        assert_eq!(max[1], 5.0);
+        assert!(min[2..9].iter().all(|v| v.is_nan()));
+        assert_eq!(min[9], 12.0);
+        assert_eq!(max[9], 12.0);
+    }
+
+    #[test]
+    fn raw_window_returns_boundary_anchors_and_caps_points() {
+        let ring = filled(100, 20);
+        // Samples are at t = 0, 1000, ..., 19000. Query [5000, 8000) gets anchors 4000 and 8000.
+        let raw = ring.raw_window(5_000, 8_000, 10).expect("within cap");
+        assert_eq!(raw.t, [4_000, 5_000, 6_000, 7_000, 8_000]);
+        assert_eq!(raw.v, [4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert!(ring.raw_window(5_000, 8_000, 4).is_none());
     }
 }

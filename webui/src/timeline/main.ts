@@ -24,7 +24,13 @@ import {
 import { ExportUiController } from "./exportCsv";
 import { isInputElement, resolveShortcut } from "./keymap";
 import { renderRttSignalsDrawer, updateLegendReadouts, type LegendCallbacks } from "./legend";
-import { fitTimeRange, FOLLOW_LAG_S, spanSeconds, stepDivision } from "./math";
+import {
+  computeQueryLod,
+  fitTimeRange,
+  FOLLOW_LAG_S,
+  spanSeconds,
+  stepDivision,
+} from "./math";
 import { attachOverviewScrubber, drawOverview } from "./overview";
 import { PresetController } from "./presets";
 import { RenderScheduler } from "./scheduler";
@@ -57,8 +63,11 @@ import {
   applySeriesFilter,
   applyTrackYScale,
   drawQueryResult,
+  drawStreamFrame,
+  hasHaltsInRange,
   rebuildTracks,
   redrawAllOverlays,
+  redrawTrackOverlaysOnly,
   resizeAllTracks,
   syncTrackYControls,
   syncTracksAppearance,
@@ -80,9 +89,20 @@ function setMeasureText(text: string): void {
   if (m) m.textContent = text;
 }
 
+let lastStreamRenderEnd = -Infinity;
+let lastStreamDivision = 0;
+
 async function loadSeries(): Promise<void> {
+  lastStreamRenderEnd = -Infinity;
   const reply = await client.call<{ series: SeriesInfo[] }>("timeline.list");
   setSeriesList(state, reply.series);
+  const ids = state.series
+    .filter((s) => s.actualMode !== "none")
+    .map((s) => s.seriesId);
+  state.streamBuffer.retainSeries(ids);
+  void client
+    .call("timeline.subscribe", { seriesIds: ids, replace: true })
+    .catch(() => undefined);
   try {
     const rttReply = await client.call<{ signals: RttSignalInfo[] }>("rtt.signals");
     state.rttSignals = rttReply.signals ?? [];
@@ -91,6 +111,9 @@ async function loadSeries(): Promise<void> {
     // RTT signals optional
   }
   rebuild();
+  if (ids.length > 0) {
+    scheduler.invalidate("query");
+  }
 }
 
 function hasLiveSources(): boolean {
@@ -104,19 +127,73 @@ async function executeQuery(): Promise<void> {
   state.querying = true;
   try {
     const ids = state.tracks.flatMap((t) => t.members.map((m) => m.seriesId));
-    const width = state.tracks[0]?.plot.bbox.width
+    const plotCssWidth = state.tracks[0]?.plot.bbox.width
       ? Math.round(state.tracks[0].plot.bbox.width / (devicePixelRatio || 1))
       : 0;
-    if (ids.length > 0 && width > 0) {
-      const end = state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd;
-      if (state.followLive) state.viewEnd = end;
+    if (ids.length > 0 && plotCssWidth > 0) {
+      const span = spanSeconds(state.division);
+      const rawEnd = state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd;
+      if (state.streamBuffer.canServe(ids, rawEnd - span, state.historyStart)) {
+        if (state.followLive) state.viewEnd = rawEnd;
+        lastStreamRenderEnd = state.viewEnd;
+        lastStreamDivision = state.division;
+        drawStreamFrame(state);
+        return;
+      }
+
+      const inMotion = performance.now() < state.interactingUntil;
+      const maxRateHz = state.series.reduce(
+        (max, s) => Math.max(max, s.actualMode === "rtt" ? 1000 : (s.rateHz || 0)),
+        0,
+      );
+      const hasHalts = hasHaltsInRange(state, rawEnd - span, rawEnd);
+      const lod = computeQueryLod({
+        plotCssWidth,
+        spanSec: span,
+        maxRateHz,
+        inMotion,
+        hasHaltsInWindow: hasHalts,
+        dpr: devicePixelRatio || 1,
+      });
+      // Prefix-backfill StreamBuffer raw history up to 2s/div (22k pts) on demand.
+      const expected = maxRateHz > 0 ? Math.ceil(span * maxRateHz) : 0;
+      const maxRawPoints =
+        !hasHalts && expected > 0 && expected <= 22_000
+          ? Math.min(24_000, expected + 128)
+          : lod.maxRawPoints;
+
+      const spanNs = Math.round(span * NS);
+      let t1Ns: number;
+      let t0Ns: number;
+      let queryWidthPx = lod.widthPx;
+      let viewRangeOverride: { startSec: number; endSec: number } | undefined;
+      if (state.followLive && maxRawPoints === 0) {
+        state.viewEnd = rawEnd;
+        const stepNs = Math.max(1, Math.round(spanNs / lod.widthPx));
+        queryWidthPx = Math.min(8192, lod.widthPx + 2);
+        t0Ns = Math.floor(Math.round((rawEnd - span) * NS) / stepNs) * stepNs;
+        t1Ns = t0Ns + queryWidthPx * stepNs;
+        viewRangeOverride = { startSec: state.viewEnd - span, endSec: state.viewEnd };
+      } else {
+        if (state.followLive) state.viewEnd = rawEnd;
+        t1Ns = Math.round(rawEnd * NS);
+        t0Ns = Math.round((rawEnd - span) * NS);
+      }
+      const followKey =
+        state.followLive && maxRawPoints === 0 ? `${t1Ns}:${spanNs}:${queryWidthPx}` : "";
+      const canShortCircuit =
+        followKey !== "" && followKey === state.lastFollowQueryKey && state.lastRevision > 0;
+      state.lastFollowQueryKey = followKey;
+
       const result = await client.call<QueryResult>("timeline.query", {
         seriesIds: ids,
-        t0: Math.round((end - spanSeconds(state.division)) * NS),
-        t1: Math.round(end * NS),
-        widthPx: width,
+        t0: t0Ns,
+        t1: t1Ns,
+        widthPx: queryWidthPx,
+        ...(maxRawPoints > 0 ? { maxRawPoints } : {}),
+        ...(canShortCircuit ? { ifChangedSince: state.lastRevision } : {}),
       });
-      drawQueryResult(state, result);
+      drawQueryResult(state, result, ids, viewRangeOverride);
     } else {
       drawOverview(state);
     }
@@ -130,8 +207,43 @@ async function executeQuery(): Promise<void> {
 const scheduler = new RenderScheduler({
   isHidden: () => document.hidden,
   shouldFollowLive: () => state.followLive && hasLiveSources(),
-  advanceLiveClock: () => {
-    state.viewEnd = nowSeconds(state) - FOLLOW_LAG_S;
+  advanceLiveClock: (frameTimeMs = performance.now()) => {
+    const hasFastHss = state.series.some(
+      (s) => s.actualMode === "hss" && (s.rateHz || 0) >= 200,
+    );
+    state.viewEnd = state.clockPll.step(
+      nowSeconds(state),
+      frameTimeMs,
+      state.streamBuffer.latestTimeSec,
+      hasFastHss,
+    );
+  },
+  renderLiveStream: () => {
+    if (state.tracks.length === 0) return false;
+    const ids = state.tracks.flatMap((t) => t.members.map((m) => m.seriesId));
+    const span = spanSeconds(state.division);
+    const t0 = state.viewEnd - span;
+    if (!state.streamBuffer.canServe(ids, t0, state.historyStart)) {
+      return false;
+    }
+    const plotCssWidth = Math.max(
+      200,
+      Math.round(
+        (state.tracks[0]?.plot.bbox.width ?? 0) / (devicePixelRatio || 1),
+      ) || state.tracks[0]?.plot.width || 1000,
+    );
+    const pixelDtSec = span / plotCssWidth;
+    const movedEnough =
+      state.division !== lastStreamDivision ||
+      Math.abs(state.viewEnd - lastStreamRenderEnd) >= pixelDtSec * 0.45;
+    if (movedEnough) {
+      lastStreamRenderEnd = state.viewEnd;
+      lastStreamDivision = state.division;
+      drawStreamFrame(state);
+    } else {
+      updateLegendReadouts(state);
+    }
+    return true;
   },
   runQuery: () => executeQuery(),
   applyLayout: () => resizeAllTracks(state),
@@ -139,13 +251,61 @@ const scheduler = new RenderScheduler({
   redrawOverlays: () => redrawAllOverlays(state),
   updateReadouts: () => updateLegendReadouts(state),
   updateInspector: () => updateCursorInspector(state),
+  getMinLiveIntervalMs: () => {
+    const ids = state.tracks.flatMap((t) => t.members.map((m) => m.seriesId));
+    const span = spanSeconds(state.division);
+    const t0 = state.viewEnd - span;
+    if (ids.length > 0 && state.streamBuffer.canServe(ids, t0, state.historyStart)) {
+      return 0;
+    }
+    const plotCssWidth = Math.max(
+      200,
+      Math.round(
+        (state.tracks[0]?.plot.bbox.width ?? 0) / (devicePixelRatio || 1),
+      ) || state.tracks[0]?.plot.width || 1000,
+    );
+    const pixelDtSec = span / plotCssWidth;
+    return Math.max(16, Math.min(45, Math.round(pixelDtSec * 450)));
+  },
 });
 
+let settleTimer: number | undefined;
+function markMotion(): void {
+  state.interactingUntil = performance.now() + 140;
+  if (settleTimer !== undefined) {
+    window.clearTimeout(settleTimer);
+  }
+  settleTimer = window.setTimeout(() => {
+    settleTimer = undefined;
+    if (!state.followLive) {
+      scheduler.invalidate("query");
+    }
+  }, 150);
+}
+
 function requestRefresh(): void {
+  lastStreamRenderEnd = -Infinity;
+  markMotion();
   scheduler.invalidate("query", "overlays");
 }
 
 async function refresh(): Promise<void> {
+  lastStreamRenderEnd = -Infinity;
+  markMotion();
+  const ids = state.tracks.flatMap((t) => t.members.map((m) => m.seriesId));
+  const span = spanSeconds(state.division);
+  const end = state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd;
+  if (ids.length > 0 && state.streamBuffer.canServe(ids, end - span, state.historyStart)) {
+    if (state.followLive) {
+      state.viewEnd = end;
+      state.clockPll.reset();
+    }
+    lastStreamRenderEnd = state.viewEnd;
+    lastStreamDivision = state.division;
+    drawStreamFrame(state);
+    scheduler.wake();
+    return;
+  }
   if (!scheduler.isQueryInFlight()) {
     await executeQuery();
     scheduler.wake();
@@ -182,6 +342,7 @@ function autoScaleTrackY(trackName: string): void {
   if (!track) return;
   const cfg = getGroupYScale(state, trackName);
   cfg.auto = true;
+  track.autoYCache = null;
   syncTrackYControls(state, track);
   if (state.lastColumns) {
     scheduler.invalidate("waveforms");
@@ -347,6 +508,7 @@ const legendCallbacks: LegendCallbacks = {
       cfg.max = track.plot.scales.y.max ?? 1;
     } else {
       cfg.auto = true;
+      track.autoYCache = null;
     }
     syncTrackYControls(state, track);
     if (state.lastColumns) {
@@ -412,6 +574,7 @@ const interactionCallbacks = {
     requestRefresh();
   },
   onRedrawOverlays: () => scheduler.invalidate("overlays"),
+  onHoverImmediate: () => redrawTrackOverlaysOnly(state),
   onUpdateReadouts: () => scheduler.invalidate("readouts"),
   onUpdateMeasure: () => scheduler.invalidate("inspector"),
   onApplyTrackY: (track: (typeof state.tracks)[number]) => applyTrackYScale(state, track),
@@ -427,6 +590,8 @@ const interactionCallbacks = {
 };
 
 function rebuild(): void {
+  lastStreamRenderEnd = -Infinity;
+  state.lastFollowQueryKey = "";
   state.canvasTheme = themeManager.getCanvasTheme();
   rebuildTracks(state, legendCallbacks, interactionCallbacks);
   updateSuggestions(state);
@@ -486,8 +651,12 @@ async function refreshStatus(): Promise<void> {
     }>("session.status");
     const estimate = nowSeconds(state);
     const reported = status.nowNs / NS;
-    if (Math.abs(estimate - reported) > 0.02 || state.serverNow === 0) {
+    const drift = Math.abs(estimate - reported);
+    if (state.serverNow === 0 || drift > 0.25) {
       state.serverNow = reported;
+      state.serverNowAt = performance.now();
+    } else if (drift > 0.002) {
+      state.serverNow = estimate + (reported - estimate) * 0.2;
       state.serverNowAt = performance.now();
     }
     if (status.recordingInfo?.active) {
@@ -525,11 +694,19 @@ async function refreshStatus(): Promise<void> {
         };
       }
     }
-    const stats = await client.call<StatsReply>("session.stats");
     if (status.connected) {
       setConnectionStatus(`${status.device} @ ${(status.speedKhz ?? 0) / 1000} MHz`, "connected");
     } else {
       setConnectionStatus("No target connected", "disconnected");
+    }
+    syncFollowButton(state);
+
+    let lostCount = 0;
+    try {
+      const stats = await client.call<StatsReply>("session.stats");
+      lostCount = stats.hss.lost;
+    } catch {
+      // Non-fatal: keep rate summary visible even if stats are unavailable
     }
 
     const hssCount = state.series.filter((item) => item.actualMode === "hss").length;
@@ -538,7 +715,7 @@ async function refreshStatus(): Promise<void> {
     const parts: string[] = [];
     if (hssCount > 0) {
       const rate = state.series.find((item) => item.actualMode === "hss")?.rateHz ?? 0;
-      parts.push(`HSS ${hssCount} @ ${rate} Hz (drop ${stats.hss.lost})`);
+      parts.push(`HSS ${hssCount} @ ${rate} Hz (drop ${lostCount})`);
     }
     if (pollCount > 0) {
       const pRate = state.series.find((item) => item.actualMode === "poll")?.rateHz ?? 0;
@@ -549,13 +726,15 @@ async function refreshStatus(): Promise<void> {
     }
     const ratesEl = document.getElementById("rates");
     if (ratesEl) ratesEl.textContent = parts.join(" │ ");
-    syncFollowButton(state);
   } catch {
     setConnectionStatus("Reconnecting…", "reconnecting");
   }
 }
 
 async function startSession(): Promise<void> {
+  lastStreamRenderEnd = -Infinity;
+  state.streamBuffer.clear();
+  state.clockPll.reset();
   const reply = await client.call<{ events: TimelineEvent[] }>("events.query", {});
   state.halts = [];
   state.markers = [];
@@ -612,6 +791,12 @@ attachOverviewScrubber(state, (center) => {
 });
 
 // Wire client, theme, toolbar, context menu, keyboard
+client.onSamples = (batches) => {
+  state.streamBuffer.appendBatches(batches);
+  if (state.followLive) {
+    scheduler.wake();
+  }
+};
 client.onEvent = (event) => {
   applyEvent(event);
   if (event.kind !== EVENT_HALTED && event.kind !== EVENT_RESUMED) {
@@ -732,6 +917,7 @@ window.addEventListener("keydown", (event) => {
       break;
     case "jumpEnd":
       state.followLive = true;
+      state.clockPll.reset();
       state.viewEnd = nowSeconds(state) - FOLLOW_LAG_S;
       syncFollowButton(state);
       requestRefresh();

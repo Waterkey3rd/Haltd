@@ -1,11 +1,12 @@
 import type uPlot from "uplot";
 import type { QueryResult, SeriesInfo, TimelineEvent } from "../client";
 import type { CanvasTheme } from "../theme";
-import { valueAtColumns } from "./math";
+import { pxToTime, valueAtColumns } from "./math";
+import { LiveClockPll, StreamBuffer } from "./streamBuffer";
 
 export const NS = 1e9;
 export const DEFAULT_GROUP = "default";
-export const Y_AXIS_SIZE = 64;
+export const Y_AXIS_SIZE = 56;
 export const DEFAULT_TRACK_HEIGHT = 160;
 export const MIN_TRACK_HEIGHT = 80;
 export const MAX_TRACK_HEIGHT = 600;
@@ -51,6 +52,7 @@ export interface TrackRow {
   members: SeriesInfo[];
   plot: uPlot;
   overlayCanvas: HTMLCanvasElement;
+  overRect: DOMRect | null;
   element: HTMLElement;
   legendEl: HTMLElement;
   plotEl: HTMLElement;
@@ -63,7 +65,12 @@ export interface TrackRow {
   yMinInput: HTMLInputElement;
   yMaxInput: HTMLInputElement;
   heightPx: number;
+  renderedHeightPx: number;
+  hasBandSeries: boolean;
   scratchSeries: (number | null | undefined)[][];
+  scratchFloatSeries: Float64Array[];
+  bandSig: string;
+  autoYCache: { min: number; max: number } | null;
 }
 
 export interface TimelineState {
@@ -97,10 +104,17 @@ export interface TimelineState {
   pins: Pin[];
   nextPinId: number;
   hoverTime: number | null;
+  hoverRelX: number | null;
+  hoverTrack: string | null;
   boxSelect: { groupName: string; x0: number; x1: number } | null;
   querying: boolean;
   lastQuery: number;
   lastColumns: { result: QueryResult; xs: Float64Array } | null;
+  streamBuffer: StreamBuffer;
+  clockPll: LiveClockPll;
+  interactingUntil: number;
+  lastRevision: number;
+  lastFollowQueryKey: string;
   scratchXs: Float64Array;
   scratchGaps: Uint8Array;
   recording: boolean;
@@ -122,6 +136,13 @@ export interface TimelineState {
     | { kind: "series"; seriesId: number }
     | { kind: "rtt"; signalName: string }
     | null;
+}
+
+export function getTrackOverRect(track: TrackRow): DOMRect {
+  if (!track.overRect || track.overRect.width <= 0) {
+    track.overRect = track.plot.over.getBoundingClientRect();
+  }
+  return track.overRect;
 }
 
 export function loadExprHistory(): string[] {
@@ -193,7 +214,7 @@ export function createInitialState(canvasTheme: CanvasTheme): TimelineState {
     followLive: true,
     division: 0.5,
     splitLanes: false,
-    showBands: true,
+    showBands: false,
     seriesFilter: "",
     viewEnd: 0,
     historyStart: 0,
@@ -209,10 +230,17 @@ export function createInitialState(canvasTheme: CanvasTheme): TimelineState {
     pins: [],
     nextPinId: 1,
     hoverTime: null,
+    hoverRelX: null,
+    hoverTrack: null,
     boxSelect: null,
     querying: false,
     lastQuery: 0,
     lastColumns: null,
+    streamBuffer: new StreamBuffer(),
+    clockPll: new LiveClockPll(),
+    interactingUntil: 0,
+    lastRevision: 0,
+    lastFollowQueryKey: "",
     scratchXs: new Float64Array(0),
     scratchGaps: new Uint8Array(0),
     recording: false,
@@ -278,14 +306,38 @@ export function withAlpha(color: string, alphaHex: string): string {
   return toHexColor(color) + alphaHex;
 }
 
+export function syncHoverTimeFromRelX(state: TimelineState): number | null {
+  if (state.hoverRelX === null) {
+    return state.hoverTime;
+  }
+  const plot = state.tracks[0]?.plot;
+  if (!plot) {
+    return state.hoverTime;
+  }
+  const min = plot.scales.x.min;
+  const max = plot.scales.x.max;
+  const cssWidth = plot.bbox.width / (devicePixelRatio || 1);
+  if (min !== undefined && max !== undefined && max > min && cssWidth > 0) {
+    state.hoverTime = pxToTime(state.hoverRelX, cssWidth, min, max);
+  } else {
+    state.hoverTime = plot.posToVal(state.hoverRelX, "x");
+  }
+  return state.hoverTime;
+}
+
 export function valueAt(state: TimelineState, item: SeriesInfo, seconds: number): number | null {
+  const streamVal = state.streamBuffer.valueAt(item.seriesId, seconds);
+  if (streamVal !== null && (!state.lastColumns || seconds >= state.streamBuffer.earliestTimeSec - 0.005)) {
+    return streamVal;
+  }
   if (!state.lastColumns) {
-    return null;
+    return streamVal;
   }
   return valueAtColumns(
     state.lastColumns.xs,
     state.lastColumns.result.series.get(item.seriesId),
     seconds,
+    Boolean(state.lastColumns.result.raw),
   );
 }
 

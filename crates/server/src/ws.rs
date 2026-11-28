@@ -16,7 +16,8 @@ use tsdb::Event;
 
 use crate::rpc::{App, Reply, RpcError};
 
-const PUSH_INTERVAL: Duration = Duration::from_millis(33);
+const PUSH_INTERVAL: Duration = Duration::from_millis(8);
+const MIN_PUSH_COALESCE: Duration = Duration::from_millis(8);
 const OUTBOUND_QUEUE: usize = 256;
 const MAX_SAMPLES_PER_FRAME: usize = 8192;
 
@@ -112,11 +113,15 @@ fn rpc_error(id: &Value, error: RpcError) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": err_obj})
 }
 
-fn is_fast_memory_rpc(method: &str) -> bool {
-    matches!(
-        method,
-        "timeline.query" | "events.query" | "rtt.signals" | "session.stats" | "timeline.rate"
-    )
+fn is_fast_memory_rpc(method: &str, params: &Value) -> bool {
+    match method {
+        "timeline.query" | "events.query" | "rtt.signals" | "timeline.rate" | "session.status" => {
+            true
+        }
+        // `includeCalls: true` calls blocking probe IPC and must run on `spawn_blocking`.
+        "session.stats" => !params["includeCalls"].as_bool().unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Parse and serve one request. Pure in-memory read RPCs execute inline to
@@ -138,7 +143,7 @@ async fn serve_request(
     let id = request["id"].clone();
     let method = request["method"].as_str().unwrap_or("").to_owned();
     let params = request["params"].clone();
-    let served = if is_fast_memory_rpc(&method) {
+    let served = if is_fast_memory_rpc(&method, &params) {
         Ok(app.dispatch(&method, &params, &id, &subscriptions))
     } else {
         tokio::task::spawn_blocking({
@@ -157,6 +162,40 @@ async fn serve_request(
             rpc_error(&id, RpcError::new(-32603, error.to_string(), None)).to_string(),
         ),
     })
+}
+
+async fn flush_events_and_samples(
+    app: &App,
+    subscriptions: &Subscriptions,
+    outbound: &mpsc::Sender<Message>,
+    last_event: &mut u64,
+) -> bool {
+    let origin = app.origin_ns();
+    for event in app.tsdb().events_since(*last_event) {
+        *last_event = event.seq;
+        let frame = event_frame(&event, origin);
+        if outbound.send(Message::binary(frame)).await.is_err() {
+            return false;
+        }
+    }
+    if let Some(frame) = samples_frame(app, subscriptions) {
+        if outbound.send(Message::binary(frame)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+async fn wait_coalesce(last_sample_push: Option<tokio::time::Instant>) {
+    match last_sample_push {
+        Some(last) if last.elapsed() < MIN_PUSH_COALESCE => {
+            tokio::time::sleep_until(last + MIN_PUSH_COALESCE).await;
+        }
+        _ => {
+            // Brief coalesce so all series from one HssReader/RTT tick share one frame.
+            tokio::time::sleep(Duration::from_micros(250)).await;
+        }
+    }
 }
 
 pub(crate) async fn run(socket: WebSocket, app: Arc<App>) {
@@ -181,9 +220,27 @@ pub(crate) async fn run(socket: WebSocket, app: Arc<App>) {
             let mut watches = app.sampler().subscribe_watches();
             let mut ticker = tokio::time::interval(PUSH_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let notify = Arc::clone(app.change_notify());
+            let mut last_rev = app.tsdb().revision();
+            let mut last_sample_push: Option<tokio::time::Instant> = None;
             // New clients get events from now on; history comes from a query.
             let mut last_event = app.tsdb().events_since(0).last().map_or(0, |e| e.seq);
             loop {
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let cur_rev = app.tsdb().revision();
+                if cur_rev != last_rev {
+                    wait_coalesce(last_sample_push).await;
+                    last_rev = app.tsdb().revision();
+                    last_sample_push = Some(tokio::time::Instant::now());
+                    if !flush_events_and_samples(&app, &subscriptions, &outbound, &mut last_event)
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
                 tokio::select! {
                     update = watches.recv() => match update {
                         Ok(values) => {
@@ -200,22 +257,29 @@ pub(crate) async fn run(socket: WebSocket, app: Arc<App>) {
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => return,
                     },
-                    _ = ticker.tick() => {
-                        let origin = app.origin_ns();
-                        for event in app.tsdb().events_since(last_event) {
-                            last_event = event.seq;
-                            let frame = event_frame(&event, origin);
-                            if outbound.send(Message::binary(frame)).await.is_err() {
-                                return;
-                            }
+                    _ = &mut notified => {
+                        wait_coalesce(last_sample_push).await;
+                        last_rev = app.tsdb().revision();
+                        last_sample_push = Some(tokio::time::Instant::now());
+                        if !flush_events_and_samples(&app, &subscriptions, &outbound, &mut last_event)
+                            .await
+                        {
+                            return;
                         }
+                    }
+                    _ = ticker.tick() => {
                         for frame in rtt_frames(&app, &subscriptions) {
                             if outbound.send(Message::binary(frame)).await.is_err() {
                                 return;
                             }
                         }
-                        if let Some(frame) = samples_frame(&app, &subscriptions) {
-                            if outbound.send(Message::binary(frame)).await.is_err() {
+                        let rev = app.tsdb().revision();
+                        if rev != last_rev {
+                            last_rev = rev;
+                            last_sample_push = Some(tokio::time::Instant::now());
+                            if !flush_events_and_samples(&app, &subscriptions, &outbound, &mut last_event)
+                                .await
+                            {
                                 return;
                             }
                         }
@@ -266,5 +330,65 @@ mod tests {
         assert_eq!(u16::from_le_bytes(frame[12..14].try_into().unwrap()), 1);
         let length = u16::from_le_bytes(frame[14..16].try_into().unwrap()) as usize;
         assert_eq!(&frame[16..16 + length], br#"{"a":1}"#);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tsdb_push_wakes_app_change_notify_and_emits_samples_frame() {
+        let tsdb = Arc::new(tsdb::Tsdb::default());
+        let s1 = tsdb.create_series("a".to_owned(), None, None);
+        let sampler = sampler::Sampler::new(tsdb.clone());
+        let rtt = rtt::Rtt::new(tsdb.clone());
+        let control = crate::control::ControlBus::new(Arc::new(Mutex::new(None)), sampler.clone());
+        let app = App::new(sampler, rtt, control);
+        let subs = Subscriptions::default();
+        subs.lock().unwrap().series.insert(s1.id(), 0);
+
+        let notified = app.change_notify().notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        s1.push(app.origin_ns() + 1_000_000, 42.5);
+        tokio::time::timeout(Duration::from_millis(50), notified)
+            .await
+            .expect("notify woken on push");
+
+        let frame = samples_frame(&app, &subs).expect("samples frame emitted");
+        assert_eq!(frame[0], KIND_SAMPLES);
+        assert_eq!(u16::from_le_bytes(frame[2..4].try_into().unwrap()), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fast_memory_rpcs_do_not_panic_and_include_calls_uses_blocking_pool() {
+        assert!(is_fast_memory_rpc("session.status", &json!({})));
+        assert!(is_fast_memory_rpc("session.stats", &json!({})));
+        assert!(!is_fast_memory_rpc(
+            "session.stats",
+            &json!({"includeCalls": true})
+        ));
+        assert!(is_fast_memory_rpc("timeline.query", &json!({})));
+
+        let tsdb = Arc::new(tsdb::Tsdb::default());
+        let sampler = sampler::Sampler::new(tsdb);
+        let rtt = rtt::Rtt::new(sampler.tsdb().clone());
+        let session = Arc::new(Mutex::new(None));
+        let control = crate::control::ControlBus::new(session, sampler.clone());
+        let app = App::new(sampler, rtt, control);
+        let subs = Subscriptions::default();
+
+        for req in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"session.status","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"session.stats","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"session.stats","params":{"includeCalls":true}}"#,
+        ] {
+            let reply = serve_request(app.clone(), subs.clone(), req.to_owned())
+                .await
+                .expect("rpc reply");
+            match reply {
+                Message::Text(text) => {
+                    let parsed: Value = serde_json::from_str(&text).expect("valid json");
+                    assert!(parsed.get("error").is_none(), "unexpected error: {text}");
+                }
+                other => panic!("unexpected binary reply: {other:?}"),
+            }
+        }
     }
 }

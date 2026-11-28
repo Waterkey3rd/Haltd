@@ -137,4 +137,110 @@ describe("RenderScheduler", () => {
     h.scheduler.wake();
     expect(h.pendingFrames()).toBe(1);
   });
+
+  it("paces live-follow queries to minLiveIntervalMs while keeping overlays unthrottled", async () => {
+    let fakeNow = 0;
+    const queue: FrameRequestCallback[] = [];
+    let followLive = true;
+    const pendingDone: Array<() => void> = [];
+    const counts = { runQuery: 0, redrawOverlays: 0 };
+    const finishQuery = async () => {
+      pendingDone.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+
+    const scheduler = new RenderScheduler({
+      isHidden: () => false,
+      shouldFollowLive: () => followLive,
+      advanceLiveClock: () => {},
+      runQuery: () => {
+        counts.runQuery++;
+        return new Promise<void>((r) => {
+          pendingDone.push(r);
+        });
+      },
+      applyLayout: () => {},
+      redrawWaveforms: () => {},
+      redrawOverlays: () => {
+        counts.redrawOverlays++;
+      },
+      updateReadouts: () => {},
+      updateInspector: () => {},
+      minLiveIntervalMs: 22,
+      now: () => fakeNow,
+      requestFrame: (cb) => {
+        queue.push(cb);
+        return queue.length;
+      },
+    });
+
+    scheduler.wake();
+    queue.shift()?.(0);
+    expect(counts.runQuery).toBe(1);
+    await finishQuery();
+
+    // 6 ms later (like a 165 Hz frame): overlays still run when invalidated, query waits.
+    fakeNow = 6;
+    scheduler.invalidate("overlays");
+    queue.shift()?.(6);
+    expect(counts.redrawOverlays).toBe(1);
+    expect(counts.runQuery).toBe(1);
+
+    // Explicit query (e.g. user zoom/pan) bypasses live pacing immediately.
+    fakeNow = 10;
+    scheduler.invalidate("query");
+    queue.shift()?.(10);
+    expect(counts.runQuery).toBe(2);
+    await finishQuery();
+
+    // Once minLiveIntervalMs elapses cleanly, live follow runs again.
+    followLive = true;
+    fakeNow = 40;
+    scheduler.invalidate("overlays");
+    queue.shift()?.(40);
+    expect(counts.runQuery).toBe(3);
+  });
+
+  it("renders synchronous stream frames on VSync without issuing async RPC queries", () => {
+    const queue: FrameRequestCallback[] = [];
+    let streamReady = true;
+    let streamFrames = 0;
+    let rpcQueries = 0;
+
+    const scheduler = new RenderScheduler({
+      isHidden: () => false,
+      shouldFollowLive: () => true,
+      advanceLiveClock: () => {},
+      renderLiveStream: () => {
+        if (!streamReady) return false;
+        streamFrames++;
+        return true;
+      },
+      runQuery: () => {
+        rpcQueries++;
+        return Promise.resolve();
+      },
+      applyLayout: () => {},
+      redrawWaveforms: () => {},
+      redrawOverlays: () => {},
+      updateReadouts: () => {},
+      updateInspector: () => {},
+      requestFrame: (cb) => {
+        queue.push(cb);
+        return queue.length;
+      },
+    });
+
+    scheduler.wake();
+    expect(queue).toHaveLength(1);
+    queue.shift()?.(16.6);
+    expect(streamFrames).toBe(1);
+    expect(rpcQueries).toBe(0);
+    expect(queue).toHaveLength(1); // Next VSync scheduled immediately
+
+    streamReady = false;
+    queue.shift()?.(33.3);
+    expect(rpcQueries).toBe(1);
+  });
 });

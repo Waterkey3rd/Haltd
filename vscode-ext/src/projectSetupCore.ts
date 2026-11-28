@@ -260,7 +260,7 @@ export function resolveOrGenerateBuildTask(
       command: "cmake",
       args: ["--build", buildDir],
       group: { kind: "build", isDefault: true },
-      problemMatcher: "$gcc",
+      problemMatcher: "$haltd-gcc",
     };
   } else if (files.makefile) {
     newTaskObj = {
@@ -268,7 +268,7 @@ export function resolveOrGenerateBuildTask(
       type: "shell",
       command: "make -j",
       group: { kind: "build", isDefault: true },
-      problemMatcher: "$gcc",
+      problemMatcher: "$haltd-gcc",
     };
   } else if (files.hasNinjaBuild) {
     const buildDir = inferBuildDirForTask(elfRelPath, files);
@@ -278,7 +278,7 @@ export function resolveOrGenerateBuildTask(
       command: "ninja",
       args: ["-C", buildDir],
       group: { kind: "build", isDefault: true },
-      problemMatcher: "$gcc",
+      problemMatcher: "$haltd-gcc",
     };
   }
 

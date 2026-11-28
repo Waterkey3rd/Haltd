@@ -30,16 +30,54 @@ export interface LegendCallbacks {
   onDragStateChange: (active: boolean) => void;
 }
 
-export function describeModeBadge(item: SeriesInfo): { label: string; title: string } {
+export function splitSignalName(name: string): { prefix: string; tail: string } {
+  let i = name.length;
+  // Walk backwards past any trailing `[...]` array subscripts so they stay in `tail`.
+  while (i > 0 && name[i - 1] === "]") {
+    let depth = 0;
+    let j = i - 1;
+    while (j >= 0) {
+      if (name[j] === "]") depth++;
+      else if (name[j] === "[") {
+        depth--;
+        if (depth === 0) break;
+      }
+      j--;
+    }
+    if (j <= 0) break;
+    i = j;
+  }
+  const dot = name.lastIndexOf(".", i - 1);
+  const arrow = name.lastIndexOf("->", i - 1);
+  const scope = name.lastIndexOf("::", i - 1);
+  let cut = -1;
+  if (dot >= 0) cut = dot + 1;
+  if (arrow >= 0 && arrow + 2 > cut) cut = arrow + 2;
+  if (scope >= 0 && scope + 2 > cut) cut = scope + 2;
+  if (cut <= 0 || cut >= name.length) {
+    return { prefix: "", tail: name };
+  }
+  return { prefix: name.slice(0, cut), tail: name.slice(cut) };
+}
+
+export function describeModeBadge(item: SeriesInfo): {
+  label: string;
+  title: string;
+  modeCls: string;
+} {
   if (item.error) {
-    return { label: "ERR", title: item.error };
+    return { label: "ERR", title: item.error, modeCls: "err" };
   }
   const mode = item.actualMode.toUpperCase();
   if (!item.rateHz) {
-    return { label: mode, title: `Source: ${mode}` };
+    return { label: mode, title: `Source: ${mode}`, modeCls: item.actualMode };
   }
   const rate = item.rateHz >= 1000 ? `${item.rateHz / 1000}k` : `${item.rateHz}`;
-  return { label: `${mode} ${rate}`, title: `Source: ${mode} @ ${item.rateHz} Hz` };
+  return {
+    label: `${mode} ${rate}`,
+    title: `Source: ${mode} @ ${item.rateHz} Hz`,
+    modeCls: item.actualMode,
+  };
 }
 
 export function renderTrackLegendHeader(
@@ -47,6 +85,7 @@ export function renderTrackLegendHeader(
   trackName: string,
   state: TimelineState,
   callbacks: LegendCallbacks,
+  uniformBadge: { label: string; title: string; modeCls: string } | null = null,
 ): {
   yAutoBtn: HTMLButtonElement;
   yRangeWrap: HTMLElement;
@@ -89,7 +128,15 @@ export function renderTrackLegendHeader(
     callbacks.onToggleAutoY(trackName);
   };
 
-  head.append(collapseBtn, title, yAutoBtn);
+  if (uniformBadge) {
+    const trackBadge = document.createElement("span");
+    trackBadge.className = `source-badge ${uniformBadge.modeCls} track-rate-badge`;
+    trackBadge.textContent = uniformBadge.label;
+    trackBadge.title = uniformBadge.title;
+    head.append(collapseBtn, title, trackBadge, yAutoBtn);
+  } else {
+    head.append(collapseBtn, title, yAutoBtn);
+  }
 
   const yRangeWrap = document.createElement("div");
   yRangeWrap.className = "track-y-range";
@@ -131,6 +178,7 @@ export function renderTrackLegendSignals(
   members: SeriesInfo[],
   state: TimelineState,
   callbacks: LegendCallbacks,
+  hideUniformBadges = false,
 ): {
   legendSignals: Map<number, LegendSignalDom>;
   legendValues: Map<number, HTMLElement>;
@@ -208,13 +256,30 @@ export function renderTrackLegendSignals(
 
     const nameEl = document.createElement("span");
     nameEl.className = "legend-sig-name mono";
-    nameEl.textContent = item.name;
+    const { prefix, tail } = splitSignalName(item.name);
+    if (prefix) {
+      const prefixEl = document.createElement("span");
+      prefixEl.className = "legend-sig-prefix";
+      prefixEl.textContent = prefix;
+      const tailEl = document.createElement("span");
+      tailEl.className = "legend-sig-tail";
+      tailEl.textContent = tail;
+      nameEl.append(prefixEl, tailEl);
+    } else {
+      const tailEl = document.createElement("span");
+      tailEl.className = "legend-sig-tail";
+      tailEl.textContent = tail;
+      nameEl.append(tailEl);
+    }
 
     const badgeInfo = describeModeBadge(item);
-    const badge = document.createElement("span");
-    badge.className = `source-badge ${item.error ? "err" : item.actualMode}`;
-    badge.textContent = badgeInfo.label;
-    badge.title = badgeInfo.title;
+    const showRowBadge = !hideUniformBadges || Boolean(item.error);
+    const badge = showRowBadge ? document.createElement("span") : null;
+    if (badge) {
+      badge.className = `source-badge ${badgeInfo.modeCls}`;
+      badge.textContent = badgeInfo.label;
+      badge.title = badgeInfo.title;
+    }
 
     const valEl = document.createElement("span");
     valEl.className = "legend-sig-val mono";
@@ -246,7 +311,11 @@ export function renderTrackLegendSignals(
     actions.className = "legend-sig-actions";
     actions.append(soloBtn, rmBtn);
 
-    row.append(visToggle, swatch, nameEl, badge, valEl, actions);
+    if (badge) {
+      row.append(visToggle, swatch, nameEl, badge, valEl, actions);
+    } else {
+      row.append(visToggle, swatch, nameEl, valEl, actions);
+    }
     legendCards.set(item.seriesId, row);
     legendSignals.set(item.seriesId, {
       row,
@@ -307,8 +376,11 @@ export function updateLegendReadouts(state: TimelineState): void {
       let val: number | null = null;
       if (tReadout !== null) {
         val = valueAt(state, item, tReadout);
-      } else if (seriesCols) {
-        val = lastValueFromColumns(seriesCols.get(item.seriesId));
+      } else {
+        val = state.streamBuffer.lastValue(item.seriesId);
+        if (val === null && seriesCols) {
+          val = lastValueFromColumns(seriesCols.get(item.seriesId));
+        }
       }
       const formatted = formatNumber(val, 6);
       if (formatted !== sigDom.lastText) {

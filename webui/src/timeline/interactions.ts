@@ -1,6 +1,20 @@
 import type { SeriesInfo } from "../client";
-import { WHEEL_STEP, zoomDivisionAround, spanSeconds, pxToTime, panYRange } from "./math";
-import { getGroupYScale, nowSeconds, type Pin, type TimelineState, type TrackRow } from "./state";
+import {
+  FOLLOW_LAG_S,
+  WHEEL_STEP,
+  zoomDivisionAround,
+  spanSeconds,
+  pxToTime,
+  panYRange,
+} from "./math";
+import {
+  getGroupYScale,
+  getTrackOverRect,
+  nowSeconds,
+  type Pin,
+  type TimelineState,
+  type TrackRow,
+} from "./state";
 import type { ContextMenuRequest } from "./contextMenu";
 
 export interface InteractionCallbacks {
@@ -8,6 +22,7 @@ export interface InteractionCallbacks {
   onStopFollowing: () => void;
   onRefresh: () => void;
   onRedrawOverlays: () => void;
+  onHoverImmediate: () => void;
   onUpdateReadouts: () => void;
   onUpdateMeasure: () => void;
   onApplyTrackY: (track: TrackRow) => void;
@@ -103,7 +118,7 @@ export function attachTrackInteractions(
         const steps = Math.sign(wheelTravel);
         wheelTravel = 0;
         const fraction = (event.clientX - rect.left) / Math.max(1, rect.width);
-        const currentEnd = state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd;
+        const currentEnd = state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd;
         const zoomed = zoomDivisionAround(state.division, currentEnd, steps, fraction);
         callbacks.onStopFollowing();
         state.division = zoomed.division;
@@ -140,7 +155,7 @@ export function attachTrackInteractions(
           button: 1,
           x: event.clientX,
           y: event.clientY,
-          end: state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd,
+          end: state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd,
           yMin,
           yMax,
           panX: false,
@@ -188,7 +203,7 @@ export function attachTrackInteractions(
         button: 0,
         x: event.clientX,
         y: event.clientY,
-        end: state.followLive ? nowSeconds(state) - 0.03 : state.viewEnd,
+        end: state.followLive ? nowSeconds(state) - FOLLOW_LAG_S : state.viewEnd,
         yMin,
         yMax,
         panX: false,
@@ -210,8 +225,10 @@ export function attachTrackInteractions(
   over.addEventListener(
     "mousemove",
     (event) => {
-      const rect = over.getBoundingClientRect();
+      const rect = getTrackOverRect(track);
       const relX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+      state.hoverRelX = relX;
+      state.hoverTrack = groupName;
       state.hoverTime = plot.posToVal(relX, "x");
       callbacks.onUpdateReadouts();
 
@@ -228,7 +245,7 @@ export function attachTrackInteractions(
         } else {
           setCursor("default");
         }
-        callbacks.onRedrawOverlays();
+        callbacks.onHoverImmediate();
       }
     },
     { signal },
@@ -238,6 +255,8 @@ export function attachTrackInteractions(
     "mouseleave",
     () => {
       if (!drag) {
+        state.hoverRelX = null;
+        state.hoverTrack = null;
         state.hoverTime = null;
         callbacks.onUpdateReadouts();
         callbacks.onRedrawOverlays();
@@ -286,7 +305,7 @@ export function attachTrackInteractions(
     "mousemove",
     (event) => {
       if (!drag) return;
-      const rect = over.getBoundingClientRect();
+      const rect = getTrackOverRect(track);
       const relX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
 
       if (drag.mode === "cursor-s") {
