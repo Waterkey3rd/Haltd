@@ -777,6 +777,7 @@ impl Dap {
             "haltd/peripherals" => self.peripheral_list(),
             "haltd/peripheralRead" => self.peripheral_read(arguments),
             "haltd/peripheralWrite" => self.peripheral_write(arguments),
+            "haltd/reloadSvd" => self.reload_svd(arguments),
             "haltd/watchpoint" => self.custom_watchpoint(arguments),
             "threads" => self.threads(),
             "stackTrace" => self.stack_trace(arguments),
@@ -1487,6 +1488,20 @@ impl Dap {
         let register = arguments["register"].as_str().ok_or("needs a register")?;
         let value = arguments["value"].as_str().ok_or("needs a value")?;
         self.write_peripheral(peripheral, register, arguments["field"].as_str(), value)
+    }
+
+    fn reload_svd(&mut self, arguments: &Value) -> Handled {
+        let path = arguments["path"]
+            .as_str()
+            .ok_or("reloadSvd needs a \"path\"")?;
+        let device = self
+            .session()?
+            .reload_svd(std::path::Path::new(path))
+            .map_err(fail)?;
+        Ok(json!({
+            "device": device.name,
+            "peripherals": device.peripherals.len(),
+        }))
     }
 
     fn threads(&mut self) -> Handled {

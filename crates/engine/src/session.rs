@@ -431,7 +431,7 @@ pub struct Session {
     shallow_unwind: bool,
     fpu: Option<bool>,
     cycles: CycleTracker,
-    peripherals: Option<Arc<svd::Device>>,
+    peripherals: Option<Option<Arc<svd::Device>>>,
     auto_resuming: bool,
     last_halted_snapshot: Option<(u32, u32, u32, u32)>,
     /// The step that outlasted its wait, if one is under way.
@@ -1597,15 +1597,25 @@ impl Session {
                         Some(workspace) => workspace.join(file),
                         None => PathBuf::from(file),
                     });
-            let Some(path) =
-                configured.or_else(|| svd::find_for_device(&self.options.connect.device))
-            else {
+            let cache_root = symbols::paths::cache_root();
+            let Some(path) = configured.or_else(|| {
+                svd::find_for_device_with_cache(&self.options.connect.device, cache_root.as_deref())
+            }) else {
+                self.peripherals = Some(None);
                 return Ok(None);
             };
             let device = svd::load(&path).map_err(EngineError::Other)?;
-            self.peripherals = Some(Arc::new(device));
+            self.peripherals = Some(Some(Arc::new(device)));
         }
-        Ok(self.peripherals.clone())
+        Ok(self.peripherals.clone().flatten())
+    }
+
+    /// Hot-load a newly fetched or updated SVD file into the active session.
+    pub fn reload_svd(&mut self, path: &Path) -> Result<Arc<svd::Device>> {
+        let device = Arc::new(svd::load(path).map_err(EngineError::Other)?);
+        self.peripherals = Some(Some(device.clone()));
+        self.options.project.svd = Some(path.to_string_lossy().into_owned());
+        Ok(device)
     }
 
     pub fn read_peripheral_register(&self, register: &svd::Register) -> Result<u32> {

@@ -542,20 +542,104 @@ pub fn load(path: &Path) -> Result<Device, String> {
     parse(&xml).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-/// The part-number prefix an SVD file covers: `STM32F103xx` covers `STM32F103`.
-fn covered_prefix(stem: &str) -> String {
-    stem.trim_end_matches(['x', 'X']).to_ascii_uppercase()
+/// Strip J-Link core/package annotations such as `_M7`, ` (M4)`, etc.
+pub fn normalize_device_name(device: &str) -> String {
+    let trimmed = device.trim();
+    let base = trimmed
+        .split([' ', '(', '/', '_'])
+        .next()
+        .unwrap_or(trimmed);
+    base.to_ascii_uppercase()
+}
+
+fn core_tag(text: &str) -> Option<&'static str> {
+    let upper = text.to_ascii_uppercase();
+    if upper.ends_with("_CM7") || upper.ends_with("_M7") {
+        Some("M7")
+    } else if upper.ends_with("_CM4") || upper.ends_with("_M4") {
+        Some("M4")
+    } else if upper.ends_with("_CM33") || upper.ends_with("_M33") {
+        Some("M33")
+    } else if upper.ends_with("_CM0P") || upper.ends_with("_M0P") || upper.ends_with("_CM0+") {
+        Some("M0P")
+    } else {
+        None
+    }
+}
+
+fn strip_core_suffix(upper: &str) -> &str {
+    for suffix in [
+        "_CM33", "_M33", "_CM7", "_M7", "_CM4", "_M4", "_CM0P", "_M0P", "_CM0+",
+    ] {
+        if let Some(stripped) = upper.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    upper
+}
+
+/// Score how well an SVD filename or stem matches `device` (higher is better).
+/// Supports trailing `xx` as well as wildcard `x` placeholders like `STM32H7x3` or `STM32L4x6`.
+pub fn match_svd_score(device: &str, filename_or_stem: &str) -> Option<u32> {
+    let dev = normalize_device_name(device);
+    let dev_core = core_tag(device);
+    if dev.is_empty() {
+        return None;
+    }
+    let stem = filename_or_stem
+        .strip_suffix(".svd")
+        .or_else(|| filename_or_stem.strip_suffix(".SVD"))
+        .unwrap_or(filename_or_stem)
+        .to_ascii_uppercase();
+    let stem_core = core_tag(&stem);
+    if let (Some(dc), Some(sc)) = (dev_core, stem_core) {
+        if dc != sc {
+            return None;
+        }
+    }
+    let stem_base = strip_core_suffix(&stem).trim_end_matches('_');
+    let core = stem_base.trim_end_matches('X');
+    if core.is_empty() || core.len() > dev.len() {
+        return None;
+    }
+    let mut score: u32 = 0;
+    for (sb, db) in core.bytes().zip(dev.bytes()) {
+        if sb == db {
+            score += 10;
+        } else if sb == b'X' {
+            score += 3;
+        } else {
+            return None;
+        }
+    }
+    let core_bonus = match (dev_core, stem_core) {
+        (Some(dc), Some(sc)) if dc == sc => 20,
+        _ => 0,
+    };
+    let trailing_x = stem_base.len().saturating_sub(core.len()) as u32;
+    let exactness_tie = 9u32.saturating_sub(trailing_x);
+    Some(score * 10 + core_bonus + exactness_tie)
 }
 
 fn best_match(device: &str, files: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
-    let device = device.to_ascii_uppercase();
     files
         .filter_map(|path| {
-            let prefix = covered_prefix(path.file_stem()?.to_str()?);
-            (!prefix.is_empty() && device.starts_with(&prefix)).then_some((prefix.len(), path))
+            let stem = path.file_stem()?.to_str()?;
+            match_svd_score(device, stem).map(|score| (score, path))
         })
-        .max_by_key(|(length, _)| *length)
+        .max_by_key(|(score, _)| *score)
         .map(|(_, path)| path)
+}
+
+pub fn find_in_dir(device: &str, dir: &Path) -> Option<PathBuf> {
+    let listing = std::fs::read_dir(dir).ok()?;
+    let files = listing.flatten().map(|entry| entry.path()).filter(|path| {
+        path.is_file()
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("svd"))
+    });
+    best_match(device, files)
 }
 
 /// An SVD file for `device` from an installed copy of Ozone, if there is one.
@@ -572,6 +656,158 @@ pub fn find_for_device(device: &str) -> Option<PathBuf> {
         })
         .collect();
     best_match(device, files.into_iter())
+}
+
+fn find_in_st_tools(device: &str) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    let roots = ["/opt/st", "/opt/STMicroelectronics"];
+    #[cfg(windows)]
+    let roots = [r"C:\ST", r"C:\Program Files\STMicroelectronics"];
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            for sub in ["STMicroelectronics_CMSIS_SVD", "SVD", "CMSIS/SVD"] {
+                let dir = p.join(sub);
+                if dir.is_dir() {
+                    if let Some(found) = find_in_dir(device, &dir) {
+                        candidates.push(found);
+                    }
+                }
+            }
+        }
+    }
+    best_match(device, candidates.into_iter())
+}
+
+/// Find an SVD file for `device`, checking Haltd's global SVD cache first,
+/// then installed SEGGER Ozone and ST toolchain directories.
+pub fn find_for_device_with_cache(device: &str, cache_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(root) = cache_root {
+        if let Some(found) = find_in_dir(device, &root.join("svd").join("files")) {
+            return Some(found);
+        }
+        if let Some(found) = find_in_dir(device, &root.join("svd")) {
+            return Some(found);
+        }
+    }
+    find_for_device(device).or_else(|| find_in_st_tools(device))
+}
+
+/// Official `Open-CMSIS-Pack` repository name for an STM32 device, if recognized.
+pub fn stm32_dfp_repo(device: &str) -> Option<&'static str> {
+    let dev = normalize_device_name(device);
+    if !dev.starts_with("STM32") {
+        return None;
+    }
+    if dev.starts_with("STM32H7R") || dev.starts_with("STM32H7S") {
+        return Some("STM32H7RSxx_DFP");
+    }
+    if dev.starts_with("STM32WBA") {
+        return Some("STM32WBAxx_DFP");
+    }
+    if dev.starts_with("STM32WB") {
+        return Some("STM32WBxx_DFP");
+    }
+    if dev.starts_with("STM32WL") {
+        return Some("STM32WLxx_DFP");
+    }
+    match dev.get(5..7)? {
+        "C0" => Some("STM32C0xx_DFP"),
+        "F0" => Some("STM32F0xx_DFP"),
+        "F1" => Some("STM32F1xx_DFP"),
+        "F2" => Some("STM32F2xx_DFP"),
+        "F3" => Some("STM32F3xx_DFP"),
+        "F4" => Some("STM32F4xx_DFP"),
+        "F7" => Some("STM32F7xx_DFP"),
+        "G0" => Some("STM32G0xx_DFP"),
+        "G4" => Some("STM32G4xx_DFP"),
+        "H5" => Some("STM32H5xx_DFP"),
+        "H7" => Some("STM32H7xx_DFP"),
+        "L0" => Some("STM32L0xx_DFP"),
+        "L1" => Some("STM32L1xx_DFP"),
+        "L4" => Some("STM32L4xx_DFP"),
+        "L5" => Some("STM32L5xx_DFP"),
+        "N6" => Some("STM32N6xx_DFP"),
+        "U0" => Some("STM32U0xx_DFP"),
+        "U3" => Some("STM32U3xx_DFP"),
+        "U5" => Some("STM32U5xx_DFP"),
+        _ => None,
+    }
+}
+
+/// Deterministic official raw URLs to try for `device` when directory index is unavailable.
+pub fn candidate_remote_urls(device: &str) -> Vec<(String, String)> {
+    let dev = normalize_device_name(device);
+    let Some(repo) = stm32_dfp_repo(device) else {
+        return Vec::new();
+    };
+    let mut stems = Vec::new();
+    if dev.len() >= 9 {
+        let p9 = &dev[..9];
+        stems.push(p9.to_owned());
+        stems.push(format!("{p9}xx"));
+        if let Some(last) = p9.chars().last() {
+            if let Some(p7) = p9.get(..7) {
+                stems.push(format!("{p7}x{last}"));
+            }
+        }
+    }
+    if dev.len() >= 7 {
+        stems.push(format!("{}xx", &dev[..7]));
+    }
+    let mut urls = Vec::new();
+    for stem in &stems {
+        let filename = format!("{stem}.svd");
+        urls.push((
+            filename.clone(),
+            format!("https://raw.githubusercontent.com/Open-CMSIS-Pack/{repo}/main/CMSIS/SVD/{filename}"),
+        ));
+    }
+    for stem in &stems {
+        let filename = format!("{stem}.svd");
+        urls.push((
+            filename.clone(),
+            format!("https://raw.githubusercontent.com/cmsis-svd/cmsis-svd-data/main/data/STMicro/{filename}"),
+        ));
+    }
+    urls
+}
+
+/// Download an official SVD for `device` via system `curl` and cache it under `<cache_root>/svd/files/`.
+/// Intended as an on-demand fallback for CLI/headless callers without requiring TLS crates.
+pub fn fetch_and_cache_for_device(device: &str, cache_root: &Path) -> Option<PathBuf> {
+    if let Some(local) = find_for_device_with_cache(device, Some(cache_root)) {
+        return Some(local);
+    }
+    let files_dir = cache_root.join("svd").join("files");
+    std::fs::create_dir_all(&files_dir).ok()?;
+    for (filename, url) in candidate_remote_urls(device) {
+        let output = std::process::Command::new("curl")
+            .args(["-fsSL", "--connect-timeout", "4", "--max-time", "12", &url])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let Ok(xml) = String::from_utf8(output.stdout) else {
+            continue;
+        };
+        if parse(&xml).is_err() {
+            continue;
+        }
+        let tmp = files_dir.join(format!("{filename}.part.{}", std::process::id()));
+        let dest = files_dir.join(&filename);
+        if std::fs::write(&tmp, xml.as_bytes()).is_ok() && std::fs::rename(&tmp, &dest).is_ok() {
+            return Some(dest);
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -747,11 +983,53 @@ mod tests {
             "STM32F1xx.svd",
             "STM32F103xx.svd",
             "STM32H7xx.svd",
+            "STM32H7x3.svd",
+            "STM32H743.svd",
+            "STM32L4x6.svd",
+            "STM32H745_CM7.svd",
+            "STM32H745_CM4.svd",
             "nRF52.svd",
         ];
-        let found = best_match("stm32f103c8", files.iter().map(PathBuf::from));
-        assert_eq!(found, Some(PathBuf::from("STM32F103xx.svd")));
+        assert_eq!(
+            best_match("stm32f103c8", files.iter().map(PathBuf::from)),
+            Some(PathBuf::from("STM32F103xx.svd"))
+        );
+        assert_eq!(
+            best_match("STM32H723VG", files.iter().map(PathBuf::from)),
+            Some(PathBuf::from("STM32H7x3.svd"))
+        );
+        assert_eq!(
+            best_match("STM32H743ZI", files.iter().map(PathBuf::from)),
+            Some(PathBuf::from("STM32H743.svd"))
+        );
+        assert_eq!(
+            best_match("STM32L476RG", files.iter().map(PathBuf::from)),
+            Some(PathBuf::from("STM32L4x6.svd"))
+        );
+        assert_eq!(
+            best_match("STM32H745XI_M7", files.iter().map(PathBuf::from)),
+            Some(PathBuf::from("STM32H745_CM7.svd"))
+        );
         assert_eq!(best_match("LPC1768", files.iter().map(PathBuf::from)), None);
+    }
+
+    #[test]
+    fn finds_cached_svd_and_builds_official_urls() {
+        let tmp = std::env::temp_dir().join(format!("haltd-svd-test-{}", std::process::id()));
+        let files_dir = tmp.join("svd").join("files");
+        std::fs::create_dir_all(&files_dir).unwrap();
+        let h723 = files_dir.join("STM32H723.svd");
+        std::fs::write(&h723, SAMPLE).unwrap();
+        assert_eq!(
+            find_for_device_with_cache("STM32H723VG", Some(&tmp)),
+            Some(h723)
+        );
+        let urls = candidate_remote_urls("STM32H723VG");
+        assert!(urls.iter().any(|(name, url)| {
+            name == "STM32H723.svd"
+                && url == "https://raw.githubusercontent.com/Open-CMSIS-Pack/STM32H7xx_DFP/main/CMSIS/SVD/STM32H723.svd"
+        }));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

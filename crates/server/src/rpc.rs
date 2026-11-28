@@ -480,6 +480,33 @@ impl App {
                     .collect();
                 ok(json!({"items": items}))
             }
+            "symbols.resolve" => {
+                let arr = params["candidates"]
+                    .as_array()
+                    .ok_or_else(|| invalid("candidates must be an array"))?;
+                let candidates: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect();
+                if candidates.is_empty() {
+                    return Err(invalid("candidates must not be empty"));
+                }
+                if let Some(res) = sampler.resolve_candidates(&candidates) {
+                    ok(json!({
+                        "resolved": res.resolved,
+                        "matched": res.matched,
+                        "address": res.address.map(|a| format!("{a:#010x}")),
+                        "type": res.type_name,
+                    }))
+                } else {
+                    ok(json!({
+                        "resolved": candidates.last().cloned().unwrap_or_default(),
+                        "matched": false,
+                        "address": null,
+                        "type": null,
+                    }))
+                }
+            }
 
             "watch.add" => {
                 let rate = params["rateHz"].as_u64().map(|rate| rate as u32);

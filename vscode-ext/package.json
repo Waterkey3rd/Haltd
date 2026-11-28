@@ -2,7 +2,7 @@
   "name": "haltd-embedded",
   "displayName": "Haltd Embedded",
   "description": "STM32 debugging through a long-running J-Link backend",
-  "version": "0.8.2",
+  "version": "0.8.4",
   "publisher": "WaterKeyqwq",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,9 @@
     "onDebugResolve:haltd",
     "onLanguage:jsonc",
     "workspaceContains:.vscode/launch.json",
+    "onCommand:haltd.configureProject",
     "onCommand:haltd.selectDevice",
+    "onCommand:haltd.fetchSvd",
     "onView:haltd.liveWatch"
   ],
   "contributes": {
@@ -96,7 +98,7 @@
               },
               "runToMain": {
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "stopOnEntry": {
                 "type": "boolean",
@@ -216,12 +218,22 @@
           {
             "type": "haltd",
             "request": "launch",
-            "name": "Debug (J-Link)",
+            "name": "Haltd: Build & Debug",
             "device": "STM32H723VG",
             "interface": "SWD",
             "speed": 4000,
             "elf": "${workspaceFolder}/build/firmware.elf",
-            "flash": "changed"
+            "flash": "changed",
+            "runToMain": true
+          },
+          {
+            "type": "haltd",
+            "request": "attach",
+            "name": "Haltd: Attach",
+            "device": "STM32H723VG",
+            "interface": "SWD",
+            "speed": 4000,
+            "elf": "${workspaceFolder}/build/firmware.elf"
           }
         ]
       }
@@ -315,8 +327,16 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "haltd.configureProject",
+        "title": "Haltd: Configure Project"
+      },
+      {
         "command": "haltd.selectDevice",
         "title": "Haltd: Select Device"
+      },
+      {
+        "command": "haltd.fetchSvd",
+        "title": "Haltd: Fetch / Refresh Device SVD"
       },
       {
         "command": "haltd.addSelectionToWatch",
@@ -335,8 +355,8 @@
       },
       {
         "command": "haltd.addSelectionToWatch",
-        "key": "ctrl+h",
-        "mac": "cmd+h",
+        "key": "ctrl+w",
+        "mac": "cmd+w",
         "when": "inDebugMode && debugType == 'haltd' && editorTextFocus"
       },
       {
@@ -407,6 +427,16 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically reveal the Live Watch panel when a Haltd debug session starts."
+        },
+        "haltd.svd.autoDownload": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically download and cache CMSIS-SVD files from official repositories when no local SVD is configured."
+        },
+        "haltd.svd.mirrorPrefix": {
+          "type": "string",
+          "default": "",
+          "description": "Optional URL prefix prepended to raw.githubusercontent.com URLs when downloading SVD files (e.g. for proxies or mirrors)."
         }
       }
     },
@@ -562,7 +592,8 @@
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --external:bufferutil --external:utf-8-validate --outfile=dist/extension.js --sourcemap && esbuild src/webview/liveWatchApp.ts --bundle --platform=browser --format=iife --outfile=dist/liveWatchApp.js --sourcemap",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.webview.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "test": "esbuild src/__tests__/*.test.ts --bundle --platform=node --format=cjs --outdir=dist-test && node --test dist-test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

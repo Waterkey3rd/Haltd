@@ -28,7 +28,7 @@ const LAUNCH_SELECTOR: vscode.DocumentSelector = [
 
 const CLI_TIMEOUT_MS = 5000;
 
-function formatKiB(bytes: number): string {
+export function formatKiB(bytes: number): string {
   if (bytes === 0) {
     return "0 KiB";
   }
@@ -83,7 +83,7 @@ function execDevicesCli(executable: string): Promise<DeviceEntry[]> {
   });
 }
 
-class DeviceCatalog {
+export class DeviceCatalog {
   private cached: Promise<DeviceEntry[]> | undefined;
   private byUpperName: Map<string, DeviceEntry> | undefined;
 
@@ -351,8 +351,9 @@ export function registerDeviceAssist(
   onError: (error: unknown, context: string) => void = (err) => {
     void vscode.window.showErrorMessage(`Haltd: ${err instanceof Error ? err.message : String(err)}`);
   },
+  catalog: DeviceCatalog = new DeviceCatalog(context.extensionPath, getAdapterPath),
+  onDeviceSelected?: (entry: DeviceEntry) => void,
 ): void {
-  const catalog = new DeviceCatalog(context.extensionPath, getAdapterPath);
   const diagnostics = vscode.languages.createDiagnosticCollection("haltd");
 
   const validateDocument = async (document: vscode.TextDocument) => {
@@ -534,6 +535,7 @@ export function registerDeviceAssist(
       }
       await vscode.workspace.applyEdit(edit);
       await vscode.window.showTextDocument(targetDoc);
+      onDeviceSelected?.(pickedDevice.entry);
     }),
   );
 }

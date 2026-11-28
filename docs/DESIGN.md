@@ -459,7 +459,7 @@ channels:
 |---|---|
 | 调试适配器注册 | 注册 `type: "haltd"` 的 `DebugAdapterDescriptorFactory`（调用 `haltd dap`）与默认 `.haltd/project.yaml` 注入 |
 | 器件选型辅助（`deviceAssist.ts`） | 在 `launch.json` 中提供 J-Link 器件补全、内核/Flash/RAM 与内置 profile 悬停信息、未知型号警告与 `Haltd: Select Device`（优先调用 `haltd devices --json`，离线回退内置 `devices-stm32.json`） |
-| Live Watch（`liveWatch.ts`） | 调试侧栏 `haltd.liveWatch` TreeView，支持折叠/展开、改值、独立刷新率（0–5 Hz）与 `.haltd/state.json` 持久化；会话期间接管原生 Add to Watch 并提供 `Ctrl+G` / `Ctrl+H` 等快捷键 |
+| Live Watch（`liveWatch.ts`） | 底部 Panel / Pop out 独立标签页多列树表（`0–20 Hz`）、新鲜度着色、ELF 全局补全、动态指针/算术监视与 `.haltd/state.json` 持久化；会话期间接管原生 Add to Watch 并提供 `Ctrl+W`（Watch）/ `Ctrl+G`（Timeline）智能链式取词与 Namespace 自动补全 |
 | Timeline 与 RTT 面板 | `BackendPanel` 通过 Webview iframe 嵌入 `127.0.0.1:47110/timeline` 与 `/rtt`，通过 `postMessage`（`haltd:vscode-theme` / `haltd:request-theme` / `haltd:host-theme`）同步 VS Code 主题配色与 CSS 变量；RTT 通道 0 同时提供 VS Code `Pseudoterminal` |
 | Peripherals & FreeRTOS 视图 | `debugViews.ts` 通过 `haltd/peripherals`、`haltd/peripheralRead`、`haltd/peripheralWrite` 与 `haltd/rtosTasks` 渲染视图，停机自动刷新并对读副作用寄存器按需读取 |
 | 状态栏与 Build & Reload | 显示探针连接、SWD 速率、HSS 采样率与丢点计数、`DWT_CYCCNT` 周期差；`F6` 触发构建并调用 `haltd/reload` |

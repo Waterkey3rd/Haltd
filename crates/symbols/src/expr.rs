@@ -273,12 +273,18 @@ impl Parser<'_> {
         Ok(String::from_utf8_lossy(&self.text[start..self.position]).into_owned())
     }
 
-    /// `a::b<int, 3>::c`, keeping template arguments verbatim.
+    /// `::a::b<int, 3>::c`, keeping template arguments and optional leading `::`.
     fn path(&mut self) -> Result<String> {
         self.skip_spaces();
         let start = self.position;
+        if self.text[self.position..].starts_with(b"::") {
+            self.position += 2;
+        }
         loop {
-            self.identifier()?;
+            if let Err(error) = self.identifier() {
+                self.position = start;
+                return Err(error);
+            }
             self.skip_template_arguments();
             if self.text[self.position..].starts_with(b"::") {
                 self.position += 2;
@@ -431,14 +437,78 @@ pub enum Evaluated {
     },
 }
 
-impl SymbolDb {
-    fn find_variable(&self, name: &str) -> Result<Variable> {
-        let mut found = self.globals(name);
-        if found.is_empty() {
-            found = self.globals_by_suffix(name);
+/// Result of resolving an ordered list of scoped candidate expressions against DWARF symbols.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSymbolExpr {
+    pub resolved: String,
+    pub matched: bool,
+    pub address: Option<u32>,
+    pub type_name: Option<String>,
+}
+
+fn root_path_of(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Path(name) => Some(name.as_str()),
+        Expr::Member(inner, _)
+        | Expr::Arrow(inner, _)
+        | Expr::Index(inner, _)
+        | Expr::IndexBy(inner, _)
+        | Expr::Deref(inner)
+        | Expr::AddressOf(inner) => root_path_of(inner),
+        _ => None,
+    }
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b':'
+}
+
+fn replace_root_path(expr_str: &str, old_root: &str, new_root: &str) -> String {
+    let bytes = expr_str.as_bytes();
+    let mut offset = 0;
+    while let Some(pos) = expr_str[offset..].find(old_root) {
+        let start = offset + pos;
+        let end = start + old_root.len();
+        let left_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let right_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
+        if left_ok && right_ok {
+            let mut out = String::with_capacity(expr_str.len() + new_root.len());
+            out.push_str(&expr_str[..start]);
+            out.push_str(new_root);
+            out.push_str(&expr_str[end..]);
+            return out;
         }
+        offset = start + 1;
+    }
+    expr_str.to_owned()
+}
+
+impl SymbolDb {
+    fn unique_globals(&self, name: &str) -> Vec<Variable> {
+        let mut found = self.globals(name);
         found.sort_by_key(|v| v.addr);
         found.dedup_by_key(|v| v.addr);
+        found
+    }
+
+    fn unique_globals_by_suffix(&self, name: &str) -> Vec<Variable> {
+        let mut found = self.globals_by_suffix(name);
+        found.sort_by_key(|v| v.addr);
+        found.dedup_by_key(|v| v.addr);
+        found
+    }
+
+    fn find_variable(&self, name: &str) -> Result<Variable> {
+        let mut found = if let Some(exact) = name.strip_prefix("::") {
+            self.unique_globals(exact)
+        } else {
+            let list = self.unique_globals(name);
+            if list.is_empty() {
+                self.unique_globals_by_suffix(name)
+            } else {
+                list
+            }
+        };
         match found.len() {
             0 => Err(SymbolError::NotFound(name.to_owned())),
             1 => Ok(found.remove(0)),
@@ -451,6 +521,176 @@ impl SymbolDb {
                     .collect::<Vec<_>>()
                     .join(", "),
             }),
+        }
+    }
+
+    fn strip_references(&self, mut ty: TypeRef) -> Result<TypeRef> {
+        for _ in 0..4 {
+            let (resolved, info) = self.strip(ty)?;
+            match info.kind {
+                TypeKind::Reference(Some(target)) => ty = target,
+                TypeKind::Reference(None) => {
+                    return Err(SymbolError::Type("void reference".to_owned()))
+                }
+                _ => return Ok(resolved),
+            }
+        }
+        Ok(ty)
+    }
+
+    fn allows_virtual_children(&self, ty: TypeRef) -> bool {
+        self.qualified_type_name(ty)
+            .ok()
+            .flatten()
+            .is_some_and(|name| name.contains('<'))
+    }
+
+    fn static_chain_valid(&self, var_ty: TypeRef, expr: &Expr) -> Option<TypeRef> {
+        match expr {
+            Expr::Path(_) => Some(var_ty),
+            Expr::Member(base, field) => {
+                let base_ty = self.static_chain_valid(var_ty, base)?;
+                let target_ty = self.strip_references(base_ty).ok()?;
+                if let Some((_, member)) = self.find_member(target_ty, field).ok().flatten() {
+                    return member.ty;
+                }
+                let (resolved, info) = self.strip(target_ty).ok()?;
+                if matches!(info.kind, TypeKind::Struct { .. })
+                    && self.allows_virtual_children(resolved)
+                {
+                    return Some(resolved);
+                }
+                None
+            }
+            Expr::Arrow(base, field) => {
+                let base_ty = self.static_chain_valid(var_ty, base)?;
+                let ptr_ty = self.strip_references(base_ty).ok()?;
+                let (_, info) = self.strip(ptr_ty).ok()?;
+                let TypeKind::Pointer(Some(pointee)) = info.kind else {
+                    return None;
+                };
+                if let Some((_, member)) = self.find_member(pointee, field).ok().flatten() {
+                    return member.ty;
+                }
+                let (resolved, pinfo) = self.strip(pointee).ok()?;
+                if matches!(pinfo.kind, TypeKind::Struct { .. })
+                    && self.allows_virtual_children(resolved)
+                {
+                    return Some(resolved);
+                }
+                None
+            }
+            Expr::Index(base, _) | Expr::IndexBy(base, _) => {
+                let base_ty = self.static_chain_valid(var_ty, base)?;
+                let target_ty = self.strip_references(base_ty).ok()?;
+                let (resolved, info) = self.strip(target_ty).ok()?;
+                match info.kind {
+                    TypeKind::Array {
+                        element: Some(element),
+                        ..
+                    }
+                    | TypeKind::Pointer(Some(element)) => Some(element),
+                    TypeKind::Struct { .. } if self.allows_virtual_children(resolved) => {
+                        Some(resolved)
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Deref(base) => {
+                let base_ty = self.static_chain_valid(var_ty, base)?;
+                let target_ty = self.strip_references(base_ty).ok()?;
+                let (_, info) = self.strip(target_ty).ok()?;
+                match info.kind {
+                    TypeKind::Pointer(Some(target))
+                    | TypeKind::Array {
+                        element: Some(target),
+                        ..
+                    } => Some(target),
+                    _ => None,
+                }
+            }
+            Expr::AddressOf(base) => self.static_chain_valid(var_ty, base),
+            _ => None,
+        }
+    }
+
+    /// Resolve an ordered list of scoped candidate expressions without touching probe memory.
+    /// Exact namespace/class matches take precedence so global C symbols inside C++ scopes
+    /// are never accidentally shadowed, while unambiguous suffixes normalize to qualified names.
+    pub fn resolve_candidates(&self, candidates: &[String]) -> ResolvedSymbolExpr {
+        let Some(raw_fallback) = candidates.last() else {
+            return ResolvedSymbolExpr {
+                resolved: String::new(),
+                matched: false,
+                address: None,
+                type_name: None,
+            };
+        };
+
+        for candidate in candidates {
+            let Ok(parsed) = parse(candidate) else {
+                continue;
+            };
+            let Some(root) = root_path_of(&parsed) else {
+                continue;
+            };
+            let lookup = root.strip_prefix("::").unwrap_or(root);
+            let vars = self.unique_globals(lookup);
+            if vars.len() != 1 {
+                continue;
+            }
+            let var = &vars[0];
+            let Ok(Some(var_ty)) = self.variable_type(var) else {
+                continue;
+            };
+            let Some(leaf_ty) = self.static_chain_valid(var_ty, &parsed) else {
+                continue;
+            };
+            let resolved = if candidate.trim_start().starts_with("::")
+                && self.unique_globals_by_suffix(lookup).is_empty()
+            {
+                replace_root_path(candidate.trim(), root, lookup)
+            } else {
+                candidate.trim().to_owned()
+            };
+            return ResolvedSymbolExpr {
+                resolved,
+                matched: true,
+                address: Some(var.addr),
+                type_name: Some(self.type_name(leaf_ty)),
+            };
+        }
+
+        if !raw_fallback.trim_start().starts_with("::") {
+            if let Ok(parsed) = parse(raw_fallback) {
+                if let Some(root) = root_path_of(&parsed) {
+                    let vars = self.unique_globals_by_suffix(root);
+                    if vars.len() == 1 {
+                        let var = &vars[0];
+                        if let Ok(Some(var_ty)) = self.variable_type(var) {
+                            if let Some(leaf_ty) = self.static_chain_valid(var_ty, &parsed) {
+                                return ResolvedSymbolExpr {
+                                    resolved: replace_root_path(
+                                        raw_fallback.trim(),
+                                        root,
+                                        &var.name,
+                                    ),
+                                    matched: true,
+                                    address: Some(var.addr),
+                                    type_name: Some(self.type_name(leaf_ty)),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ResolvedSymbolExpr {
+            resolved: raw_fallback.trim().to_owned(),
+            matched: false,
+            address: None,
+            type_name: None,
         }
     }
 
@@ -884,6 +1124,12 @@ mod tests {
             parse("ns::Buf<float, 4>::s_count").unwrap(),
             Expr::Path("ns::Buf<float, 4>::s_count".to_owned())
         );
+        assert_eq!(
+            parse("::g_counter.count").unwrap(),
+            Expr::Member(path("::g_counter"), "count".to_owned())
+        );
+        assert!(parse("::").is_err());
+        assert!(parse("ns::").is_err());
     }
 
     #[test]

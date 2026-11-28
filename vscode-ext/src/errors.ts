@@ -368,13 +368,14 @@ export class DiagnosticsManager implements vscode.Disposable {
   private async showDiagnosticToast(diag: HaltdDiagnostic, context: string): Promise<void> {
     const firstCause = diag.causes[0] ? `（可能原因：${diag.causes[0]}）` : "";
     const text = `Haltd [${diag.code}]: ${diag.message}${firstCause}`;
-    const choice = await vscode.window.showErrorMessage(
-      text,
-      "查看详情",
-      "打开日志",
-      "复制诊断信息",
-    );
-    if (choice === "查看详情") {
+    const buttons =
+      diag.code === "E_CONFIG" || diag.code === "E_ELF"
+        ? ["一键配置项目", "查看详情", "打开日志"]
+        : ["查看详情", "打开日志", "复制诊断信息"];
+    const choice = await vscode.window.showErrorMessage(text, ...buttons);
+    if (choice === "一键配置项目") {
+      await vscode.commands.executeCommand("haltd.configureProject");
+    } else if (choice === "查看详情") {
       this.outputChannel.show(true);
     } else if (choice === "打开日志") {
       this.outputChannel.show(true);

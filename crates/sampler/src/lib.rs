@@ -666,6 +666,11 @@ impl Sampler {
         bound.binding.db.complete_globals(query, limit)
     }
 
+    pub fn resolve_candidates(&self, candidates: &[String]) -> Option<symbols::ResolvedSymbolExpr> {
+        let bound = self.bound()?;
+        Some(bound.binding.db.resolve_candidates(candidates))
+    }
+
     fn status(state: &State, def: &SeriesDef) -> SeriesStatus {
         SeriesStatus {
             series_id: def.series.id(),

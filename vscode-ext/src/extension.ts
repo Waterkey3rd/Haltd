@@ -10,9 +10,12 @@ import {
   TasksView,
   type PeripheralNode,
 } from "./debugViews";
-import { registerDeviceAssist } from "./deviceAssist";
+import { DeviceCatalog, registerDeviceAssist } from "./deviceAssist";
 import { DiagnosticsManager } from "./errors";
+import { resolveEditorExpression } from "./exprExtract";
 import { LiveWatchController } from "./liveWatch";
+import { provideWizardConfigurations, runConfigureProject } from "./projectSetup";
+import { SvdCacheManager } from "./svdCache";
 
 const DEBUG_TYPE = "haltd";
 const STATUS_MS = 1000;
@@ -172,21 +175,21 @@ interface VariableContext {
 }
 
 /** The expression a command applies to: a Variables entry, the editor's
- *  selection, the word under the cursor, or else whatever the user types. */
-async function chooseExpression(context?: VariableContext): Promise<string | undefined> {
+ *  selection, an automatically expanded chain + namespace expression at the
+ *  cursor, or else whatever the user types. */
+async function chooseExpression(
+  client: DataClient,
+  context?: VariableContext,
+): Promise<string | undefined> {
   const fromVariables = context?.variable?.evaluateName ?? context?.variable?.name;
   if (fromVariables) {
     return fromVariables;
   }
   const editor = vscode.window.activeTextEditor;
   if (editor) {
-    const selected = editor.document.getText(editor.selection).trim();
-    if (selected) {
-      return selected;
-    }
-    const word = editor.document.getWordRangeAtPosition(editor.selection.active);
-    if (word) {
-      return editor.document.getText(word);
+    const resolved = await resolveEditorExpression(editor, client);
+    if (resolved) {
+      return resolved;
     }
   }
   return vscode.window.showInputBox({ prompt: "Expression, e.g. g_state.items[2].gain" });
@@ -538,9 +541,25 @@ class RttTerminal {
   }
 }
 
-/** Fills in the project file location and checks launch prerequisites. */
+/** Fills in the project file location, resolves cached SVD, and checks launch prerequisites. */
 class ConfigurationProvider implements vscode.DebugConfigurationProvider {
-  constructor(private readonly diagnostics: DiagnosticsManager) {}
+  constructor(
+    private readonly diagnostics: DiagnosticsManager,
+    private readonly catalog: DeviceCatalog,
+    private readonly svdCache: SvdCacheManager,
+    private readonly peripherals: PeripheralsView,
+  ) {}
+
+  provideDebugConfigurations(
+    folder: vscode.WorkspaceFolder | undefined,
+  ): vscode.ProviderResult<vscode.DebugConfiguration[]> {
+    return provideWizardConfigurations(
+      folder,
+      this.catalog,
+      this.svdCache,
+      (msg) => this.diagnostics.logInfo(msg),
+    );
+  }
 
   resolveDebugConfiguration(
     folder: vscode.WorkspaceFolder | undefined,
@@ -564,6 +583,30 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
     if (!this.diagnostics.preflightLaunch(configuration)) {
       return undefined;
     }
+    if (!configuration.svd && typeof configuration.device === "string" && configuration.device.trim()) {
+      const device = configuration.device.trim();
+      const localSvd = this.svdCache.findLocal(device);
+      if (localSvd) {
+        configuration.svd = localSvd;
+        this.diagnostics.logInfo(`Using cached/local SVD for ${device}: ${localSvd}`);
+      } else if (this.svdCache.autoDownloadEnabled()) {
+        void this.svdCache.ensureForDevice(device).then(async (fetchedPath) => {
+          if (!fetchedPath) {
+            return;
+          }
+          const active = vscode.debug.activeDebugSession;
+          if (active && active.type === DEBUG_TYPE) {
+            try {
+              await active.customRequest("haltd/reloadSvd", { path: fetchedPath });
+              this.peripherals.refresh();
+              this.diagnostics.logInfo(`Hot-loaded fetched SVD for ${device}: ${fetchedPath}`);
+            } catch {
+              // Session may have ended before fetch completed; cached on disk for next run.
+            }
+          }
+        });
+      }
+    }
     return configuration;
   }
 }
@@ -586,8 +629,20 @@ export function activate(context: vscode.ExtensionContext): void {
   const report = (error: unknown, source = "Command"): void => {
     void diagnostics.reportError(error, source);
   };
+  const catalog = new DeviceCatalog(context.extensionPath, () => adapterPath(context.extensionPath));
+  const svdCache = new SvdCacheManager((msg) => diagnostics.logInfo(msg));
 
-  registerDeviceAssist(context, () => adapterPath(context.extensionPath), report);
+  registerDeviceAssist(
+    context,
+    () => adapterPath(context.extensionPath),
+    report,
+    catalog,
+    (entry) => {
+      if (svdCache.autoDownloadEnabled()) {
+        void svdCache.ensureForDevice(entry.name, { manufacturer: entry.manufacturer });
+      }
+    },
+  );
   const status = new StatusBar(client);
   const timeline = new BackendPanel("Timeline", BACKEND_URL, client, report);
   const rttPanel = new BackendPanel("RTT", RTT_URL, client, report);
@@ -616,7 +671,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let hidePending = false;
 
   const addFromDebugger = async (item?: VariableContext) => {
-    const expression = await chooseExpression(item);
+    const expression = await chooseExpression(client, item);
     if (expression) {
       client.start();
       await liveWatch.add(expression, true);
@@ -689,7 +744,10 @@ export function activate(context: vscode.ExtensionContext): void {
         tasks.refresh();
       }
     }),
-    vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new ConfigurationProvider(diagnostics)),
+    vscode.debug.registerDebugConfigurationProvider(
+      DEBUG_TYPE,
+      new ConfigurationProvider(diagnostics, catalog, svdCache, peripherals),
+    ),
     vscode.debug.registerDebugAdapterTrackerFactory(DEBUG_TYPE, diagnostics.createTrackerFactory()),
     vscode.debug.registerDebugAdapterTrackerFactory(DEBUG_TYPE, runStateTracker),
     vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new AdapterFactory(context.extensionPath)),
@@ -747,6 +805,48 @@ export function activate(context: vscode.ExtensionContext): void {
         peripherals.write(node).catch((e) => report(e, "Write Peripheral"));
       }
     }),
+    vscode.commands.registerCommand("haltd.configureProject", () =>
+      runConfigureProject(catalog, svdCache, (msg) => diagnostics.logInfo(msg)).catch((e) =>
+        report(e, "Configure Project"),
+      ),
+    ),
+    vscode.commands.registerCommand("haltd.fetchSvd", async () => {
+      try {
+        let device = vscode.debug.activeDebugSession?.configuration.device as string | undefined;
+        if (!device) {
+          const ordered = await catalog.list();
+          const picked = await vscode.window.showQuickPick(
+            ordered.map((d) => ({ label: d.name, description: d.core, entry: d })),
+            { placeHolder: "Select MCU to fetch/refresh official CMSIS-SVD", matchOnDescription: true },
+          );
+          if (!picked) {
+            return;
+          }
+          device = picked.entry.name;
+        }
+        const svdPath = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Haltd: Fetching official CMSIS-SVD for ${device}...`,
+          },
+          () => svdCache.ensureForDevice(device!, { forceRefresh: true }),
+        );
+        if (!svdPath) {
+          void vscode.window.showWarningMessage(
+            `Haltd: could not fetch an official CMSIS-SVD file for ${device}`,
+          );
+          return;
+        }
+        const active = vscode.debug.activeDebugSession;
+        if (active && active.type === DEBUG_TYPE) {
+          await active.customRequest("haltd/reloadSvd", { path: svdPath });
+          peripherals.refresh();
+        }
+        void vscode.window.showInformationMessage(`Haltd: cached SVD at ${svdPath}`);
+      } catch (error) {
+        report(error, "Fetch SVD");
+      }
+    }),
     vscode.commands.registerCommand("haltd.addToWatch", async (item?: VariableContext) => {
       const fromVariables = item?.variable?.evaluateName ?? item?.variable?.name;
       if (fromVariables) {
@@ -755,11 +855,9 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       const editor = vscode.window.activeTextEditor;
-      if (editor && editor.document === vscode.window.activeTextEditor?.document && vscode.debug.activeDebugSession?.type === DEBUG_TYPE) {
-        const selected = editor.document.getText(editor.selection).trim();
-        const word = !selected ? editor.document.getWordRangeAtPosition(editor.selection.active) : undefined;
-        const expr = selected || (word ? editor.document.getText(word) : undefined);
-        if (expr && item) {
+      if (editor && item && vscode.debug.activeDebugSession?.type === DEBUG_TYPE) {
+        const expr = await resolveEditorExpression(editor, client);
+        if (expr) {
           client.start();
           await liveWatch.add(expr, true).catch((e) => report(e, "Add to Watch"));
           return;
@@ -783,13 +881,13 @@ export function activate(context: vscode.ExtensionContext): void {
       liveWatch.configureColumnsPicker().catch((e) => report(e, "Configure Live Watch Columns")),
     ),
     vscode.commands.registerCommand("haltd.addToTimeline", async (item?: VariableContext) => {
-      const expression = await chooseExpression(item);
+      const expression = await chooseExpression(client, item);
       if (expression) {
         await addToTimelineByHss(client, expression, timeline).catch((e) => report(e, "Add to Timeline"));
       }
     }),
     vscode.commands.registerCommand("haltd.addSelectionToTimeline", async () => {
-      const expression = await chooseExpression();
+      const expression = await chooseExpression(client);
       if (expression) {
         await addToTimelineByHss(client, expression, timeline).catch((e) => report(e, "Add Selection to Timeline"));
       }

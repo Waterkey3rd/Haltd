@@ -645,3 +645,41 @@ fn completes_globals_and_encodes_enum_names() {
     assert_eq!(current, "Run");
     assert!(run_val <= 16);
 }
+
+#[test]
+fn resolves_scoped_candidates_and_global_c_fallbacks() {
+    let db = load();
+
+    // Inner namespace candidate matches directly without touching global fallback.
+    let scoped = db.resolve_candidates(&[
+        "fw::bump::g_state.mode".to_owned(),
+        "fw::g_state.mode".to_owned(),
+        "g_state.mode".to_owned(),
+    ]);
+    assert!(scoped.matched);
+    assert_eq!(scoped.resolved, "fw::g_state.mode");
+    assert!(scoped.address.is_some());
+
+    // Global C symbol referenced from inside a C++ namespace skips invalid prefixes.
+    let c_global = db.resolve_candidates(&["fw::g_counter".to_owned(), "g_counter".to_owned()]);
+    assert!(c_global.matched);
+    assert_eq!(c_global.resolved, "g_counter");
+
+    // Unique unqualified name normalizes to its qualified DWARF path.
+    let normalized = db.resolve_candidates(&["s_count".to_owned()]);
+    assert!(normalized.matched);
+    assert_eq!(normalized.resolved, "fw::Widget::s_count");
+
+    // Nonexistent member prevents false match on a prefix.
+    let bad_member = db.resolve_candidates(&[
+        "fw::g_state.no_such_field".to_owned(),
+        "g_state.no_such_field".to_owned(),
+    ]);
+    assert!(!bad_member.matched);
+    assert_eq!(bad_member.resolved, "g_state.no_such_field");
+
+    // Explicit global `::` prevents falling back to `fw::g_state`.
+    let explicit = db.resolve_candidates(&["::g_state".to_owned()]);
+    assert!(!explicit.matched);
+    assert_eq!(explicit.resolved, "::g_state");
+}
